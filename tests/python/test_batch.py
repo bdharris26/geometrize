@@ -3,8 +3,6 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from PIL import Image
-
 from geometrize_py.batch import BatchManifest, load_batch_manifest
 from geometrize_py.jobs import ExportFormat, ShapeType
 
@@ -50,14 +48,6 @@ class BatchManifestTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "job 0"):
                 load_batch_manifest(manifest_path)
-
-
-def write_tiny_image(path: Path) -> None:
-    image = Image.new("RGBA", (4, 4), (0, 0, 0, 255))
-    for x in range(2, 4):
-        for y in range(4):
-            image.putpixel((x, y), (255, 255, 255, 255))
-    image.save(path)
 
 
 if __name__ == "__main__":

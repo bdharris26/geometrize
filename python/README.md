@@ -41,8 +41,44 @@ Write reusable shape data instead of a PNG:
 C:\LocalRepos\geometrize\.venv\Scripts\geometrize-py.exe run --latest-screenshot --output C:\LocalRepos\geometrize\outputs\screenshot_4000_triangles.json --shape triangle --count 4000 --export-format json
 ```
 
+Write SVG:
+
+```powershell
+C:\LocalRepos\geometrize\.venv\Scripts\geometrize-py.exe run --latest-screenshot --output C:\LocalRepos\geometrize\outputs\screenshot_4000_triangles.svg --shape triangle --count 4000 --export-format svg
+```
+
 Run from a JSON job manifest:
 
 ```powershell
 C:\LocalRepos\geometrize\.venv\Scripts\geometrize-py.exe run --job C:\LocalRepos\geometrize\job.json --dry-run
+```
+
+Run a batch manifest:
+
+```powershell
+C:\LocalRepos\geometrize\.venv\Scripts\geometrize-py.exe batch --manifest C:\LocalRepos\geometrize\batch.json
+```
+
+Batch manifests use version `1`, optional shared defaults, and a `jobs` list:
+
+```json
+{
+  "version": 1,
+  "defaults": {
+    "shape": "triangle",
+    "count": 4000,
+    "export_format": "png"
+  },
+  "jobs": [
+    {
+      "input_path": "C:/images/a.png",
+      "output_path": "C:/out/a.png"
+    },
+    {
+      "input_path": "C:/images/b.png",
+      "output_path": "C:/out/b.svg",
+      "export_format": "svg"
+    }
+  ]
+}
 ```

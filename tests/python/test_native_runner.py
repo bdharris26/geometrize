@@ -3,10 +3,9 @@ import unittest
 import json
 from pathlib import Path
 
-from PIL import Image
-
 from geometrize_py.jobs import ExportFormat, GeometrizeJob, ShapeType
 from geometrize_py.native import NativeRunner
+from helpers import write_tiny_split_image
 
 
 class NativeRunnerTests(unittest.TestCase):
@@ -14,11 +13,7 @@ class NativeRunnerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             input_path = Path(root) / "input.png"
             output_path = Path(root) / "output.png"
-            image = Image.new("RGBA", (4, 4), (0, 0, 0, 255))
-            for x in range(2, 4):
-                for y in range(4):
-                    image.putpixel((x, y), (255, 255, 255, 255))
-            image.save(input_path)
+            write_tiny_split_image(input_path)
 
             result = NativeRunner().run(
                 GeometrizeJob(
@@ -40,11 +35,7 @@ class NativeRunnerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             input_path = Path(root) / "input.png"
             output_path = Path(root) / "output.json"
-            image = Image.new("RGBA", (4, 4), (0, 0, 0, 255))
-            for x in range(2, 4):
-                for y in range(4):
-                    image.putpixel((x, y), (255, 255, 255, 255))
-            image.save(input_path)
+            write_tiny_split_image(input_path)
 
             result = NativeRunner().run(
                 GeometrizeJob(
@@ -70,11 +61,7 @@ class NativeRunnerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             input_path = Path(root) / "input.png"
             output_path = Path(root) / "output.svg"
-            image = Image.new("RGBA", (4, 4), (0, 0, 0, 255))
-            for x in range(2, 4):
-                for y in range(4):
-                    image.putpixel((x, y), (255, 255, 255, 255))
-            image.save(input_path)
+            write_tiny_split_image(input_path)
 
             result = NativeRunner().run(
                 GeometrizeJob(

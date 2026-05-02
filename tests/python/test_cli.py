@@ -6,7 +6,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 from geometrize_py.cli import main
-from test_batch import write_tiny_image
+from helpers import write_tiny_split_image
 
 
 class CliTests(unittest.TestCase):
@@ -46,16 +46,10 @@ class CliTests(unittest.TestCase):
         self.assertEqual(plan["runner"], "dry-run")
 
     def test_run_writes_png_output(self):
-        from PIL import Image
-
         with tempfile.TemporaryDirectory() as root:
             input_path = Path(root) / "source.png"
             output_path = Path(root) / "out.png"
-            image = Image.new("RGBA", (4, 4), (0, 0, 0, 255))
-            for x in range(2, 4):
-                for y in range(4):
-                    image.putpixel((x, y), (255, 255, 255, 255))
-            image.save(input_path)
+            write_tiny_split_image(input_path)
 
             exit_code, stdout, stderr = self.run_cli(
                 [
@@ -85,16 +79,10 @@ class CliTests(unittest.TestCase):
         self.assertLessEqual(result["shapes_written"], 1)
 
     def test_run_writes_json_output(self):
-        from PIL import Image
-
         with tempfile.TemporaryDirectory() as root:
             input_path = Path(root) / "source.png"
             output_path = Path(root) / "out.json"
-            image = Image.new("RGBA", (4, 4), (0, 0, 0, 255))
-            for x in range(2, 4):
-                for y in range(4):
-                    image.putpixel((x, y), (255, 255, 255, 255))
-            image.save(input_path)
+            write_tiny_split_image(input_path)
 
             exit_code, stdout, stderr = self.run_cli(
                 [
@@ -128,16 +116,10 @@ class CliTests(unittest.TestCase):
         self.assertLessEqual(len(payload["shapes"]), 1)
 
     def test_run_writes_svg_output(self):
-        from PIL import Image
-
         with tempfile.TemporaryDirectory() as root:
             input_path = Path(root) / "source.png"
             output_path = Path(root) / "out.svg"
-            image = Image.new("RGBA", (4, 4), (0, 0, 0, 255))
-            for x in range(2, 4):
-                for y in range(4):
-                    image.putpixel((x, y), (255, 255, 255, 255))
-            image.save(input_path)
+            write_tiny_split_image(input_path)
 
             exit_code, stdout, stderr = self.run_cli(
                 [
@@ -224,8 +206,8 @@ class CliTests(unittest.TestCase):
             input_b = root_path / "b.png"
             output_a = root_path / "a_out.png"
             output_b = root_path / "b_out.svg"
-            write_tiny_image(input_a)
-            write_tiny_image(input_b)
+            write_tiny_split_image(input_a)
+            write_tiny_split_image(input_b)
             manifest_path = root_path / "batch.json"
             manifest_path.write_text(
                 json.dumps(
@@ -262,7 +244,7 @@ class CliTests(unittest.TestCase):
             root_path = Path(root)
             input_ok = root_path / "ok.png"
             output_ok = root_path / "ok_out.png"
-            write_tiny_image(input_ok)
+            write_tiny_split_image(input_ok)
             manifest_path = root_path / "batch.json"
             manifest_path.write_text(
                 json.dumps(
@@ -300,7 +282,7 @@ class CliTests(unittest.TestCase):
             root_path = Path(root)
             input_ok = root_path / "ok.png"
             output_ok = root_path / "ok_out.png"
-            write_tiny_image(input_ok)
+            write_tiny_split_image(input_ok)
             manifest_path = root_path / "batch.json"
             manifest_path.write_text(
                 json.dumps(
