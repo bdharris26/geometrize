@@ -20,9 +20,10 @@ def load_job(path: Path) -> GeometrizeJob:
         if field not in data:
             raise ValueError(f"job manifest is missing required field: {field}")
 
+    base_dir = path.parent
     return GeometrizeJob(
-        input_path=Path(str(data["input_path"])),
-        output_path=Path(str(data["output_path"])),
+        input_path=_resolve_manifest_path(base_dir, data["input_path"]),
+        output_path=_resolve_manifest_path(base_dir, data["output_path"]),
         shape=ShapeType.from_cli(str(data["shape"])),
         count=int(data["count"]),
         export_format=ExportFormat.from_cli(str(data.get("export_format", ExportFormat.PNG.value))),
@@ -38,6 +39,13 @@ def save_job(job: GeometrizeJob, path: Path) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(job_to_dict(job), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _resolve_manifest_path(base_dir: Path, value: Any) -> Path:
+    path = Path(str(value))
+    if path.is_absolute():
+        return path
+    return base_dir / path
 
 
 def job_to_dict(job: GeometrizeJob) -> dict[str, Any]:

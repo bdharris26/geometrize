@@ -50,6 +50,28 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(job.shape, ShapeType.ROTATED_RECTANGLE)
         self.assertEqual(job.export_format, ExportFormat.PNG)
 
+    def test_load_job_resolves_relative_paths_from_manifest_directory(self):
+        with tempfile.TemporaryDirectory() as root:
+            manifest_dir = Path(root) / "manifests"
+            manifest_dir.mkdir()
+            manifest_path = manifest_dir / "job.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "input_path": "inputs/source.png",
+                        "output_path": "outputs/result.svg",
+                        "shape": "triangle",
+                        "count": 10,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            job = load_job(manifest_path)
+
+        self.assertEqual(job.input_path, manifest_dir / "inputs" / "source.png")
+        self.assertEqual(job.output_path, manifest_dir / "outputs" / "result.svg")
+
     def test_load_job_rejects_missing_required_fields(self):
         with tempfile.TemporaryDirectory() as root:
             manifest_path = Path(root) / "job.json"
