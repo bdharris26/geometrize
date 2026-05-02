@@ -39,3 +39,8 @@
 
 # Python bytecode
 *.pyc
+__pycache__/
+
+# Python virtual environments
+.venv/
+*.egg-info/
