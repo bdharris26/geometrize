@@ -1,6 +1,6 @@
 [build-system]
-requires = ["setuptools>=69"]
-build-backend = "setuptools.build_meta"
+requires = ["scikit-build-core>=0.12", "pybind11>=3"]
+build-backend = "scikit_build_core.build"
 
 [project]
 name = "geometrize-py"
@@ -12,8 +12,5 @@ dependencies = ["Pillow>=10"]
 [project.scripts]
 geometrize-py = "geometrize_py.cli:entrypoint"
 
-[tool.setuptools]
-package-dir = {"" = "python"}
-
-[tool.setuptools.packages.find]
-where = ["python"]
+[tool.scikit-build]
+wheel.packages = ["python/geometrize_py"]

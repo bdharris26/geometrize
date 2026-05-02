@@ -10,6 +10,14 @@ class NativeCoreUnavailable(RuntimeError):
     """Raised when the C++ Geometrize core has not been bound yet."""
 
 
+def is_native_core_available() -> bool:
+    try:
+        import geometrize_py._native  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
 @dataclass(frozen=True, slots=True)
 class RunResult:
     output_path: Path
