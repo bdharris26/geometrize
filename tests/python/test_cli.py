@@ -44,11 +44,17 @@ class CliTests(unittest.TestCase):
         self.assertEqual(plan["export_format"], "png")
         self.assertEqual(plan["runner"], "dry-run")
 
-    def test_run_without_native_core_fails_clearly(self):
+    def test_run_writes_png_output(self):
+        from PIL import Image
+
         with tempfile.TemporaryDirectory() as root:
             input_path = Path(root) / "source.png"
             output_path = Path(root) / "out.png"
-            input_path.write_bytes(b"not a real image yet")
+            image = Image.new("RGBA", (4, 4), (0, 0, 0, 255))
+            for x in range(2, 4):
+                for y in range(4):
+                    image.putpixel((x, y), (255, 255, 255, 255))
+            image.save(input_path)
 
             exit_code, stdout, stderr = self.run_cli(
                 [
@@ -58,15 +64,24 @@ class CliTests(unittest.TestCase):
                     "--output",
                     str(output_path),
                     "--shape",
-                    "triangle",
+                    "rectangle",
                     "--count",
-                    "4000",
+                    "1",
+                    "--candidate-shape-count",
+                    "10",
+                    "--max-shape-mutations",
+                    "25",
+                    "--max-threads",
+                    "1",
                 ]
             )
 
-        self.assertEqual(exit_code, 2)
-        self.assertEqual(stdout, "")
-        self.assertIn("native core", stderr.lower())
+            self.assertTrue(output_path.exists())
+
+        self.assertEqual(exit_code, 0, stderr)
+        result = json.loads(stdout)
+        self.assertEqual(result["output_path"], str(output_path))
+        self.assertLessEqual(result["shapes_written"], 1)
 
     def test_run_dry_run_accepts_job_manifest(self):
         with tempfile.TemporaryDirectory() as root:
