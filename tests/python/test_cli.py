@@ -6,6 +6,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 from geometrize_py.cli import main
+from test_batch import write_tiny_image
 
 
 class CliTests(unittest.TestCase):
@@ -191,6 +192,144 @@ class CliTests(unittest.TestCase):
         plan = json.loads(stdout)
         self.assertEqual(plan["shape"], "triangle")
         self.assertEqual(plan["count"], 4000)
+
+    def test_batch_dry_run_prints_resolved_plans(self):
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root)
+            manifest_path = root_path / "batch.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "defaults": {"shape": "triangle", "count": 5, "export_format": "svg"},
+                        "jobs": [{"input_path": "input.png", "output_path": "out.svg"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            exit_code, stdout, stderr = self.run_cli(["batch", "--manifest", str(manifest_path), "--dry-run"])
+
+        self.assertEqual(exit_code, 0, stderr)
+        payload = json.loads(stdout)
+        self.assertEqual(payload["jobs_total"], 1)
+        self.assertEqual(payload["plans"][0]["input_path"], str(root_path / "input.png"))
+        self.assertEqual(payload["plans"][0]["shape"], "triangle")
+        self.assertEqual(payload["plans"][0]["export_format"], "svg")
+
+    def test_batch_writes_png_and_svg_outputs(self):
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root)
+            input_a = root_path / "a.png"
+            input_b = root_path / "b.png"
+            output_a = root_path / "a_out.png"
+            output_b = root_path / "b_out.svg"
+            write_tiny_image(input_a)
+            write_tiny_image(input_b)
+            manifest_path = root_path / "batch.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "defaults": {
+                            "shape": "rectangle",
+                            "count": 1,
+                            "candidate_shape_count": 10,
+                            "max_shape_mutations": 25,
+                            "max_threads": 1,
+                        },
+                        "jobs": [
+                            {"input_path": "a.png", "output_path": "a_out.png"},
+                            {"input_path": "b.png", "output_path": "b_out.svg", "export_format": "svg"},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            exit_code, stdout, stderr = self.run_cli(["batch", "--manifest", str(manifest_path)])
+
+            self.assertTrue(output_a.exists())
+            self.assertTrue(output_b.exists())
+
+        self.assertEqual(exit_code, 0, stderr)
+        payload = json.loads(stdout)
+        self.assertEqual(payload["jobs_succeeded"], 2)
+        self.assertEqual(payload["jobs_failed"], 0)
+
+    def test_batch_continue_on_error_returns_1(self):
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root)
+            input_ok = root_path / "ok.png"
+            output_ok = root_path / "ok_out.png"
+            write_tiny_image(input_ok)
+            manifest_path = root_path / "batch.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "defaults": {
+                            "shape": "rectangle",
+                            "count": 1,
+                            "candidate_shape_count": 10,
+                            "max_shape_mutations": 25,
+                            "max_threads": 1,
+                        },
+                        "jobs": [
+                            {"input_path": "missing.png", "output_path": "missing_out.png"},
+                            {"input_path": "ok.png", "output_path": "ok_out.png"},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            exit_code, stdout, stderr = self.run_cli(
+                ["batch", "--manifest", str(manifest_path), "--continue-on-error"]
+            )
+
+            self.assertTrue(output_ok.exists())
+
+        self.assertEqual(exit_code, 1, stderr)
+        payload = json.loads(stdout)
+        self.assertEqual(payload["jobs_succeeded"], 1)
+        self.assertEqual(payload["jobs_failed"], 1)
+
+    def test_batch_stops_on_first_error_without_continue(self):
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root)
+            input_ok = root_path / "ok.png"
+            output_ok = root_path / "ok_out.png"
+            write_tiny_image(input_ok)
+            manifest_path = root_path / "batch.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "defaults": {
+                            "shape": "rectangle",
+                            "count": 1,
+                            "candidate_shape_count": 10,
+                            "max_shape_mutations": 25,
+                            "max_threads": 1,
+                        },
+                        "jobs": [
+                            {"input_path": "missing.png", "output_path": "missing_out.png"},
+                            {"input_path": "ok.png", "output_path": "ok_out.png"},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            exit_code, stdout, stderr = self.run_cli(["batch", "--manifest", str(manifest_path)])
+
+            self.assertFalse(output_ok.exists())
+
+        self.assertEqual(exit_code, 2, stderr)
+        payload = json.loads(stdout)
+        self.assertEqual(payload["jobs_succeeded"], 0)
+        self.assertEqual(payload["jobs_failed"], 1)
 
     def test_inspect_prints_image_metadata(self):
         from PIL import Image

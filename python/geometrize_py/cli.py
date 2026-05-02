@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 from typing import Sequence
 
+from geometrize_py.batch import load_batch_manifest
 from geometrize_py.images import inspect_image
 from geometrize_py.jobs import ExportFormat, GeometrizeJob, ShapeType, derive_output_path
 from geometrize_py.manifests import load_job
@@ -24,6 +25,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _latest_screenshot()
         if args.command == "inspect":
             return _inspect(args)
+        if args.command == "batch":
+            return _batch(args)
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -60,6 +63,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     inspect = subparsers.add_parser("inspect", help="Print image metadata as JSON.")
     inspect.add_argument("input", type=Path, help="Image path to inspect.")
+
+    batch = subparsers.add_parser("batch", help="Run or preview a batch manifest.")
+    batch.add_argument("--manifest", type=Path, required=True, help="Batch JSON manifest.")
+    batch.add_argument("--dry-run", action="store_true", help="Print resolved job plans without invoking native code.")
+    batch.add_argument("--continue-on-error", action="store_true", help="Keep running after individual job failures.")
     return parser
 
 
@@ -96,6 +104,57 @@ def _inspect(args: argparse.Namespace) -> int:
     info = inspect_image(args.input)
     print(json.dumps(info.as_dict(), indent=2, sort_keys=True))
     return 0
+
+
+def _batch(args: argparse.Namespace) -> int:
+    manifest = load_batch_manifest(args.manifest)
+    if args.dry_run:
+        print(
+            json.dumps(
+                {
+                    "jobs_total": len(manifest.jobs),
+                    "plans": [job.as_plan(runner="dry-run") for job in manifest.jobs],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
+
+    summary: dict[str, object] = {
+        "jobs_total": len(manifest.jobs),
+        "jobs_succeeded": 0,
+        "jobs_failed": 0,
+        "results": [],
+    }
+    results: list[dict[str, object]] = []
+    runner = NativeRunner()
+
+    for index, job in enumerate(manifest.jobs):
+        try:
+            if not job.input_path.exists():
+                raise ValueError(f"input image does not exist: {job.input_path}")
+            result = runner.run(job)
+            results.append(
+                {
+                    "index": index,
+                    "output_path": str(result.output_path),
+                    "shapes_written": result.shapes_written,
+                    "attempts": result.attempts,
+                }
+            )
+            summary["jobs_succeeded"] = int(summary["jobs_succeeded"]) + 1
+        except (NativeCoreUnavailable, ValueError) as exc:
+            results.append({"index": index, "error": str(exc), "output_path": str(job.output_path)})
+            summary["jobs_failed"] = int(summary["jobs_failed"]) + 1
+            if not args.continue_on_error:
+                summary["results"] = results
+                print(json.dumps(summary, indent=2, sort_keys=True))
+                return 2
+
+    summary["results"] = results
+    print(json.dumps(summary, indent=2, sort_keys=True))
+    return 1 if int(summary["jobs_failed"]) else 0
 
 
 def _resolve_input_path(args: argparse.Namespace) -> Path:
