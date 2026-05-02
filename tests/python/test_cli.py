@@ -175,6 +175,40 @@ class CliTests(unittest.TestCase):
         self.assertEqual(plan["shape"], "triangle")
         self.assertEqual(plan["count"], 4000)
 
+    def test_run_job_manifest_rejects_cli_overrides(self):
+        with tempfile.TemporaryDirectory() as root:
+            manifest_path = Path(root) / "job.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "input_path": "source.png",
+                        "output_path": "out.png",
+                        "shape": "triangle",
+                        "count": 4000,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            exit_code, stdout, stderr = self.run_cli(
+                [
+                    "run",
+                    "--job",
+                    str(manifest_path),
+                    "--shape",
+                    "rectangle",
+                    "--output",
+                    str(Path(root) / "ignored.png"),
+                    "--dry-run",
+                ]
+            )
+
+        self.assertEqual(exit_code, 2)
+        self.assertEqual(stdout, "")
+        self.assertIn("--job cannot be combined", stderr)
+        self.assertIn("--shape", stderr)
+        self.assertIn("--output", stderr)
+
     def test_batch_dry_run_prints_resolved_plans(self):
         with tempfile.TemporaryDirectory() as root:
             root_path = Path(root)

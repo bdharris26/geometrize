@@ -14,6 +14,27 @@ from geometrize_py.native import NativeCoreUnavailable, NativeRunner
 from geometrize_py.screenshots import find_latest_screenshot
 
 
+DEFAULT_SHAPE = ShapeType.ELLIPSE.cli_name
+DEFAULT_EXPORT_FORMAT = ExportFormat.PNG.value
+DEFAULT_ALPHA = 128
+DEFAULT_CANDIDATE_SHAPE_COUNT = 50
+DEFAULT_MAX_SHAPE_MUTATIONS = 100
+DEFAULT_SEED = 9001
+DEFAULT_MAX_THREADS = 0
+
+JOB_MANIFEST_OVERRIDE_FLAGS = (
+    ("output", "--output"),
+    ("shape", "--shape"),
+    ("count", "--count"),
+    ("export_format", "--export-format"),
+    ("alpha", "--alpha"),
+    ("candidate_shape_count", "--candidate-shape-count"),
+    ("max_shape_mutations", "--max-shape-mutations"),
+    ("seed", "--seed"),
+    ("max_threads", "--max-threads"),
+)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -49,14 +70,14 @@ def build_parser() -> argparse.ArgumentParser:
     source.add_argument("--latest-screenshot", action="store_true", help="Use the newest screenshot image.")
     source.add_argument("--job", type=Path, help="JSON job manifest to run.")
     run.add_argument("--output", type=Path, help="Output path. Defaults beside the input image.")
-    run.add_argument("--shape", default="ellipse", choices=ShapeType.cli_choices())
+    run.add_argument("--shape", choices=ShapeType.cli_choices())
     run.add_argument("--count", type=int, help="Number of accepted shapes to request.")
-    run.add_argument("--export-format", default="png", choices=[format_.value for format_ in ExportFormat])
-    run.add_argument("--alpha", type=int, default=128)
-    run.add_argument("--candidate-shape-count", type=int, default=50)
-    run.add_argument("--max-shape-mutations", type=int, default=100)
-    run.add_argument("--seed", type=int, default=9001)
-    run.add_argument("--max-threads", type=int, default=0)
+    run.add_argument("--export-format", choices=[format_.value for format_ in ExportFormat])
+    run.add_argument("--alpha", type=int)
+    run.add_argument("--candidate-shape-count", type=int)
+    run.add_argument("--max-shape-mutations", type=int)
+    run.add_argument("--seed", type=int)
+    run.add_argument("--max-threads", type=int)
     run.add_argument("--dry-run", action="store_true", help="Print the job plan without invoking native code.")
 
     subparsers.add_parser("latest-screenshot", help="Print the newest screenshot path.")
@@ -168,13 +189,14 @@ def _resolve_input_path(args: argparse.Namespace) -> Path:
 
 def _resolve_job(args: argparse.Namespace) -> GeometrizeJob:
     if args.job:
+        _reject_job_overrides(args)
         return load_job(args.job)
     if args.count is None:
         raise ValueError("--count is required unless --job is supplied")
 
     input_path = _resolve_input_path(args)
-    shape = ShapeType.from_cli(args.shape)
-    export_format = ExportFormat.from_cli(args.export_format)
+    shape = ShapeType.from_cli(args.shape or DEFAULT_SHAPE)
+    export_format = ExportFormat.from_cli(args.export_format or DEFAULT_EXPORT_FORMAT)
     output_path = args.output or derive_output_path(input_path, shape, args.count, export_format)
     return GeometrizeJob(
         input_path=input_path,
@@ -182,9 +204,27 @@ def _resolve_job(args: argparse.Namespace) -> GeometrizeJob:
         shape=shape,
         count=args.count,
         export_format=export_format,
-        alpha=args.alpha,
-        candidate_shape_count=args.candidate_shape_count,
-        max_shape_mutations=args.max_shape_mutations,
-        seed=args.seed,
-        max_threads=args.max_threads,
+        alpha=args.alpha if args.alpha is not None else DEFAULT_ALPHA,
+        candidate_shape_count=(
+            args.candidate_shape_count
+            if args.candidate_shape_count is not None
+            else DEFAULT_CANDIDATE_SHAPE_COUNT
+        ),
+        max_shape_mutations=(
+            args.max_shape_mutations
+            if args.max_shape_mutations is not None
+            else DEFAULT_MAX_SHAPE_MUTATIONS
+        ),
+        seed=args.seed if args.seed is not None else DEFAULT_SEED,
+        max_threads=args.max_threads if args.max_threads is not None else DEFAULT_MAX_THREADS,
     )
+
+
+def _reject_job_overrides(args: argparse.Namespace) -> None:
+    flags = [
+        flag
+        for attribute, flag in JOB_MANIFEST_OVERRIDE_FLAGS
+        if getattr(args, attribute) is not None
+    ]
+    if flags:
+        raise ValueError(f"--job cannot be combined with run override option(s): {', '.join(flags)}")
