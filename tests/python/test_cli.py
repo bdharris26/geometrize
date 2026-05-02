@@ -68,6 +68,21 @@ class CliTests(unittest.TestCase):
         self.assertEqual(stdout, "")
         self.assertIn("native core", stderr.lower())
 
+    def test_inspect_prints_image_metadata(self):
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as root:
+            input_path = Path(root) / "source.png"
+            Image.new("RGBA", (3, 4), (1, 2, 3, 4)).save(input_path)
+
+            exit_code, stdout, stderr = self.run_cli(["inspect", str(input_path)])
+
+        self.assertEqual(exit_code, 0, stderr)
+        info = json.loads(stdout)
+        self.assertEqual(info["width"], 3)
+        self.assertEqual(info["height"], 4)
+        self.assertEqual(info["mode"], "RGBA")
+
 
 if __name__ == "__main__":
     unittest.main()

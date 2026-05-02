@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 from typing import Sequence
 
+from geometrize_py.images import inspect_image
 from geometrize_py.jobs import ExportFormat, GeometrizeJob, ShapeType, derive_output_path
 from geometrize_py.native import NativeCoreUnavailable, NativeRunner
 from geometrize_py.screenshots import find_latest_screenshot
@@ -20,6 +21,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _run(args)
         if args.command == "latest-screenshot":
             return _latest_screenshot()
+        if args.command == "inspect":
+            return _inspect(args)
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -52,6 +55,9 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--dry-run", action="store_true", help="Print the job plan without invoking native code.")
 
     subparsers.add_parser("latest-screenshot", help="Print the newest screenshot path.")
+
+    inspect = subparsers.add_parser("inspect", help="Print image metadata as JSON.")
+    inspect.add_argument("input", type=Path, help="Image path to inspect.")
     return parser
 
 
@@ -97,6 +103,12 @@ def _latest_screenshot() -> int:
         print("error: no screenshot image found", file=sys.stderr)
         return 2
     print(screenshot)
+    return 0
+
+
+def _inspect(args: argparse.Namespace) -> int:
+    info = inspect_image(args.input)
+    print(json.dumps(info.as_dict(), indent=2, sort_keys=True))
     return 0
 
 
