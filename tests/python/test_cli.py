@@ -126,6 +126,47 @@ class CliTests(unittest.TestCase):
         self.assertEqual(payload["height"], 4)
         self.assertLessEqual(len(payload["shapes"]), 1)
 
+    def test_run_writes_svg_output(self):
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as root:
+            input_path = Path(root) / "source.png"
+            output_path = Path(root) / "out.svg"
+            image = Image.new("RGBA", (4, 4), (0, 0, 0, 255))
+            for x in range(2, 4):
+                for y in range(4):
+                    image.putpixel((x, y), (255, 255, 255, 255))
+            image.save(input_path)
+
+            exit_code, stdout, stderr = self.run_cli(
+                [
+                    "run",
+                    "--input",
+                    str(input_path),
+                    "--output",
+                    str(output_path),
+                    "--shape",
+                    "rectangle",
+                    "--count",
+                    "1",
+                    "--export-format",
+                    "svg",
+                    "--candidate-shape-count",
+                    "10",
+                    "--max-shape-mutations",
+                    "25",
+                    "--max-threads",
+                    "1",
+                ]
+            )
+
+            svg = output_path.read_text(encoding="utf-8")
+
+        self.assertEqual(exit_code, 0, stderr)
+        result = json.loads(stdout)
+        self.assertEqual(result["output_path"], str(output_path))
+        self.assertIn("<svg", svg)
+
     def test_run_dry_run_accepts_job_manifest(self):
         with tempfile.TemporaryDirectory() as root:
             input_path = Path(root) / "source.png"

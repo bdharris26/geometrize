@@ -6,6 +6,7 @@ from pathlib import Path
 
 from geometrize_py.images import RgbaImage, load_rgba_image, save_rgba_image
 from geometrize_py.jobs import ExportFormat, GeometrizeJob
+from geometrize_py.svg import save_svg
 
 
 class NativeCoreUnavailable(RuntimeError):
@@ -61,8 +62,10 @@ class NativeRunner:
             save_rgba_image(output_image, job.output_path)
         elif job.export_format is ExportFormat.JSON:
             self._save_json_result(result, job.output_path)
+        elif job.export_format is ExportFormat.SVG:
+            save_svg(int(result["width"]), int(result["height"]), result["shapes"], job.output_path)
         else:
-            raise ValueError(f"native runner currently supports PNG and JSON output, not {job.export_format.value}")
+            raise ValueError(f"native runner currently supports PNG, SVG, and JSON output, not {job.export_format.value}")
 
         return RunResult(
             output_path=job.output_path,
