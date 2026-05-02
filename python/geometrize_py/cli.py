@@ -8,6 +8,7 @@ from typing import Sequence
 
 from geometrize_py.images import inspect_image
 from geometrize_py.jobs import ExportFormat, GeometrizeJob, ShapeType, derive_output_path
+from geometrize_py.manifests import load_job
 from geometrize_py.native import NativeCoreUnavailable, NativeRunner
 from geometrize_py.screenshots import find_latest_screenshot
 
@@ -43,9 +44,10 @@ def build_parser() -> argparse.ArgumentParser:
     source = run.add_mutually_exclusive_group(required=True)
     source.add_argument("--input", type=Path, help="Image path to geometrize.")
     source.add_argument("--latest-screenshot", action="store_true", help="Use the newest screenshot image.")
+    source.add_argument("--job", type=Path, help="JSON job manifest to run.")
     run.add_argument("--output", type=Path, help="Output path. Defaults beside the input image.")
     run.add_argument("--shape", default="ellipse", choices=ShapeType.cli_choices())
-    run.add_argument("--count", type=int, required=True, help="Number of accepted shapes to request.")
+    run.add_argument("--count", type=int, help="Number of accepted shapes to request.")
     run.add_argument("--export-format", default="png", choices=[format_.value for format_ in ExportFormat])
     run.add_argument("--alpha", type=int, default=128)
     run.add_argument("--candidate-shape-count", type=int, default=50)
@@ -62,26 +64,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _run(args: argparse.Namespace) -> int:
-    input_path = _resolve_input_path(args)
-    if not input_path.exists():
-        print(f"error: input image does not exist: {input_path}", file=sys.stderr)
+    job = _resolve_job(args)
+    if not job.input_path.exists():
+        print(f"error: input image does not exist: {job.input_path}", file=sys.stderr)
         return 2
-
-    shape = ShapeType.from_cli(args.shape)
-    export_format = ExportFormat.from_cli(args.export_format)
-    output_path = args.output or derive_output_path(input_path, shape, args.count, export_format)
-    job = GeometrizeJob(
-        input_path=input_path,
-        output_path=output_path,
-        shape=shape,
-        count=args.count,
-        export_format=export_format,
-        alpha=args.alpha,
-        candidate_shape_count=args.candidate_shape_count,
-        max_shape_mutations=args.max_shape_mutations,
-        seed=args.seed,
-        max_threads=args.max_threads,
-    )
 
     if args.dry_run:
         print(json.dumps(job.as_plan(runner="dry-run"), indent=2, sort_keys=True))
@@ -119,3 +105,27 @@ def _resolve_input_path(args: argparse.Namespace) -> Path:
             raise ValueError("no screenshot image found")
         return screenshot
     return args.input
+
+
+def _resolve_job(args: argparse.Namespace) -> GeometrizeJob:
+    if args.job:
+        return load_job(args.job)
+    if args.count is None:
+        raise ValueError("--count is required unless --job is supplied")
+
+    input_path = _resolve_input_path(args)
+    shape = ShapeType.from_cli(args.shape)
+    export_format = ExportFormat.from_cli(args.export_format)
+    output_path = args.output or derive_output_path(input_path, shape, args.count, export_format)
+    return GeometrizeJob(
+        input_path=input_path,
+        output_path=output_path,
+        shape=shape,
+        count=args.count,
+        export_format=export_format,
+        alpha=args.alpha,
+        candidate_shape_count=args.candidate_shape_count,
+        max_shape_mutations=args.max_shape_mutations,
+        seed=args.seed,
+        max_threads=args.max_threads,
+    )

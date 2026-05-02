@@ -68,6 +68,31 @@ class CliTests(unittest.TestCase):
         self.assertEqual(stdout, "")
         self.assertIn("native core", stderr.lower())
 
+    def test_run_dry_run_accepts_job_manifest(self):
+        with tempfile.TemporaryDirectory() as root:
+            input_path = Path(root) / "source.png"
+            output_path = Path(root) / "out.png"
+            manifest_path = Path(root) / "job.json"
+            input_path.write_bytes(b"not a real image yet")
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "input_path": str(input_path),
+                        "output_path": str(output_path),
+                        "shape": "triangle",
+                        "count": 4000,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            exit_code, stdout, stderr = self.run_cli(["run", "--job", str(manifest_path), "--dry-run"])
+
+        self.assertEqual(exit_code, 0, stderr)
+        plan = json.loads(stdout)
+        self.assertEqual(plan["shape"], "triangle")
+        self.assertEqual(plan["count"], 4000)
+
     def test_inspect_prints_image_metadata(self):
         from PIL import Image
 

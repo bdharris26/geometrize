@@ -25,3 +25,9 @@ Preview a 4000-triangle job without invoking the native core:
 ```powershell
 C:\LocalRepos\geometrize\.venv\Scripts\geometrize-py.exe run --latest-screenshot --output C:\LocalRepos\geometrize\outputs\screenshot_4000_triangles.png --shape triangle --count 4000 --dry-run
 ```
+
+Run from a JSON job manifest:
+
+```powershell
+C:\LocalRepos\geometrize\.venv\Scripts\geometrize-py.exe run --job C:\LocalRepos\geometrize\job.json --dry-run
+```
