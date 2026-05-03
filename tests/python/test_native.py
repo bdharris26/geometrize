@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 from PIL import Image
 
-from geometrize_py.native import MAX_IMAGE_SIZE, NativeBackendUnavailable, RunOptions, native_available, run_image
+from geometrize_py.native import MAX_IMAGE_SIZE, NativeBackendUnavailable, RunOptions, iter_image, native_available, run_image
 
 
 @pytest.mark.skipif(not native_available(), reason="native backend is not built")
@@ -16,6 +16,17 @@ def test_native_runner_returns_preview_and_shapes() -> None:
     assert result.attempts >= 1
     assert result.image.size == (8, 8)
     assert isinstance(result.shapes, list)
+
+
+@pytest.mark.skipif(not native_available(), reason="native backend is not built")
+def test_native_runner_streams_progress_events() -> None:
+    image = Image.new("RGBA", (8, 8), (30, 120, 200, 255))
+    events = list(iter_image(image, RunOptions(steps=2, shape_types=("ellipse",), shape_count=10, mutations=10, max_size=64)))
+
+    assert [event["event"] for event in events] == ["start", "step", "step", "complete"]
+    assert events[0]["width"] == 8
+    assert events[1]["attempt"] == 1
+    assert events[-1]["result"].attempts == 2
 
 
 def test_native_unavailable_error_is_importable() -> None:

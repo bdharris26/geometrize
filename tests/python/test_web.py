@@ -66,6 +66,40 @@ def test_run_endpoint_returns_rendered_image() -> None:
         assert payload["height"] == 6
         assert payload["preview"].startswith("data:image/png;base64,")
         assert payload["svg"].startswith('<?xml version="1.0"')
+        assert payload["shape_count"] == len(payload["shapes"])
+        assert payload["attempts"] >= 1
+        if payload["shapes"]:
+            assert "score" in payload["shapes"][0]
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+@pytest.mark.skipif(not native_available(), reason="native backend is not built")
+def test_stream_endpoint_returns_progress_events() -> None:
+    server = GeometrizeServer(("127.0.0.1", 0), GeometrizeRequestHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        image = Image.new("RGBA", (6, 6), (80, 120, 40, 255))
+        body = json.dumps(
+            {
+                "image": image_to_data_url(image),
+                "options": {"steps": 2, "shape_types": ["ellipse"], "shape_count": 5, "mutations": 5},
+            }
+        ).encode("utf-8")
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{server.server_port}/api/run/stream",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=10) as response:
+            events = [json.loads(line) for line in response.read().decode("utf-8").splitlines()]
+        assert [event["event"] for event in events] == ["start", "step", "step", "complete"]
+        assert events[0]["width"] == 6
+        assert events[-1]["attempts"] == 2
+        assert events[-1]["preview"].startswith("data:image/png;base64,")
     finally:
         server.shutdown()
         server.server_close()

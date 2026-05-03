@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any, Iterable
 
@@ -99,22 +100,61 @@ def require_native() -> Any:
 
 
 def run_image(image: Image.Image, options: RunOptions | None = None) -> RunResult:
+    result: RunResult | None = None
+    for event in iter_image(image, options):
+        if event["event"] == "complete":
+            result = event["result"]
+    if result is None:
+        raise RuntimeError("Geometrize run did not produce a result")
+    return result
+
+
+def iter_image(image: Image.Image, options: RunOptions | None = None) -> Iterator[dict[str, Any]]:
     options = options or RunOptions()
     backend = require_native()
     source = fit_image(image, options.max_size).convert("RGBA")
     width, height = source.size
     background = average_color(source)
-    result = backend.run_rgba(width, height, source.tobytes(), options.to_native_dict())
-    rgba = result["rgba"]
-    output = Image.frombytes("RGBA", (result["width"], result["height"]), rgba)
-    return RunResult(
-        width=int(result["width"]),
-        height=int(result["height"]),
-        image=output,
-        shapes=list(result["shapes"]),
-        attempts=int(result["attempts"]),
-        background=background,
-    )
+    session = backend.RunnerSession(width, height, source.tobytes(), options.to_native_dict())
+    shapes: list[dict[str, Any]] = []
+
+    yield {
+        "event": "start",
+        "width": width,
+        "height": height,
+        "background": background,
+        "attempts": 0,
+        "shape_count": 0,
+    }
+
+    for _ in range(options.steps):
+        step = session.step()
+        step_shapes = list(step["shapes"])
+        shapes.extend(step_shapes)
+        yield {
+            "event": "step",
+            "attempt": int(step["attempt"]),
+            "attempts": int(step["attempt"]),
+            "shapes": step_shapes,
+            "shape_count": len(shapes),
+        }
+
+    output = Image.frombytes("RGBA", (width, height), session.current_rgba())
+    yield {
+        "event": "complete",
+        "result": RunResult(
+            width=width,
+            height=height,
+            image=output,
+            shapes=shapes,
+            attempts=int(session.attempts),
+            background=background,
+        ),
+        "width": width,
+        "height": height,
+        "attempts": int(session.attempts),
+        "shape_count": len(shapes),
+    }
 
 
 def normalize_shape_types(values: Iterable[str]) -> tuple[str, ...]:

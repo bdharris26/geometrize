@@ -11,7 +11,7 @@ from pathlib import PurePosixPath
 from typing import Any
 
 from .images import image_from_data_url, image_to_data_url
-from .native import NativeBackendUnavailable, RunOptions, native_available, run_image
+from .native import NativeBackendUnavailable, RunOptions, iter_image, native_available, run_image
 from .svg import shapes_to_svg
 
 
@@ -50,7 +50,11 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
         self.send_error(HTTPStatus.NOT_FOUND)
 
     def do_POST(self) -> None:
-        if self.path.split("?", 1)[0] != "/api/run":
+        path = self.path.split("?", 1)[0]
+        if path == "/api/run/stream":
+            self._run_stream()
+            return
+        if path != "/api/run":
             self.send_error(HTTPStatus.NOT_FOUND)
             return
         try:
@@ -75,6 +79,54 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
         except Exception as exc:
             self._send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
 
+    def _run_stream(self) -> None:
+        try:
+            payload = self._read_json()
+            image = image_from_data_url(str(payload["image"]))
+            options = RunOptions.from_mapping(payload.get("options"))
+            if not native_available():
+                raise NativeBackendUnavailable("Geometrize native backend is unavailable")
+        except NativeBackendUnavailable as exc:
+            self._send_json({"error": str(exc)}, HTTPStatus.SERVICE_UNAVAILABLE)
+            return
+        except Exception as exc:
+            self._send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return
+
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+
+        try:
+            for event in iter_image(image, options):
+                event_name = str(event["event"])
+                if event_name == "complete":
+                    result = event["result"]
+                    svg = shapes_to_svg(result.shapes, result.width, result.height, result.background)
+                    self._write_stream_event(
+                        {
+                            "event": "complete",
+                            "width": result.width,
+                            "height": result.height,
+                            "attempts": result.attempts,
+                            "shape_count": len(result.shapes),
+                            "preview": image_to_data_url(result.image),
+                            "svg": svg,
+                            "shapes": result.shapes,
+                        }
+                    )
+                    continue
+                self._write_stream_event(event)
+        except (BrokenPipeError, ConnectionResetError):
+            return
+        except Exception as exc:
+            try:
+                self._write_stream_event({"event": "error", "error": str(exc)})
+            except (BrokenPipeError, ConnectionResetError):
+                return
+
     def log_message(self, format: str, *args: Any) -> None:
         return
 
@@ -91,6 +143,11 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def _write_stream_event(self, payload: dict[str, Any]) -> None:
+        self.wfile.write(json.dumps(payload).encode("utf-8"))
+        self.wfile.write(b"\n")
+        self.wfile.flush()
 
     def _send_static(self, name: str, content_type: str | None = None) -> None:
         clean_name = str(PurePosixPath(name))

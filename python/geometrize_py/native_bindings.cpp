@@ -87,6 +87,18 @@ std::uint32_t shapeMaskFromOptions(const py::dict& options)
     return mask;
 }
 
+geometrize::ImageRunnerOptions runnerOptionsFromDict(const py::dict& options)
+{
+    geometrize::ImageRunnerOptions runnerOptions;
+    runnerOptions.shapeTypes = static_cast<geometrize::ShapeTypes>(shapeMaskFromOptions(options));
+    runnerOptions.alpha = static_cast<std::uint8_t>(readInt(options, "alpha", 128, 1, 255));
+    runnerOptions.shapeCount = static_cast<std::uint32_t>(readInt(options, "shape_count", 50, 1, 500));
+    runnerOptions.maxShapeMutations = static_cast<std::uint32_t>(readInt(options, "mutations", 100, 1, 1000));
+    runnerOptions.seed = static_cast<std::uint32_t>(readInt(options, "seed", 9001, 0, 2147483647));
+    runnerOptions.maxThreads = static_cast<std::uint32_t>(readInt(options, "max_threads", 0, 0, 128));
+    return runnerOptions;
+}
+
 std::string shapeName(const geometrize::ShapeTypes type)
 {
     for(const auto& item : SHAPE_NAMES) {
@@ -165,48 +177,104 @@ py::dict shapeResultToDict(const geometrize::ShapeResult& result)
     return out;
 }
 
+class RunnerSession
+{
+public:
+    RunnerSession(const int width, const int height, const py::bytes& rgba, const py::dict& options) :
+        m_width{width},
+        m_height{height},
+        m_pixels{bytesToPixels(width, height, rgba)},
+        m_target{static_cast<std::uint32_t>(width), static_cast<std::uint32_t>(height), m_pixels},
+        m_runner{m_target},
+        m_options{runnerOptionsFromDict(options)},
+        m_attempts{0}
+    {}
+
+    py::dict step()
+    {
+        std::vector<geometrize::ShapeResult> stepShapes;
+        {
+            py::gil_scoped_release release;
+            stepShapes = m_runner.step(m_options);
+        }
+
+        m_attempts++;
+
+        py::list shapes;
+        for(const geometrize::ShapeResult& shape : stepShapes) {
+            shapes.append(shapeResultToDict(shape));
+        }
+
+        py::dict out;
+        out["attempt"] = m_attempts;
+        out["shapes"] = shapes;
+        return out;
+    }
+
+    py::bytes currentRgba() const
+    {
+        return py::bytes(geometrize::exporter::exportBitmapData(m_runner.getCurrent()));
+    }
+
+    int width() const
+    {
+        return m_width;
+    }
+
+    int height() const
+    {
+        return m_height;
+    }
+
+    int attempts() const
+    {
+        return m_attempts;
+    }
+
+private:
+    static std::vector<std::uint8_t> bytesToPixels(const int width, const int height, const py::bytes& rgba)
+    {
+        if(width <= 0 || height <= 0) {
+            throw std::invalid_argument("Image dimensions must be positive");
+        }
+
+        const std::string raw{rgba};
+        const std::size_t expected{static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4U};
+        if(raw.size() != expected) {
+            throw std::invalid_argument("RGBA byte count does not match image dimensions");
+        }
+
+        return std::vector<std::uint8_t>(raw.begin(), raw.end());
+    }
+
+    int m_width;
+    int m_height;
+    std::vector<std::uint8_t> m_pixels;
+    geometrize::Bitmap m_target;
+    geometrize::ImageRunner m_runner;
+    geometrize::ImageRunnerOptions m_options;
+    int m_attempts;
+};
+
 py::dict runRgba(const int width, const int height, const py::bytes& rgba, const py::dict& options)
 {
-    if(width <= 0 || height <= 0) {
-        throw std::invalid_argument("Image dimensions must be positive");
-    }
-
-    const std::string raw{rgba};
-    const std::size_t expected{static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4U};
-    if(raw.size() != expected) {
-        throw std::invalid_argument("RGBA byte count does not match image dimensions");
-    }
-
-    std::vector<std::uint8_t> pixels(raw.begin(), raw.end());
-    geometrize::Bitmap target(static_cast<std::uint32_t>(width), static_cast<std::uint32_t>(height), pixels);
-    geometrize::ImageRunner runner(target);
-
-    geometrize::ImageRunnerOptions runnerOptions;
-    runnerOptions.shapeTypes = static_cast<geometrize::ShapeTypes>(shapeMaskFromOptions(options));
-    runnerOptions.alpha = static_cast<std::uint8_t>(readInt(options, "alpha", 128, 1, 255));
-    runnerOptions.shapeCount = static_cast<std::uint32_t>(readInt(options, "shape_count", 50, 1, 500));
-    runnerOptions.maxShapeMutations = static_cast<std::uint32_t>(readInt(options, "mutations", 100, 1, 1000));
-    runnerOptions.seed = static_cast<std::uint32_t>(readInt(options, "seed", 9001, 0, 2147483647));
-    runnerOptions.maxThreads = static_cast<std::uint32_t>(readInt(options, "max_threads", 0, 0, 128));
-
     const int steps{readInt(options, "steps", 1, 1, 2000)};
+    RunnerSession session(width, height, rgba, options);
     py::list shapeList;
-    int attempts{0};
     for(int i = 0; i < steps; ++i) {
-        std::vector<geometrize::ShapeResult> stepShapes{runner.step(runnerOptions)};
-        attempts++;
-        for(const geometrize::ShapeResult& shape : stepShapes) {
-            shapeList.append(shapeResultToDict(shape));
+        const py::dict step{session.step()};
+        const py::list stepShapes{step["shapes"]};
+        for(const py::handle shape : stepShapes) {
+            shapeList.append(shape);
         }
     }
 
-    const std::string outPixels{geometrize::exporter::exportBitmapData(runner.getCurrent())};
     py::dict out;
     out["width"] = width;
     out["height"] = height;
-    out["rgba"] = py::bytes(outPixels);
+    out["rgba"] = session.currentRgba();
     out["shapes"] = shapeList;
-    out["attempts"] = attempts;
+    out["attempts"] = session.attempts();
     return out;
 }
 
@@ -217,4 +285,11 @@ PYBIND11_MODULE(_native, module)
     module.doc() = "Native bindings for the Geometrize image runner.";
     module.def("is_available", []() { return true; });
     module.def("run_rgba", &runRgba, py::arg("width"), py::arg("height"), py::arg("rgba"), py::arg("options"));
+    py::class_<RunnerSession>(module, "RunnerSession")
+        .def(py::init<int, int, const py::bytes&, const py::dict&>(), py::arg("width"), py::arg("height"), py::arg("rgba"), py::arg("options"))
+        .def("step", &RunnerSession::step)
+        .def("current_rgba", &RunnerSession::currentRgba)
+        .def_property_readonly("width", &RunnerSession::width)
+        .def_property_readonly("height", &RunnerSession::height)
+        .def_property_readonly("attempts", &RunnerSession::attempts);
 }
