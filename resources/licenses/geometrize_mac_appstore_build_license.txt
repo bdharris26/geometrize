@@ -1,3 +1,0 @@
-Geometrize is copyright (c) 2021 Sam Twidale (https://samcodes.co.uk/)
-
-This release of Geometrize is closed source. Proprietary and confidential.

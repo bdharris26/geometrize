@@ -1,59 +1,48 @@
 # AGENTS.md
 
-This file is a quick orientation guide for agents entering this repo. It should
-help you find useful work, not freeze the project into its current habits.
+This repo is now a Python-first Geometrize app. Keep this guide short and
+current so the next agent can find the important edges quickly.
 
 ## Project Shape
 
-- `geometrize.pro` is the qmake entrypoint for the desktop app.
-- First-party application code is under `geometrize/`.
-- The core image approximation algorithm is pulled in from the `lib/geometrize`
-  submodule and included by `lib/geometrize/geometrize/geometrize.pri`.
-- Other submodules provide scripting, serialization, GIF export, templates, web
-  export assets, and translations. Check `.gitmodules` before treating code
-  under `lib/`, `resources/templates`, `resources/web_export`, or `translations`
-  as local app ownership.
-- `resources/resources.pri` runs Python scripts from `scripts/` to generate Qt
-  resource files during qmake configuration.
+- `pyproject.toml` is the package and test entrypoint.
+- `CMakeLists.txt` builds the `geometrize_py._native` pybind11 extension.
+- First-party Python code lives under `python/geometrize_py/`.
+- The browser UI is static HTML/CSS/JS served by `python/geometrize_py/web.py`.
+- The C++ approximation engine remains the `lib/geometrize` submodule. Treat it
+  as upstream core ownership unless the task explicitly needs core changes.
+- Historical screenshots remain under `screenshots/` and are useful for smoke
+  inputs and README visuals.
 
 ## First Places To Inspect
 
-- App launch and mode selection: `geometrize/main.cpp`,
-  `geometrize/cli/commandlineparser.*`.
-- Image task lifecycle and threading: `geometrize/task/imagetask.*`,
-  `geometrize/task/imagetaskworker.*`, and UI connections in
-  `geometrize/dialog/imagetaskwindow.*`.
-- Scripting surface: `geometrize/script/chaiscriptcreator.cpp` and
-  `geometrize/script/bindings/`.
-- Import/export behavior: `geometrize/image/`, `geometrize/exporter/`,
-  `geometrize/serialization/`.
-- Preferences, templates, and localization: `geometrize/preferences/`,
-  `geometrize/manifest/`, `geometrize/localization/`, `translations/`.
+- UI server and API: `python/geometrize_py/web.py`.
+- CLI entrypoints: `python/geometrize_py/cli.py`.
+- Native bridge contract: `python/geometrize_py/native.py` and
+  `python/geometrize_py/native_bindings.cpp`.
+- SVG export: `python/geometrize_py/svg.py`.
+- Tests: `tests/python/`.
 
 ## Build And Verification
 
-- Expected setup: Qt 5.10+ or Qt 6, Python 3, and initialized submodules.
+- Expected setup: Python 3.10+, Pillow, pytest for development, initialized
+  submodules, and a C++17 compiler for fresh native extension builds.
 - Bootstrap submodules with `git submodule update --init --recursive`.
-- Typical CLI build shape, from a Qt-enabled shell:
-  `qmake C:\LocalRepos\geometrize\geometrize.pro` then `nmake` or `make`.
-- CI history lives in `.appveyor.yml` and builds Linux, macOS, and Windows MSVC
-  variants.
-- Functional self-tests exist through `--functional_tests <scripts-dir>`, but
-  coverage appears sparse. If you cannot run GUI tests locally, say so and still
-  verify targeted logic as directly as possible.
+- Install locally with `.\.venv\Scripts\python.exe -m pip install -e .[dev]`.
+- Start the UI with
+  `.\.venv\Scripts\python.exe -m geometrize_py serve --host 127.0.0.1 --port 7860`.
+- Run tests with `.\.venv\Scripts\python.exe -m pytest`.
+- Use `.\.venv\Scripts\python.exe -m geometrize_py doctor` when native import
+  behavior is in question.
 
 ## Improvement-Friendly Notes
 
-- Prefer small, behavior-focused changes in first-party app code before editing
-  submodules.
-- Be careful around `ImageTask`: it crosses Qt signals, worker threads,
-  ChaiScript state, and bitmap lifetimes.
-- When changing scripting bindings, update both engine construction and the
-  exposed ChaiScript API intentionally.
-- When touching images, exports, templates, or translations, check whether the
-  resource generation step needs to run and whether generated files are ignored.
-- There are useful cleanup candidates: CLI parsing duplication, TODOs in UI and
-  network paths, generated resource determinism, richer functional tests, and
-  clearer boundaries between GUI orchestration and task state.
-- Keep new guidance and docs short. This project already has many moving parts;
-  the next agent should be helped, not buried.
+- Prefer Python app changes over touching `lib/geometrize`.
+- Preserve the native bridge shape: Python owns image IO, UI state, SVG/JSON
+  presentation, and request handling; C++ owns shape fitting.
+- Keep the web UI dependency-light unless a new dependency clearly earns its
+  weight.
+- If browser behavior changes, verify with the local server and Playwright or
+  the in-app browser.
+- Keep new docs concise. The point of this port is a small native-feeling
+  Python project, not a museum of the Qt app.
