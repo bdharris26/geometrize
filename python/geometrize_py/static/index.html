@@ -66,14 +66,40 @@
     <main class="workspace">
       <section class="preview-wrap" aria-label="Image preview">
         <div class="preview-grid">
-          <figure>
+          <figure class="preview-panel">
             <figcaption><span>Source</span><span id="source-meta"></span></figcaption>
             <img id="source-preview" alt="">
           </figure>
-          <figure>
-            <figcaption><span>Result</span><span id="result-meta"></span></figcaption>
-            <img id="result-preview" alt="">
+          <figure class="preview-panel">
+            <figcaption><span>Live result</span><span id="result-meta"></span></figcaption>
+            <div class="result-stage">
+              <canvas id="result-canvas" aria-label="Live result preview"></canvas>
+              <img id="result-preview" alt="" aria-hidden="true">
+            </div>
           </figure>
+        </div>
+      </section>
+
+      <section class="telemetry-console" aria-label="Optimization telemetry">
+        <div class="run-strip">
+          <span id="telemetry-state">Idle</span>
+          <span id="telemetry-acceptance">0 accepted / 0 attempts</span>
+          <span id="telemetry-improvement">Score --</span>
+          <span id="telemetry-duration">--</span>
+        </div>
+        <div class="telemetry-grid">
+          <article class="telemetry-card">
+            <header><span>Convergence</span><output id="telemetry-score">--</output></header>
+            <svg id="score-graph" class="telemetry-graph" viewBox="0 0 360 120" role="img" aria-label="Convergence graph"></svg>
+          </article>
+          <article class="telemetry-card">
+            <header><span>Primitive Mix</span><output id="telemetry-total">0</output></header>
+            <div id="primitive-mix" class="primitive-mix"></div>
+          </article>
+          <article class="telemetry-card">
+            <header><span>Resolution</span><output id="telemetry-resolution">--</output></header>
+            <svg id="resolution-graph" class="telemetry-graph" viewBox="0 0 360 120" role="img" aria-label="Resolution graph"></svg>
+          </article>
         </div>
       </section>
 

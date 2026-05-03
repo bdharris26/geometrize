@@ -36,6 +36,10 @@ def test_index_supports_sample_without_required_file_input() -> None:
         assert 'id="image-input" type="file" accept="image/*">' in html
         assert 'id="max-size" name="max_size" type="range" min="64" max="8192" step="64" value="1024"' in html
         assert 'id="max-size-number" type="number" min="64" max="8192" step="64" value="1024"' in html
+        assert 'class="telemetry-console"' in html
+        assert 'id="result-canvas"' in html
+        assert 'id="score-graph"' in html
+        assert 'id="telemetry-acceptance"' in html
     finally:
         server.shutdown()
         server.server_close()

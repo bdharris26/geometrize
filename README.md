@@ -16,7 +16,8 @@ py -3 -m venv .venv
 ```
 
 Open `http://127.0.0.1:7860`, choose an image, tune the shape settings, and run
-the render. The UI exports PNG, SVG, and JSON shape data.
+the render. The UI draws accepted primitives into a live preview, charts the
+run telemetry, and exports PNG, SVG, and JSON shape data.
 
 ## Command Line
 
