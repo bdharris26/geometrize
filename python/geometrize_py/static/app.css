@@ -164,8 +164,18 @@ button {
   font-weight: 750;
 }
 
+button.secondary {
+  border: 1px solid var(--line);
+  background: #fff;
+  color: var(--accent-strong);
+}
+
 button:hover {
   background: var(--accent-strong);
+}
+
+button.secondary:hover {
+  background: #edf4ef;
 }
 
 button:disabled {

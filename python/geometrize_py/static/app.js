@@ -4,6 +4,7 @@ const fileLabel = document.querySelector("#file-label");
 const sourcePreview = document.querySelector("#source-preview");
 const resultPreview = document.querySelector("#result-preview");
 const runButton = document.querySelector("#run-button");
+const sampleButton = document.querySelector("#sample-button");
 const statusText = document.querySelector("#status");
 const nativeState = document.querySelector("#native-state");
 const metrics = document.querySelector("#metrics");
@@ -51,6 +52,37 @@ imageInput.addEventListener("change", () => {
     clearDownloads();
   });
   reader.readAsDataURL(file);
+});
+
+sampleButton.addEventListener("click", () => {
+  const canvas = document.createElement("canvas");
+  canvas.width = 220;
+  canvas.height = 160;
+  const context = canvas.getContext("2d");
+  const fill = context.createLinearGradient(0, 0, 220, 160);
+  fill.addColorStop(0, "#f3d46b");
+  fill.addColorStop(0.55, "#4aa386");
+  fill.addColorStop(1, "#2f6eb3");
+  context.fillStyle = fill;
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  context.fillStyle = "rgba(255,255,255,0.82)";
+  context.beginPath();
+  context.arc(62, 54, 34, 0, Math.PI * 2);
+  context.fill();
+  context.fillStyle = "rgba(31,37,40,0.74)";
+  context.beginPath();
+  context.moveTo(72, 138);
+  context.lineTo(138, 36);
+  context.lineTo(190, 138);
+  context.closePath();
+  context.fill();
+  sourceDataUrl = canvas.toDataURL("image/png");
+  sourcePreview.src = sourceDataUrl;
+  resultPreview.removeAttribute("src");
+  fileLabel.textContent = "Generated sample";
+  clearDownloads();
+  statusText.textContent = "Ready";
+  metrics.textContent = "";
 });
 
 form.addEventListener("submit", async (event) => {
