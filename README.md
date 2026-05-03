@@ -11,7 +11,7 @@ still runs in the native C++ core from `lib/geometrize`.
 ```powershell
 git submodule update --init --recursive
 py -3 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -e .[dev]
+.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
 .\.venv\Scripts\python.exe -m geometrize_py serve --host 127.0.0.1 --port 7860
 ```
 
@@ -51,4 +51,4 @@ Run the tests with:
 
 The extension is built by scikit-build-core and CMake when installing the
 package. A working C++17 compiler is required for a fresh native build, but no
-Qt toolchain is needed.
+desktop UI toolchain is needed.

@@ -11,6 +11,25 @@ from .web import run_server
 
 
 def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    command = args.command
+    if command is None:
+        run_server("127.0.0.1", 7860, False)
+        return 0
+    if command == "serve":
+        run_server(args.host, args.port, args.open)
+        return 0
+    if command == "run":
+        return run_once(args)
+    if command == "doctor":
+        print(f"native backend: {'available' if native_available() else 'unavailable'}")
+        return 0 if native_available() else 1
+    parser.error(f"Unknown command: {command}")
+    return 2
+
+
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="geometrize", description="Run the Python Geometrize UI or headless renderer.")
     subparsers = parser.add_subparsers(dest="command")
 
@@ -28,19 +47,7 @@ def main(argv: list[str] | None = None) -> int:
 
     doctor = subparsers.add_parser("doctor", help="check the native backend")
     doctor.set_defaults(command="doctor")
-
-    args = parser.parse_args(argv)
-    command = args.command or "serve"
-    if command == "serve":
-        run_server(args.host, args.port, args.open)
-        return 0
-    if command == "run":
-        return run_once(args)
-    if command == "doctor":
-        print(f"native backend: {'available' if native_available() else 'unavailable'}")
-        return 0 if native_available() else 1
-    parser.error(f"Unknown command: {command}")
-    return 2
+    return parser
 
 
 def add_option_arguments(parser: argparse.ArgumentParser) -> None:

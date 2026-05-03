@@ -28,7 +28,7 @@ current so the next agent can find the important edges quickly.
 - Expected setup: Python 3.10+, Pillow, pytest for development, initialized
   submodules, and a C++17 compiler for fresh native extension builds.
 - Bootstrap submodules with `git submodule update --init --recursive`.
-- Install locally with `.\.venv\Scripts\python.exe -m pip install -e .[dev]`.
+- Install locally with `.\.venv\Scripts\python.exe -m pip install -e ".[dev]"`.
 - Start the UI with
   `.\.venv\Scripts\python.exe -m geometrize_py serve --host 127.0.0.1 --port 7860`.
 - Run tests with `.\.venv\Scripts\python.exe -m pytest`.
@@ -45,4 +45,4 @@ current so the next agent can find the important edges quickly.
 - If browser behavior changes, verify with the local server and Playwright or
   the in-app browser.
 - Keep new docs concise. The point of this port is a small native-feeling
-  Python project, not a museum of the Qt app.
+  Python project, not a migration archive.
