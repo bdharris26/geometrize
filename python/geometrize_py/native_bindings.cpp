@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <cctype>
 #include <cstdint>
 #include <map>
 #include <stdexcept>
@@ -13,6 +14,7 @@
 #include "geometrize/exporter/shapeserializer.h"
 #include "geometrize/runner/imagerunner.h"
 #include "geometrize/runner/imagerunneroptions.h"
+#include "geometrize/shape/shape.h"
 #include "geometrize/shape/shapetypes.h"
 #include "geometrize/shaperesult.h"
 
@@ -188,17 +190,14 @@ py::dict runRgba(const int width, const int height, const py::bytes& rgba, const
     runnerOptions.maxThreads = static_cast<std::uint32_t>(readInt(options, "max_threads", 0, 0, 128));
 
     const int steps{readInt(options, "steps", 1, 1, 2000)};
-    std::vector<geometrize::ShapeResult> shapes;
+    py::list shapeList;
     int attempts{0};
     for(int i = 0; i < steps; ++i) {
         std::vector<geometrize::ShapeResult> stepShapes{runner.step(runnerOptions)};
         attempts++;
-        shapes.insert(shapes.end(), stepShapes.begin(), stepShapes.end());
-    }
-
-    py::list shapeList;
-    for(const geometrize::ShapeResult& shape : shapes) {
-        shapeList.append(shapeResultToDict(shape));
+        for(const geometrize::ShapeResult& shape : stepShapes) {
+            shapeList.append(shapeResultToDict(shape));
+        }
     }
 
     const std::string outPixels{geometrize::exporter::exportBitmapData(runner.getCurrent())};

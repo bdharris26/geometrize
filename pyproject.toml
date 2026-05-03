@@ -23,7 +23,7 @@ build-dir = "build/{wheel_tag}"
 wheel.packages = ["python/geometrize_py"]
 
 [tool.scikit-build.cmake]
-minimum-version = "3.18"
+version = ">=3.18"
 source-dir = "."
 
 [tool.pytest.ini_options]

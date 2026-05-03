@@ -25,6 +25,20 @@ def test_health_endpoint_reports_native_state() -> None:
         server.server_close()
 
 
+def test_index_supports_sample_without_required_file_input() -> None:
+    server = GeometrizeServer(("127.0.0.1", 0), GeometrizeRequestHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/", timeout=5) as response:
+            html = response.read().decode("utf-8")
+        assert 'id="sample-button"' in html
+        assert 'id="image-input" type="file" accept="image/*">' in html
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 @pytest.mark.skipif(not native_available(), reason="native backend is not built")
 def test_run_endpoint_returns_rendered_image() -> None:
     server = GeometrizeServer(("127.0.0.1", 0), GeometrizeRequestHandler)
