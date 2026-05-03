@@ -1,5 +1,3 @@
-from geometrize_py.cli import entrypoint
+from .cli import main
 
-
-if __name__ == "__main__":
-    entrypoint()
+raise SystemExit(main())

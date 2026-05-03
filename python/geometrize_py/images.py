@@ -1,66 +1,45 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from pathlib import Path
+import base64
+import io
 
 from PIL import Image
+from PIL import ImageStat
 
 
-@dataclass(frozen=True, slots=True)
-class ImageInfo:
-    path: Path
-    width: int
-    height: int
-    mode: str
-    format: str | None
-
-    def as_dict(self) -> dict[str, object]:
-        return {
-            "path": str(self.path),
-            "width": self.width,
-            "height": self.height,
-            "mode": self.mode,
-            "format": self.format,
-        }
+def open_image_bytes(data: bytes) -> Image.Image:
+    with Image.open(io.BytesIO(data)) as image:
+        return image.convert("RGBA")
 
 
-@dataclass(frozen=True, slots=True)
-class RgbaImage:
-    width: int
-    height: int
-    rgba: bytes
-
-    def __post_init__(self) -> None:
-        if self.width <= 0:
-            raise ValueError("width must be greater than zero")
-        if self.height <= 0:
-            raise ValueError("height must be greater than zero")
-        expected_length = self.width * self.height * 4
-        if len(self.rgba) != expected_length:
-            raise ValueError(f"rgba data must contain {expected_length} bytes")
+def fit_image(image: Image.Image, max_size: int) -> Image.Image:
+    fitted = image.copy()
+    fitted.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
+    return fitted
 
 
-def inspect_image(path: Path) -> ImageInfo:
-    path = Path(path)
-    with Image.open(path) as image:
-        return ImageInfo(
-            path=path,
-            width=image.width,
-            height=image.height,
-            mode=image.mode,
-            format=image.format,
-        )
+def image_to_png_bytes(image: Image.Image) -> bytes:
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
 
 
-def load_rgba_image(path: Path) -> RgbaImage:
-    path = Path(path)
-    with Image.open(path) as image:
-        rgba = image.convert("RGBA")
-        return RgbaImage(width=rgba.width, height=rgba.height, rgba=rgba.tobytes())
+def image_to_data_url(image: Image.Image) -> str:
+    encoded = base64.b64encode(image_to_png_bytes(image)).decode("ascii")
+    return f"data:image/png;base64,{encoded}"
 
 
-def save_rgba_image(image: RgbaImage, path: Path) -> None:
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    pil_image = Image.frombytes("RGBA", (image.width, image.height), image.rgba)
-    pil_image.save(path)
+def image_from_data_url(data_url: str) -> Image.Image:
+    marker = "base64,"
+    if marker not in data_url:
+        raise ValueError("Expected a base64 image data URL")
+    payload = data_url.split(marker, 1)[1]
+    return open_image_bytes(base64.b64decode(payload))
+
+
+def average_color(image: Image.Image) -> tuple[int, int, int, int]:
+    rgba = image.convert("RGBA")
+    if rgba.width == 0 or rgba.height == 0:
+        return (255, 255, 255, 255)
+    red, green, blue, alpha = ImageStat.Stat(rgba).mean
+    return (int(red), int(green), int(blue), int(alpha))

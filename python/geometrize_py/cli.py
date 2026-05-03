@@ -2,229 +2,88 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 from pathlib import Path
-from typing import Sequence
 
-from geometrize_py.batch import load_batch_manifest
-from geometrize_py.images import inspect_image
-from geometrize_py.jobs import ExportFormat, GeometrizeJob, ShapeType, derive_output_path
-from geometrize_py.manifests import load_job
-from geometrize_py.native import NativeCoreUnavailable, NativeRunner
-from geometrize_py.screenshots import find_latest_screenshot
+from .images import image_to_png_bytes, open_image_bytes
+from .native import RunOptions, native_available, run_image
+from .svg import shapes_to_svg
+from .web import run_server
 
 
-DEFAULT_SHAPE = ShapeType.ELLIPSE.cli_name
-DEFAULT_EXPORT_FORMAT = ExportFormat.PNG.value
-DEFAULT_ALPHA = 128
-DEFAULT_CANDIDATE_SHAPE_COUNT = 50
-DEFAULT_MAX_SHAPE_MUTATIONS = 100
-DEFAULT_SEED = 9001
-DEFAULT_MAX_THREADS = 0
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="geometrize", description="Run the Python Geometrize UI or headless renderer.")
+    subparsers = parser.add_subparsers(dest="command")
 
-JOB_MANIFEST_OVERRIDE_FLAGS = (
-    ("output", "--output"),
-    ("shape", "--shape"),
-    ("count", "--count"),
-    ("export_format", "--export-format"),
-    ("alpha", "--alpha"),
-    ("candidate_shape_count", "--candidate-shape-count"),
-    ("max_shape_mutations", "--max-shape-mutations"),
-    ("seed", "--seed"),
-    ("max_threads", "--max-threads"),
-)
+    serve = subparsers.add_parser("serve", help="start the browser UI")
+    serve.add_argument("--host", default="127.0.0.1")
+    serve.add_argument("--port", type=int, default=7860)
+    serve.add_argument("--open", action="store_true", help="open the UI in the default browser")
 
+    run = subparsers.add_parser("run", help="render an image once from the command line")
+    run.add_argument("input", type=Path)
+    run.add_argument("--output", type=Path, required=True, help="PNG output path")
+    run.add_argument("--svg", type=Path, help="optional SVG output path")
+    run.add_argument("--json", type=Path, help="optional shape JSON output path")
+    add_option_arguments(run)
 
-def main(argv: Sequence[str] | None = None) -> int:
-    parser = build_parser()
+    doctor = subparsers.add_parser("doctor", help="check the native backend")
+    doctor.set_defaults(command="doctor")
+
     args = parser.parse_args(argv)
-
-    try:
-        if args.command == "run":
-            return _run(args)
-        if args.command == "latest-screenshot":
-            return _latest_screenshot()
-        if args.command == "inspect":
-            return _inspect(args)
-        if args.command == "batch":
-            return _batch(args)
-    except ValueError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 2
-
-    parser.print_help(sys.stderr)
+    command = args.command or "serve"
+    if command == "serve":
+        run_server(args.host, args.port, args.open)
+        return 0
+    if command == "run":
+        return run_once(args)
+    if command == "doctor":
+        print(f"native backend: {'available' if native_available() else 'unavailable'}")
+        return 0 if native_available() else 1
+    parser.error(f"Unknown command: {command}")
     return 2
 
 
-def entrypoint() -> None:
-    raise SystemExit(main())
+def add_option_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--steps", type=int, default=RunOptions.steps)
+    parser.add_argument("--shape-types", default=",".join(RunOptions.shape_types))
+    parser.add_argument("--alpha", type=int, default=RunOptions.alpha)
+    parser.add_argument("--shape-count", type=int, default=RunOptions.shape_count)
+    parser.add_argument("--mutations", type=int, default=RunOptions.mutations)
+    parser.add_argument("--seed", type=int, default=RunOptions.seed)
+    parser.add_argument("--max-threads", type=int, default=RunOptions.max_threads)
+    parser.add_argument("--max-size", type=int, default=RunOptions.max_size)
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="geometrize-py")
-    subparsers = parser.add_subparsers(dest="command")
-
-    run = subparsers.add_parser("run", help="Run or preview a headless geometrize job.")
-    source = run.add_mutually_exclusive_group(required=True)
-    source.add_argument("--input", type=Path, help="Image path to geometrize.")
-    source.add_argument("--latest-screenshot", action="store_true", help="Use the newest screenshot image.")
-    source.add_argument("--job", type=Path, help="JSON job manifest to run.")
-    run.add_argument("--output", type=Path, help="Output path. Defaults beside the input image.")
-    run.add_argument("--shape", choices=ShapeType.cli_choices())
-    run.add_argument("--count", type=int, help="Number of accepted shapes to request.")
-    run.add_argument("--export-format", choices=[format_.value for format_ in ExportFormat])
-    run.add_argument("--alpha", type=int)
-    run.add_argument("--candidate-shape-count", type=int)
-    run.add_argument("--max-shape-mutations", type=int)
-    run.add_argument("--seed", type=int)
-    run.add_argument("--max-threads", type=int)
-    run.add_argument("--dry-run", action="store_true", help="Print the job plan without invoking native code.")
-
-    subparsers.add_parser("latest-screenshot", help="Print the newest screenshot path.")
-
-    inspect = subparsers.add_parser("inspect", help="Print image metadata as JSON.")
-    inspect.add_argument("input", type=Path, help="Image path to inspect.")
-
-    batch = subparsers.add_parser("batch", help="Run or preview a batch manifest.")
-    batch.add_argument("--manifest", type=Path, required=True, help="Batch JSON manifest.")
-    batch.add_argument("--dry-run", action="store_true", help="Print resolved job plans without invoking native code.")
-    batch.add_argument("--continue-on-error", action="store_true", help="Keep running after individual job failures.")
-    return parser
-
-
-def _run(args: argparse.Namespace) -> int:
-    job = _resolve_job(args)
-    if not job.input_path.exists():
-        print(f"error: input image does not exist: {job.input_path}", file=sys.stderr)
-        return 2
-
-    if args.dry_run:
-        print(json.dumps(job.as_plan(runner="dry-run"), indent=2, sort_keys=True))
-        return 0
-
-    try:
-        result = NativeRunner().run(job)
-    except NativeCoreUnavailable as exc:
-        print(f"error: native core unavailable: {exc}", file=sys.stderr)
-        return 2
-
-    print(json.dumps({"output_path": str(result.output_path), "shapes_written": result.shapes_written}))
-    return 0
-
-
-def _latest_screenshot() -> int:
-    screenshot = find_latest_screenshot()
-    if screenshot is None:
-        print("error: no screenshot image found", file=sys.stderr)
-        return 2
-    print(screenshot)
-    return 0
-
-
-def _inspect(args: argparse.Namespace) -> int:
-    info = inspect_image(args.input)
-    print(json.dumps(info.as_dict(), indent=2, sort_keys=True))
-    return 0
-
-
-def _batch(args: argparse.Namespace) -> int:
-    manifest = load_batch_manifest(args.manifest)
-    if args.dry_run:
-        print(
-            json.dumps(
-                {
-                    "jobs_total": len(manifest.jobs),
-                    "plans": [job.as_plan(runner="dry-run") for job in manifest.jobs],
-                },
-                indent=2,
-                sort_keys=True,
-            )
-        )
-        return 0
-
-    summary: dict[str, object] = {
-        "jobs_total": len(manifest.jobs),
-        "jobs_succeeded": 0,
-        "jobs_failed": 0,
-        "results": [],
-    }
-    results: list[dict[str, object]] = []
-    runner = NativeRunner()
-
-    for index, job in enumerate(manifest.jobs):
-        try:
-            if not job.input_path.exists():
-                raise ValueError(f"input image does not exist: {job.input_path}")
-            result = runner.run(job)
-            results.append(
-                {
-                    "index": index,
-                    "output_path": str(result.output_path),
-                    "shapes_written": result.shapes_written,
-                    "attempts": result.attempts,
-                }
-            )
-            summary["jobs_succeeded"] = int(summary["jobs_succeeded"]) + 1
-        except (NativeCoreUnavailable, ValueError) as exc:
-            results.append({"index": index, "error": str(exc), "output_path": str(job.output_path)})
-            summary["jobs_failed"] = int(summary["jobs_failed"]) + 1
-            if not args.continue_on_error:
-                summary["results"] = results
-                print(json.dumps(summary, indent=2, sort_keys=True))
-                return 2
-
-    summary["results"] = results
-    print(json.dumps(summary, indent=2, sort_keys=True))
-    return 1 if int(summary["jobs_failed"]) else 0
-
-
-def _resolve_input_path(args: argparse.Namespace) -> Path:
-    if args.latest_screenshot:
-        screenshot = find_latest_screenshot()
-        if screenshot is None:
-            raise ValueError("no screenshot image found")
-        return screenshot
-    return args.input
-
-
-def _resolve_job(args: argparse.Namespace) -> GeometrizeJob:
-    if args.job:
-        _reject_job_overrides(args)
-        return load_job(args.job)
-    if args.count is None:
-        raise ValueError("--count is required unless --job is supplied")
-
-    input_path = _resolve_input_path(args)
-    shape = ShapeType.from_cli(args.shape or DEFAULT_SHAPE)
-    export_format = ExportFormat.from_cli(args.export_format or DEFAULT_EXPORT_FORMAT)
-    output_path = args.output or derive_output_path(input_path, shape, args.count, export_format)
-    return GeometrizeJob(
-        input_path=input_path,
-        output_path=output_path,
-        shape=shape,
-        count=args.count,
-        export_format=export_format,
-        alpha=args.alpha if args.alpha is not None else DEFAULT_ALPHA,
-        candidate_shape_count=(
-            args.candidate_shape_count
-            if args.candidate_shape_count is not None
-            else DEFAULT_CANDIDATE_SHAPE_COUNT
-        ),
-        max_shape_mutations=(
-            args.max_shape_mutations
-            if args.max_shape_mutations is not None
-            else DEFAULT_MAX_SHAPE_MUTATIONS
-        ),
-        seed=args.seed if args.seed is not None else DEFAULT_SEED,
-        max_threads=args.max_threads if args.max_threads is not None else DEFAULT_MAX_THREADS,
+def options_from_args(args: argparse.Namespace) -> RunOptions:
+    return RunOptions.from_mapping(
+        {
+            "steps": args.steps,
+            "shape_types": args.shape_types,
+            "alpha": args.alpha,
+            "shape_count": args.shape_count,
+            "mutations": args.mutations,
+            "seed": args.seed,
+            "max_threads": args.max_threads,
+            "max_size": args.max_size,
+        }
     )
 
 
-def _reject_job_overrides(args: argparse.Namespace) -> None:
-    flags = [
-        flag
-        for attribute, flag in JOB_MANIFEST_OVERRIDE_FLAGS
-        if getattr(args, attribute) is not None
-    ]
-    if flags:
-        raise ValueError(f"--job cannot be combined with run override option(s): {', '.join(flags)}")
+def run_once(args: argparse.Namespace) -> int:
+    image = open_image_bytes(args.input.read_bytes())
+    result = run_image(image, options_from_args(args))
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_bytes(image_to_png_bytes(result.image))
+    svg = shapes_to_svg(result.shapes, result.width, result.height, result.background)
+    if args.svg:
+        args.svg.parent.mkdir(parents=True, exist_ok=True)
+        args.svg.write_text(svg, encoding="utf-8")
+    if args.json:
+        args.json.parent.mkdir(parents=True, exist_ok=True)
+        args.json.write_text(json.dumps(result.shapes, indent=2), encoding="utf-8")
+    print(f"wrote {args.output} with {len(result.shapes)} shapes")
+    return 0
+
+
+def entrypoint() -> int:
+    return main()

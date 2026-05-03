@@ -1,139 +1,110 @@
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
 from html import escape
-from math import cos, pi, sin
-from pathlib import Path
 from typing import Any
 
 
-STROKED_SHAPES = {"line", "polyline", "quadratic_bezier"}
-
-
-def render_svg(width: int, height: int, shapes: Iterable[Mapping[str, Any]]) -> str:
-    if width <= 0 or height <= 0:
-        raise ValueError("width and height must be greater than zero")
-
-    lines = [
+def shapes_to_svg(
+    shapes: list[dict[str, Any]],
+    width: int,
+    height: int,
+    background: tuple[int, int, int, int] | None = None,
+) -> str:
+    parts = [
+        '<?xml version="1.0" standalone="no"?>',
         (
-            f'<svg xmlns="http://www.w3.org/2000/svg" width="{_number(width)}" '
-            f'height="{_number(height)}" viewBox="0 0 {_number(width)} {_number(height)}">'
-        )
+            '<svg xmlns="http://www.w3.org/2000/svg" version="1.2" '
+            f'baseProfile="tiny" width="{width}" height="{height}" viewBox="0 0 {width} {height}">'
+        ),
     ]
-    for item_id, shape in enumerate(shapes):
-        lines.append(f"  {shape_to_svg_element(shape, item_id)}")
-    lines.append("</svg>")
-    return "\n".join(lines) + "\n"
-
-
-def export_svg(width: int, height: int, shapes: Iterable[Mapping[str, Any]]) -> str:
-    return render_svg(width, height, shapes)
-
-
-def save_svg(width: int, height: int, shapes: Iterable[Mapping[str, Any]], output_path: Path) -> None:
-    output_path = Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(render_svg(width, height, shapes), encoding="utf-8")
-
-
-def shape_to_svg_element(shape: Mapping[str, Any], item_id: int = 0) -> str:
-    shape_type = str(shape["type"])
-    data = _mapping(shape["data"])
-    style = _style(shape_type, _mapping(shape["color"]), item_id)
-
-    if shape_type == "rectangle":
-        x1, y1, x2, y2 = _rect_bounds(data)
-        return (
-            f'<rect x="{_number(x1)}" y="{_number(y1)}" width="{_number(x2 - x1)}" '
-            f'height="{_number(y2 - y1)}" {style} />'
+    if background:
+        parts.append(
+            f'<rect x="0" y="0" width="{width}" height="{height}" '
+            f'fill="{_rgb(background)}" fill-opacity="{_alpha(background)}" />'
         )
-    if shape_type == "rotated_rectangle":
-        points = " ".join(f"{_number(x)},{_number(y)}" for x, y in _rotated_rectangle_points(data))
-        return f'<polygon points="{escape(points)}" {style} />'
-    if shape_type == "triangle":
-        return (
-            '<polygon points="'
-            f'{_number(data["x1"])},{_number(data["y1"])} '
-            f'{_number(data["x2"])},{_number(data["y2"])} '
-            f'{_number(data["x3"])},{_number(data["y3"])}" {style} />'
-        )
+    for index, shape in enumerate(shapes):
+        parts.append(_shape_to_svg(shape, index))
+    parts.append("</svg>")
+    return "\n".join(parts)
+
+
+def _shape_to_svg(shape: dict[str, Any], index: int) -> str:
+    shape_type = str(shape.get("type", ""))
+    color = _shape_color(shape)
+    style = _style(shape_type, color, index)
+    data = shape.get("data", {})
+
+    if shape_type == "circle":
+        return f'<circle cx="{_num(data["x"])}" cy="{_num(data["y"])}" r="{_num(data["r"])}" {style} />'
     if shape_type == "ellipse":
         return (
-            f'<ellipse cx="{_number(data["x"])}" cy="{_number(data["y"])}" '
-            f'rx="{_number(data["rx"])}" ry="{_number(data["ry"])}" {style} />'
+            f'<ellipse cx="{_num(data["x"])}" cy="{_num(data["y"])}" '
+            f'rx="{_num(data["rx"])}" ry="{_num(data["ry"])}" {style} />'
         )
     if shape_type == "rotated_ellipse":
         return (
-            f'<g transform="translate({_number(data["x"])} {_number(data["y"])}) '
-            f'rotate({_number(data["angle"])}) scale({_number(data["rx"])} {_number(data["ry"])})">'
+            f'<g transform="translate({_num(data["x"])} {_num(data["y"])}) '
+            f'rotate({_num(data["angle"])}) scale({_num(data["rx"])} {_num(data["ry"])})">'
             f'<ellipse cx="0" cy="0" rx="1" ry="1" {style} /></g>'
         )
-    if shape_type == "circle":
+    if shape_type == "rectangle":
+        x1, y1, x2, y2 = data["x1"], data["y1"], data["x2"], data["y2"]
         return (
-            f'<circle cx="{_number(data["x"])}" cy="{_number(data["y"])}" '
-            f'r="{_number(data["r"])}" {style} />'
+            f'<rect x="{_num(x1)}" y="{_num(y1)}" width="{_num(x2 - x1)}" '
+            f'height="{_num(y2 - y1)}" {style} />'
         )
+    if shape_type == "rotated_rectangle":
+        x1, y1, x2, y2 = data["x1"], data["y1"], data["x2"], data["y2"]
+        cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+        return (
+            f'<rect x="{_num(x1)}" y="{_num(y1)}" width="{_num(x2 - x1)}" '
+            f'height="{_num(y2 - y1)}" transform="rotate({_num(data["angle"])} {_num(cx)} {_num(cy)})" {style} />'
+        )
+    if shape_type == "triangle":
+        points = (
+            f'{_num(data["x1"])},{_num(data["y1"])} '
+            f'{_num(data["x2"])},{_num(data["y2"])} '
+            f'{_num(data["x3"])},{_num(data["y3"])}'
+        )
+        return f'<polygon points="{points}" {style} />'
     if shape_type == "line":
         return (
-            f'<line x1="{_number(data["x1"])}" y1="{_number(data["y1"])}" '
-            f'x2="{_number(data["x2"])}" y2="{_number(data["y2"])}" {style} />'
+            f'<line x1="{_num(data["x1"])}" y1="{_num(data["y1"])}" '
+            f'x2="{_num(data["x2"])}" y2="{_num(data["y2"])}" {style} />'
         )
-    if shape_type == "polyline":
-        points = " ".join(f"{_number(point[0])},{_number(point[1])}" for point in data["points"])
-        return f'<polyline points="{escape(points)}" {style} />'
     if shape_type == "quadratic_bezier":
         path = (
-            f'M{_number(data["x1"])} {_number(data["y1"])} '
-            f'Q {_number(data["cx"])} {_number(data["cy"])} {_number(data["x2"])} {_number(data["y2"])}'
+            f'M{_num(data["x1"])} {_num(data["y1"])} '
+            f'Q {_num(data["cx"])} {_num(data["cy"])} {_num(data["x2"])} {_num(data["y2"])}'
         )
-        return f'<path d="{escape(path)}" {style} />'
-
-    raise ValueError(f"unsupported shape type for SVG export: {shape_type}")
-
-
-def _style(shape_type: str, color: Mapping[str, Any], item_id: int) -> str:
-    rgb = f'rgb({int(color["r"])},{int(color["g"])},{int(color["b"])})'
-    opacity = _number(int(color["a"]) / 255)
-    if shape_type in STROKED_SHAPES:
-        return f'id="{item_id}" stroke="{rgb}" stroke-width="1" fill="none" stroke-opacity="{opacity}"'
-    return f'id="{item_id}" fill="{rgb}" fill-opacity="{opacity}"'
+        return f'<path d="{path}" {style} />'
+    if shape_type == "polyline":
+        points = " ".join(f'{_num(x)},{_num(y)}' for x, y in data.get("points", []))
+        return f'<polyline points="{escape(points)}" {style} />'
+    raise ValueError(f"Cannot export unknown shape type '{shape_type}'")
 
 
-def _rect_bounds(data: Mapping[str, Any]) -> tuple[float, float, float, float]:
-    x1 = float(data["x1"])
-    y1 = float(data["y1"])
-    x2 = float(data["x2"])
-    y2 = float(data["y2"])
-    return min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2)
+def _shape_color(shape: dict[str, Any]) -> tuple[int, int, int, int]:
+    color = shape.get("color", {})
+    return (int(color["r"]), int(color["g"]), int(color["b"]), int(color["a"]))
 
 
-def _rotated_rectangle_points(data: Mapping[str, Any]) -> list[tuple[float, float]]:
-    x1, y1, x2, y2 = _rect_bounds(data)
-    cx = (x2 + x1) / 2
-    cy = (y2 + y1) / 2
-    ox1 = x1 - cx
-    ox2 = x2 - cx
-    oy1 = y1 - cy
-    oy2 = y2 - cy
-    rads = float(data["angle"]) * pi / 180
-    cosine = cos(rads)
-    sine = sin(rads)
-    return [
-        (ox1 * cosine - oy1 * sine + cx, ox1 * sine + oy1 * cosine + cy),
-        (ox2 * cosine - oy1 * sine + cx, ox2 * sine + oy1 * cosine + cy),
-        (ox2 * cosine - oy2 * sine + cx, ox2 * sine + oy2 * cosine + cy),
-        (ox1 * cosine - oy2 * sine + cx, ox1 * sine + oy2 * cosine + cy),
-    ]
+def _style(shape_type: str, color: tuple[int, int, int, int], index: int) -> str:
+    if shape_type in {"line", "polyline", "quadratic_bezier"}:
+        return (
+            f'id="shape-{index}" stroke="{_rgb(color)}" stroke-width="1" '
+            f'stroke-opacity="{_alpha(color)}" fill="none"'
+        )
+    return f'id="shape-{index}" fill="{_rgb(color)}" fill-opacity="{_alpha(color)}"'
 
 
-def _mapping(value: Any) -> Mapping[str, Any]:
-    if not isinstance(value, Mapping):
-        raise ValueError("shape data must be a mapping")
-    return value
+def _rgb(color: tuple[int, int, int, int]) -> str:
+    return f"rgb({color[0]},{color[1]},{color[2]})"
 
 
-def _number(value: Any) -> str:
-    numeric = float(value)
-    if numeric.is_integer():
-        return str(int(numeric))
-    return f"{numeric:.6f}".rstrip("0").rstrip(".")
+def _alpha(color: tuple[int, int, int, int]) -> str:
+    return f"{color[3] / 255:.4g}"
+
+
+def _num(value: float) -> str:
+    return f"{float(value):.4g}"

@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cstdint>
+#include <map>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -8,291 +9,206 @@
 #include <pybind11/stl.h>
 
 #include "geometrize/bitmap/bitmap.h"
+#include "geometrize/exporter/bitmapdataexporter.h"
+#include "geometrize/exporter/shapeserializer.h"
 #include "geometrize/runner/imagerunner.h"
 #include "geometrize/runner/imagerunneroptions.h"
-#include "geometrize/shape/circle.h"
-#include "geometrize/shape/ellipse.h"
-#include "geometrize/shape/line.h"
-#include "geometrize/shape/polyline.h"
-#include "geometrize/shape/quadraticbezier.h"
-#include "geometrize/shape/rectangle.h"
-#include "geometrize/shape/rotatedellipse.h"
-#include "geometrize/shape/rotatedrectangle.h"
-#include "geometrize/shape/shape.h"
 #include "geometrize/shape/shapetypes.h"
-#include "geometrize/shape/triangle.h"
 #include "geometrize/shaperesult.h"
 
 namespace py = pybind11;
 
-namespace {
-
-std::uint32_t uint_from_options(const py::dict& options, const char* name, const std::uint32_t defaultValue)
+namespace
 {
-    if(!options.contains(name)) {
-        return defaultValue;
+
+const std::map<std::string, geometrize::ShapeTypes> SHAPE_NAMES{
+    {"rectangle", geometrize::ShapeTypes::RECTANGLE},
+    {"rotated_rectangle", geometrize::ShapeTypes::ROTATED_RECTANGLE},
+    {"triangle", geometrize::ShapeTypes::TRIANGLE},
+    {"ellipse", geometrize::ShapeTypes::ELLIPSE},
+    {"rotated_ellipse", geometrize::ShapeTypes::ROTATED_ELLIPSE},
+    {"circle", geometrize::ShapeTypes::CIRCLE},
+    {"line", geometrize::ShapeTypes::LINE},
+    {"quadratic_bezier", geometrize::ShapeTypes::QUADRATIC_BEZIER},
+    {"polyline", geometrize::ShapeTypes::POLYLINE},
+};
+
+int readInt(const py::dict& options, const char* key, const int fallback, const int lower, const int upper)
+{
+    if(!options.contains(key)) {
+        return fallback;
     }
-    const int value = py::cast<int>(options[name]);
-    if(value < 0) {
-        throw std::invalid_argument(std::string{name} + " must be greater than or equal to zero");
-    }
-    return static_cast<std::uint32_t>(value);
+    const int value{py::cast<int>(options[key])};
+    return (std::max)(lower, (std::min)(upper, value));
 }
 
-std::uint8_t alpha_from_options(const py::dict& options)
+std::string normalizeShapeName(std::string value)
 {
-    const int value = options.contains("alpha") ? py::cast<int>(options["alpha"]) : 128;
-    if(value < 0 || value > 255) {
-        throw std::invalid_argument("alpha must be between 0 and 255");
-    }
-    return static_cast<std::uint8_t>(value);
-}
-
-std::string normalize_shape_name(std::string value)
-{
-    std::replace(value.begin(), value.end(), '-', '_');
-    std::transform(value.begin(), value.end(), value.begin(), [](const unsigned char ch) {
-        return static_cast<char>(std::tolower(ch));
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+        if(c == '-' || c == ' ') {
+            return '_';
+        }
+        return static_cast<char>(std::tolower(c));
     });
     return value;
 }
 
-geometrize::ShapeTypes shape_type_from_name(const std::string& name)
+std::uint32_t shapeMaskFromOptions(const py::dict& options)
 {
-    const std::string normalized = normalize_shape_name(name);
-    if(normalized == "rectangle") {
-        return geometrize::ShapeTypes::RECTANGLE;
+    if(!options.contains("shape_types")) {
+        return static_cast<std::uint32_t>(geometrize::ShapeTypes::ELLIPSE);
     }
-    if(normalized == "rotated_rectangle") {
-        return geometrize::ShapeTypes::ROTATED_RECTANGLE;
+
+    const py::object values{options["shape_types"]};
+    if(py::isinstance<py::int_>(values)) {
+        return py::cast<std::uint32_t>(values);
     }
-    if(normalized == "triangle") {
-        return geometrize::ShapeTypes::TRIANGLE;
+
+    std::uint32_t mask{0U};
+    for(const py::handle item : values) {
+        if(py::isinstance<py::int_>(item)) {
+            mask |= py::cast<std::uint32_t>(item);
+            continue;
+        }
+
+        const std::string name{normalizeShapeName(py::cast<std::string>(item))};
+        const auto found{SHAPE_NAMES.find(name)};
+        if(found == SHAPE_NAMES.end()) {
+            throw std::invalid_argument("Unknown shape type: " + name);
+        }
+        mask |= static_cast<std::uint32_t>(found->second);
     }
-    if(normalized == "ellipse") {
-        return geometrize::ShapeTypes::ELLIPSE;
+
+    if(mask == 0U) {
+        throw std::invalid_argument("At least one shape type is required");
     }
-    if(normalized == "rotated_ellipse") {
-        return geometrize::ShapeTypes::ROTATED_ELLIPSE;
-    }
-    if(normalized == "circle") {
-        return geometrize::ShapeTypes::CIRCLE;
-    }
-    if(normalized == "line") {
-        return geometrize::ShapeTypes::LINE;
-    }
-    if(normalized == "quadratic_bezier") {
-        return geometrize::ShapeTypes::QUADRATIC_BEZIER;
-    }
-    if(normalized == "polyline") {
-        return geometrize::ShapeTypes::POLYLINE;
-    }
-    throw std::invalid_argument("unknown shape type: " + name);
+    return mask;
 }
 
-const char* shape_name(const geometrize::ShapeTypes type)
+std::string shapeName(const geometrize::ShapeTypes type)
 {
+    for(const auto& item : SHAPE_NAMES) {
+        if(item.second == type) {
+            return item.first;
+        }
+    }
+    return "unknown";
+}
+
+py::dict rgbaToDict(const geometrize::rgba color)
+{
+    py::dict out;
+    out["r"] = static_cast<int>(color.r);
+    out["g"] = static_cast<int>(color.g);
+    out["b"] = static_cast<int>(color.b);
+    out["a"] = static_cast<int>(color.a);
+    return out;
+}
+
+py::dict shapeDataToDict(const geometrize::ShapeTypes type, const std::vector<float>& data)
+{
+    py::dict out;
     switch(type) {
     case geometrize::ShapeTypes::RECTANGLE:
-        return "rectangle";
+        out["x1"] = data.at(0); out["y1"] = data.at(1); out["x2"] = data.at(2); out["y2"] = data.at(3);
+        break;
     case geometrize::ShapeTypes::ROTATED_RECTANGLE:
-        return "rotated_rectangle";
+        out["x1"] = data.at(0); out["y1"] = data.at(1); out["x2"] = data.at(2); out["y2"] = data.at(3); out["angle"] = data.at(4);
+        break;
     case geometrize::ShapeTypes::TRIANGLE:
-        return "triangle";
+        out["x1"] = data.at(0); out["y1"] = data.at(1); out["x2"] = data.at(2); out["y2"] = data.at(3); out["x3"] = data.at(4); out["y3"] = data.at(5);
+        break;
     case geometrize::ShapeTypes::ELLIPSE:
-        return "ellipse";
+        out["x"] = data.at(0); out["y"] = data.at(1); out["rx"] = data.at(2); out["ry"] = data.at(3);
+        break;
     case geometrize::ShapeTypes::ROTATED_ELLIPSE:
-        return "rotated_ellipse";
+        out["x"] = data.at(0); out["y"] = data.at(1); out["rx"] = data.at(2); out["ry"] = data.at(3); out["angle"] = data.at(4);
+        break;
     case geometrize::ShapeTypes::CIRCLE:
-        return "circle";
+        out["x"] = data.at(0); out["y"] = data.at(1); out["r"] = data.at(2);
+        break;
     case geometrize::ShapeTypes::LINE:
-        return "line";
+        out["x1"] = data.at(0); out["y1"] = data.at(1); out["x2"] = data.at(2); out["y2"] = data.at(3);
+        break;
     case geometrize::ShapeTypes::QUADRATIC_BEZIER:
-        return "quadratic_bezier";
+        out["x1"] = data.at(0); out["y1"] = data.at(1); out["cx"] = data.at(2); out["cy"] = data.at(3); out["x2"] = data.at(4); out["y2"] = data.at(5);
+        break;
     case geometrize::ShapeTypes::POLYLINE:
-        return "polyline";
-    default:
-        return "unknown";
-    }
-}
-
-py::dict color_to_dict(const geometrize::rgba& color)
-{
-    py::dict data;
-    data["r"] = color.r;
-    data["g"] = color.g;
-    data["b"] = color.b;
-    data["a"] = color.a;
-    return data;
-}
-
-py::dict shape_data_to_dict(const geometrize::Shape& shape)
-{
-    py::dict data;
-    switch(shape.getType()) {
-    case geometrize::ShapeTypes::RECTANGLE: {
-        const auto& s = static_cast<const geometrize::Rectangle&>(shape);
-        data["x1"] = s.m_x1;
-        data["y1"] = s.m_y1;
-        data["x2"] = s.m_x2;
-        data["y2"] = s.m_y2;
-        return data;
-    }
-    case geometrize::ShapeTypes::ROTATED_RECTANGLE: {
-        const auto& s = static_cast<const geometrize::RotatedRectangle&>(shape);
-        data["x1"] = s.m_x1;
-        data["y1"] = s.m_y1;
-        data["x2"] = s.m_x2;
-        data["y2"] = s.m_y2;
-        data["angle"] = s.m_angle;
-        return data;
-    }
-    case geometrize::ShapeTypes::TRIANGLE: {
-        const auto& s = static_cast<const geometrize::Triangle&>(shape);
-        data["x1"] = s.m_x1;
-        data["y1"] = s.m_y1;
-        data["x2"] = s.m_x2;
-        data["y2"] = s.m_y2;
-        data["x3"] = s.m_x3;
-        data["y3"] = s.m_y3;
-        return data;
-    }
-    case geometrize::ShapeTypes::ELLIPSE: {
-        const auto& s = static_cast<const geometrize::Ellipse&>(shape);
-        data["x"] = s.m_x;
-        data["y"] = s.m_y;
-        data["rx"] = s.m_rx;
-        data["ry"] = s.m_ry;
-        return data;
-    }
-    case geometrize::ShapeTypes::ROTATED_ELLIPSE: {
-        const auto& s = static_cast<const geometrize::RotatedEllipse&>(shape);
-        data["x"] = s.m_x;
-        data["y"] = s.m_y;
-        data["rx"] = s.m_rx;
-        data["ry"] = s.m_ry;
-        data["angle"] = s.m_angle;
-        return data;
-    }
-    case geometrize::ShapeTypes::CIRCLE: {
-        const auto& s = static_cast<const geometrize::Circle&>(shape);
-        data["x"] = s.m_x;
-        data["y"] = s.m_y;
-        data["r"] = s.m_r;
-        return data;
-    }
-    case geometrize::ShapeTypes::LINE: {
-        const auto& s = static_cast<const geometrize::Line&>(shape);
-        data["x1"] = s.m_x1;
-        data["y1"] = s.m_y1;
-        data["x2"] = s.m_x2;
-        data["y2"] = s.m_y2;
-        return data;
-    }
-    case geometrize::ShapeTypes::QUADRATIC_BEZIER: {
-        const auto& s = static_cast<const geometrize::QuadraticBezier&>(shape);
-        data["x1"] = s.m_x1;
-        data["y1"] = s.m_y1;
-        data["cx"] = s.m_cx;
-        data["cy"] = s.m_cy;
-        data["x2"] = s.m_x2;
-        data["y2"] = s.m_y2;
-        return data;
-    }
-    case geometrize::ShapeTypes::POLYLINE: {
-        const auto& s = static_cast<const geometrize::Polyline&>(shape);
-        py::list points;
-        for(const auto& point : s.m_points) {
-            py::list item;
-            item.append(point.first);
-            item.append(point.second);
-            points.append(item);
-        }
-        data["points"] = points;
-        return data;
-    }
-    default:
-        throw std::runtime_error("unsupported shape type");
-    }
-}
-
-py::dict shape_result_to_dict(const geometrize::ShapeResult& result)
-{
-    py::dict data;
-    const geometrize::ShapeTypes type = result.shape->getType();
-    data["score"] = result.score;
-    data["color"] = color_to_dict(result.color);
-    data["type"] = shape_name(type);
-    data["type_id"] = static_cast<std::uint32_t>(type);
-    data["data"] = shape_data_to_dict(*result.shape);
-    return data;
-}
-
-geometrize::ImageRunnerOptions runner_options_from_dict(const py::dict& options)
-{
-    geometrize::ImageRunnerOptions runnerOptions;
-    const std::string shape = options.contains("shape") ? py::cast<std::string>(options["shape"]) : "ellipse";
-    runnerOptions.shapeTypes = shape_type_from_name(shape);
-    runnerOptions.alpha = alpha_from_options(options);
-    runnerOptions.shapeCount = uint_from_options(options, "candidate_shape_count", 50);
-    runnerOptions.maxShapeMutations = uint_from_options(options, "max_shape_mutations", 100);
-    runnerOptions.seed = uint_from_options(options, "seed", 9001);
-    runnerOptions.maxThreads = uint_from_options(options, "max_threads", 0);
-    return runnerOptions;
-}
-
-py::dict run_rgba(const std::uint32_t width, const std::uint32_t height, const py::bytes rgbaBytes, const py::dict options)
-{
-    if(width == 0 || height == 0) {
-        throw std::invalid_argument("width and height must be greater than zero");
-    }
-
-    const std::string rawData = rgbaBytes;
-    const std::size_t expectedLength = static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4U;
-    if(rawData.size() != expectedLength) {
-        throw std::invalid_argument("rgba data length must equal width * height * 4");
-    }
-
-    const std::uint32_t targetShapeCount = uint_from_options(options, "count", 1);
-    if(targetShapeCount == 0) {
-        throw std::invalid_argument("count must be greater than zero");
-    }
-    const std::uint32_t maxAttempts = uint_from_options(options, "max_attempts", std::max<std::uint32_t>(targetShapeCount * 20U, targetShapeCount + 20U));
-    geometrize::ImageRunnerOptions runnerOptions = runner_options_from_dict(options);
-
-    std::vector<std::uint8_t> pixels(rawData.begin(), rawData.end());
-    geometrize::Bitmap target{width, height, pixels};
-    geometrize::ImageRunner runner{target};
-    std::vector<geometrize::ShapeResult> acceptedShapes;
-    acceptedShapes.reserve(targetShapeCount);
-    std::uint32_t attempts = 0;
-
-    {
-        py::gil_scoped_release release;
-        while(acceptedShapes.size() < targetShapeCount && attempts < maxAttempts) {
-            std::vector<geometrize::ShapeResult> results = runner.step(runnerOptions);
-            for(const geometrize::ShapeResult& result : results) {
-                if(acceptedShapes.size() < targetShapeCount) {
-                    acceptedShapes.push_back(result);
-                }
+        {
+            py::list points;
+            for(std::size_t i = 0; i + 1 < data.size(); i += 2) {
+                py::tuple point(2);
+                point[0] = data[i];
+                point[1] = data[i + 1];
+                points.append(point);
             }
-            ++attempts;
+            out["points"] = points;
         }
+        break;
+    default:
+        throw std::invalid_argument("Unsupported shape type");
+    }
+    return out;
+}
+
+py::dict shapeResultToDict(const geometrize::ShapeResult& result)
+{
+    const geometrize::ShapeTypes type{result.shape->getType()};
+    py::dict out;
+    out["score"] = result.score;
+    out["color"] = rgbaToDict(result.color);
+    out["type"] = shapeName(type);
+    out["type_id"] = static_cast<std::uint32_t>(type);
+    out["data"] = shapeDataToDict(type, geometrize::getRawShapeData(*result.shape));
+    return out;
+}
+
+py::dict runRgba(const int width, const int height, const py::bytes& rgba, const py::dict& options)
+{
+    if(width <= 0 || height <= 0) {
+        throw std::invalid_argument("Image dimensions must be positive");
     }
 
-    const std::vector<std::uint8_t> current = runner.getCurrent().copyData();
-    py::list shapes;
-    for(const geometrize::ShapeResult& shape : acceptedShapes) {
-        shapes.append(shape_result_to_dict(shape));
+    const std::string raw{rgba};
+    const std::size_t expected{static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4U};
+    if(raw.size() != expected) {
+        throw std::invalid_argument("RGBA byte count does not match image dimensions");
     }
 
-    py::dict result;
-    result["width"] = width;
-    result["height"] = height;
-    result["rgba"] = py::bytes(reinterpret_cast<const char*>(current.data()), current.size());
-    result["shapes"] = shapes;
-    result["attempts"] = attempts;
-    return result;
+    std::vector<std::uint8_t> pixels(raw.begin(), raw.end());
+    geometrize::Bitmap target(static_cast<std::uint32_t>(width), static_cast<std::uint32_t>(height), pixels);
+    geometrize::ImageRunner runner(target);
+
+    geometrize::ImageRunnerOptions runnerOptions;
+    runnerOptions.shapeTypes = static_cast<geometrize::ShapeTypes>(shapeMaskFromOptions(options));
+    runnerOptions.alpha = static_cast<std::uint8_t>(readInt(options, "alpha", 128, 1, 255));
+    runnerOptions.shapeCount = static_cast<std::uint32_t>(readInt(options, "shape_count", 50, 1, 500));
+    runnerOptions.maxShapeMutations = static_cast<std::uint32_t>(readInt(options, "mutations", 100, 1, 1000));
+    runnerOptions.seed = static_cast<std::uint32_t>(readInt(options, "seed", 9001, 0, 2147483647));
+    runnerOptions.maxThreads = static_cast<std::uint32_t>(readInt(options, "max_threads", 0, 0, 128));
+
+    const int steps{readInt(options, "steps", 1, 1, 2000)};
+    std::vector<geometrize::ShapeResult> shapes;
+    int attempts{0};
+    for(int i = 0; i < steps; ++i) {
+        std::vector<geometrize::ShapeResult> stepShapes{runner.step(runnerOptions)};
+        attempts++;
+        shapes.insert(shapes.end(), stepShapes.begin(), stepShapes.end());
+    }
+
+    py::list shapeList;
+    for(const geometrize::ShapeResult& shape : shapes) {
+        shapeList.append(shapeResultToDict(shape));
+    }
+
+    const std::string outPixels{geometrize::exporter::exportBitmapData(runner.getCurrent())};
+    py::dict out;
+    out["width"] = width;
+    out["height"] = height;
+    out["rgba"] = py::bytes(outPixels);
+    out["shapes"] = shapeList;
+    out["attempts"] = attempts;
+    return out;
 }
 
 }
@@ -300,8 +216,6 @@ py::dict run_rgba(const std::uint32_t width, const std::uint32_t height, const p
 PYBIND11_MODULE(_native, module)
 {
     module.doc() = "Native bindings for the Geometrize image runner.";
-    module.def("is_available", []() {
-        return true;
-    });
-    module.def("run_rgba", &run_rgba, py::arg("width"), py::arg("height"), py::arg("rgba"), py::arg("options"));
+    module.def("is_available", []() { return true; });
+    module.def("run_rgba", &runRgba, py::arg("width"), py::arg("height"), py::arg("rgba"), py::arg("options"));
 }

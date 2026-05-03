@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Geometrize</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <div class="shell">
+    <aside class="controls" aria-label="Render controls">
+      <header class="brand">
+        <img src="/static/logo.svg" alt="" width="36" height="36">
+        <div>
+          <h1>Geometrize</h1>
+          <p id="native-state">Checking native core...</p>
+        </div>
+      </header>
+
+      <form id="run-form">
+        <label class="drop-zone" for="image-input">
+          <input id="image-input" type="file" accept="image/*" required>
+          <span id="file-label">Choose image</span>
+        </label>
+
+        <fieldset class="shape-grid">
+          <legend>Shapes</legend>
+          <label><input type="checkbox" name="shape" value="ellipse" checked> Ellipse</label>
+          <label><input type="checkbox" name="shape" value="rotated_rectangle" checked> Rotated rectangle</label>
+          <label><input type="checkbox" name="shape" value="triangle" checked> Triangle</label>
+          <label><input type="checkbox" name="shape" value="circle"> Circle</label>
+          <label><input type="checkbox" name="shape" value="rectangle"> Rectangle</label>
+          <label><input type="checkbox" name="shape" value="line"> Line</label>
+        </fieldset>
+
+        <div class="field">
+          <label for="steps">Steps <output id="steps-out">75</output></label>
+          <input id="steps" name="steps" type="range" min="1" max="400" value="75">
+        </div>
+
+        <div class="field two">
+          <label>Alpha <input id="alpha" name="alpha" type="number" min="1" max="255" value="128"></label>
+          <label>Seed <input id="seed" name="seed" type="number" min="0" value="9001"></label>
+        </div>
+
+        <div class="field two">
+          <label>Candidates <input id="shape-count" name="shape_count" type="number" min="1" max="500" value="50"></label>
+          <label>Mutations <input id="mutations" name="mutations" type="number" min="1" max="1000" value="100"></label>
+        </div>
+
+        <div class="field">
+          <label for="max-size">Max size <output id="max-size-out">512</output></label>
+          <input id="max-size" name="max_size" type="range" min="64" max="1024" step="32" value="512">
+        </div>
+
+        <button id="run-button" type="submit">Run</button>
+      </form>
+    </aside>
+
+    <main class="workspace">
+      <section class="preview-wrap" aria-label="Image preview">
+        <div class="preview-grid">
+          <figure>
+            <figcaption>Source</figcaption>
+            <img id="source-preview" alt="">
+          </figure>
+          <figure>
+            <figcaption>Result</figcaption>
+            <img id="result-preview" alt="">
+          </figure>
+        </div>
+      </section>
+
+      <footer class="statusbar">
+        <span id="status">Ready</span>
+        <span id="metrics"></span>
+        <div class="downloads">
+          <a id="download-png" aria-disabled="true">PNG</a>
+          <a id="download-svg" aria-disabled="true">SVG</a>
+          <a id="download-json" aria-disabled="true">JSON</a>
+        </div>
+      </footer>
+    </main>
+  </div>
+  <script src="/static/app.js"></script>
+</body>
+</html>
