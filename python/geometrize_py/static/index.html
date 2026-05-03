@@ -10,28 +10,30 @@
   <div class="shell">
     <aside class="controls" aria-label="Render controls">
       <header class="brand">
-        <img src="/static/logo.svg" alt="" width="36" height="36">
-        <div>
+        <img class="brand-mark" src="/static/logo.svg" alt="" width="40" height="40">
+        <div class="brand-copy">
           <h1>Geometrize</h1>
-          <p id="native-state">Checking native core...</p>
+          <p id="native-state">Checking core</p>
         </div>
       </header>
 
       <form id="run-form">
-        <label class="drop-zone" for="image-input">
-          <input id="image-input" type="file" accept="image/*">
-          <span id="file-label">Choose image</span>
-        </label>
-        <button id="sample-button" class="secondary" type="button">Sample</button>
+        <div class="input-actions">
+          <label class="drop-zone" for="image-input">
+            <input id="image-input" type="file" accept="image/*">
+            <span id="file-label">Choose image</span>
+          </label>
+          <button id="sample-button" class="secondary" type="button">Sample</button>
+        </div>
 
         <fieldset class="shape-grid">
           <legend>Shapes</legend>
-          <label><input type="checkbox" name="shape" value="ellipse" checked> Ellipse</label>
-          <label><input type="checkbox" name="shape" value="rotated_rectangle" checked> Rotated rectangle</label>
-          <label><input type="checkbox" name="shape" value="triangle" checked> Triangle</label>
-          <label><input type="checkbox" name="shape" value="circle"> Circle</label>
-          <label><input type="checkbox" name="shape" value="rectangle"> Rectangle</label>
-          <label><input type="checkbox" name="shape" value="line"> Line</label>
+          <label><input type="checkbox" name="shape" value="ellipse" checked><span class="shape-symbol ellipse-symbol"></span><span class="shape-name">Ellipse</span></label>
+          <label><input type="checkbox" name="shape" value="rotated_rectangle" checked><span class="shape-symbol rotated-rectangle-symbol"></span><span class="shape-name">Rotated rectangle</span></label>
+          <label><input type="checkbox" name="shape" value="triangle" checked><span class="shape-symbol triangle-symbol"></span><span class="shape-name">Triangle</span></label>
+          <label><input type="checkbox" name="shape" value="circle"><span class="shape-symbol circle-symbol"></span><span class="shape-name">Circle</span></label>
+          <label><input type="checkbox" name="shape" value="rectangle"><span class="shape-symbol rectangle-symbol"></span><span class="shape-name">Rectangle</span></label>
+          <label><input type="checkbox" name="shape" value="line"><span class="shape-symbol line-symbol"></span><span class="shape-name">Line</span></label>
         </fieldset>
 
         <div class="field">
@@ -50,8 +52,11 @@
         </div>
 
         <div class="field">
-          <label for="max-size">Max size <output id="max-size-out">512</output></label>
-          <input id="max-size" name="max_size" type="range" min="64" max="1024" step="32" value="512">
+          <label for="max-size">Max size <output id="max-size-out">1024</output></label>
+          <div class="range-with-input">
+            <input id="max-size" name="max_size" type="range" min="64" max="8192" step="64" value="1024">
+            <input id="max-size-number" type="number" min="64" max="8192" step="64" value="1024" aria-label="Max size value">
+          </div>
         </div>
 
         <button id="run-button" type="submit">Run</button>
@@ -62,18 +67,21 @@
       <section class="preview-wrap" aria-label="Image preview">
         <div class="preview-grid">
           <figure>
-            <figcaption>Source</figcaption>
+            <figcaption><span>Source</span><span id="source-meta"></span></figcaption>
             <img id="source-preview" alt="">
           </figure>
           <figure>
-            <figcaption>Result</figcaption>
+            <figcaption><span>Result</span><span id="result-meta"></span></figcaption>
             <img id="result-preview" alt="">
           </figure>
         </div>
       </section>
 
       <footer class="statusbar">
-        <span id="status">Ready</span>
+        <div class="status-group">
+          <span id="status">Ready</span>
+          <span id="pipeline">0 shapes</span>
+        </div>
         <span id="metrics"></span>
         <div class="downloads">
           <a id="download-png" aria-disabled="true">PNG</a>

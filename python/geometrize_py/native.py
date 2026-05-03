@@ -21,6 +21,7 @@ SHAPE_TYPES: dict[str, int] = {
 }
 
 DEFAULT_SHAPES = ("ellipse", "rotated_rectangle", "triangle")
+MAX_IMAGE_SIZE = 8192
 
 
 class NativeBackendUnavailable(RuntimeError):
@@ -45,7 +46,7 @@ class RunOptions:
     mutations: int = 100
     seed: int = 9001
     max_threads: int = 0
-    max_size: int = 512
+    max_size: int = 1024
 
     @classmethod
     def from_mapping(cls, data: dict[str, Any] | None) -> "RunOptions":
@@ -61,7 +62,7 @@ class RunOptions:
             mutations=_clamp_int(data.get("mutations", cls.mutations), 1, 1000),
             seed=_clamp_int(data.get("seed", cls.seed), 0, 2**31 - 1),
             max_threads=_clamp_int(data.get("max_threads", cls.max_threads), 0, 128),
-            max_size=_clamp_int(data.get("max_size", cls.max_size), 32, 2048),
+            max_size=_clamp_int(data.get("max_size", cls.max_size), 32, MAX_IMAGE_SIZE),
         )
 
     def to_native_dict(self) -> dict[str, Any]:

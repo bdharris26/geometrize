@@ -12,6 +12,15 @@ const steps = document.querySelector("#steps");
 const stepsOut = document.querySelector("#steps-out");
 const maxSize = document.querySelector("#max-size");
 const maxSizeOut = document.querySelector("#max-size-out");
+const maxSizeNumber = document.querySelector("#max-size-number");
+const sourceMeta = document.querySelector("#source-meta");
+const resultMeta = document.querySelector("#result-meta");
+const pipeline = document.querySelector("#pipeline");
+const maxSizeBounds = {
+  min: Number(maxSize.min),
+  max: Number(maxSize.max),
+  step: Number(maxSize.step)
+};
 const downloads = {
   png: document.querySelector("#download-png"),
   svg: document.querySelector("#download-svg"),
@@ -24,7 +33,7 @@ let activeUrls = [];
 fetch("/health")
   .then((response) => response.json())
   .then((data) => {
-    nativeState.textContent = data.native ? "Native core ready" : "Native core unavailable";
+    nativeState.textContent = data.native ? "Core ready" : "Core unavailable";
   })
   .catch(() => {
     nativeState.textContent = "Server unavailable";
@@ -34,9 +43,8 @@ steps.addEventListener("input", () => {
   stepsOut.value = steps.value;
 });
 
-maxSize.addEventListener("input", () => {
-  maxSizeOut.value = maxSize.value;
-});
+maxSize.addEventListener("input", () => syncMaxSize(maxSize.value, maxSizeNumber));
+maxSizeNumber.addEventListener("input", () => syncMaxSize(maxSizeNumber.value, maxSize));
 
 imageInput.addEventListener("change", () => {
   const file = imageInput.files[0];
@@ -49,7 +57,9 @@ imageInput.addEventListener("change", () => {
     sourceDataUrl = reader.result;
     sourcePreview.src = sourceDataUrl;
     resultPreview.removeAttribute("src");
+    resultMeta.textContent = "";
     clearDownloads();
+    updateImageMeta(sourcePreview, sourceMeta);
   });
   reader.readAsDataURL(file);
 });
@@ -79,10 +89,13 @@ sampleButton.addEventListener("click", () => {
   sourceDataUrl = canvas.toDataURL("image/png");
   sourcePreview.src = sourceDataUrl;
   resultPreview.removeAttribute("src");
+  resultMeta.textContent = "";
   fileLabel.textContent = "Generated sample";
   clearDownloads();
   statusText.textContent = "Ready";
   metrics.textContent = "";
+  pipeline.textContent = "0 shapes";
+  updateImageMeta(sourcePreview, sourceMeta);
 });
 
 form.addEventListener("submit", async (event) => {
@@ -102,6 +115,7 @@ form.addEventListener("submit", async (event) => {
   clearDownloads();
   statusText.textContent = "Running";
   metrics.textContent = "";
+  pipeline.textContent = "Iterating";
 
   const payload = {
     image: sourceDataUrl,
@@ -129,6 +143,8 @@ form.addEventListener("submit", async (event) => {
     resultPreview.src = data.preview;
     statusText.textContent = "Complete";
     metrics.textContent = `${data.shape_count} shapes, ${data.width} x ${data.height}`;
+    pipeline.textContent = `${data.attempts} steps`;
+    resultMeta.textContent = `${data.width} x ${data.height}`;
     setDownload(downloads.png, data.preview, "geometrize.png");
     setDownload(downloads.svg, makeObjectUrl(data.svg, "image/svg+xml"), "geometrize.svg");
     setDownload(downloads.json, makeObjectUrl(JSON.stringify(data.shapes, null, 2), "application/json"), "geometrize.json");
@@ -142,6 +158,15 @@ form.addEventListener("submit", async (event) => {
 function setBusy(busy) {
   runButton.disabled = busy;
   runButton.textContent = busy ? "Running" : "Run";
+}
+
+function syncMaxSize(value, mirror) {
+  const numericValue = Math.max(maxSizeBounds.min, Math.min(maxSizeBounds.max, Number(value) || maxSizeBounds.min));
+  const snapped = Math.round(numericValue / maxSizeBounds.step) * maxSizeBounds.step;
+  maxSize.value = String(snapped);
+  maxSizeNumber.value = String(snapped);
+  maxSizeOut.value = String(snapped);
+  mirror.value = String(snapped);
 }
 
 function clearDownloads() {
@@ -164,4 +189,14 @@ function setDownload(link, href, filename) {
   link.href = href;
   link.download = filename;
   link.setAttribute("aria-disabled", "false");
+}
+
+function updateImageMeta(image, target) {
+  if (image.complete && image.naturalWidth) {
+    target.textContent = `${image.naturalWidth} x ${image.naturalHeight}`;
+    return;
+  }
+  image.addEventListener("load", () => {
+    target.textContent = `${image.naturalWidth} x ${image.naturalHeight}`;
+  }, { once: true });
 }
