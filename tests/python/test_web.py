@@ -34,11 +34,19 @@ def test_index_supports_sample_without_required_file_input() -> None:
             html = response.read().decode("utf-8")
         assert 'id="sample-button"' in html
         assert 'id="image-input" type="file" accept="image/*">' in html
+        assert 'id="image-name"' in html
+        assert 'id="steps" name="steps" type="range" min="1" max="4096" value="128"' in html
+        assert "Shapes to add" in html
+        assert "Candidates per shape" in html
+        assert "Mutations per candidate" in html
+        assert "Longest dimension" in html
         assert 'id="max-size" name="max_size" type="range" min="64" max="8192" step="64" value="1024"' in html
         assert 'id="max-size-number" type="number" min="64" max="8192" step="64" value="1024"' in html
+        assert 'id="pause-button"' in html
         assert 'class="telemetry-console"' in html
         assert 'id="result-canvas"' in html
         assert 'id="score-graph"' in html
+        assert 'id="impact-graph"' in html
         assert 'id="telemetry-acceptance"' in html
     finally:
         server.shutdown()
@@ -55,7 +63,14 @@ def test_run_endpoint_returns_rendered_image() -> None:
         body = json.dumps(
             {
                 "image": image_to_data_url(image),
-                "options": {"steps": 1, "shape_types": ["ellipse"], "shape_count": 5, "mutations": 5},
+                "options": {
+                    "steps": 1,
+                    "shape_types": ["ellipse"],
+                    "shape_count": 5,
+                    "mutations": 5,
+                    "max_size": 6,
+                    "export_size": 64,
+                },
             }
         ).encode("utf-8")
         request = urllib.request.Request(
@@ -68,8 +83,11 @@ def test_run_endpoint_returns_rendered_image() -> None:
             payload = json.loads(response.read().decode("utf-8"))
         assert payload["width"] == 6
         assert payload["height"] == 6
+        assert payload["export_width"] == 64
+        assert payload["export_height"] == 64
         assert payload["preview"].startswith("data:image/png;base64,")
         assert payload["svg"].startswith('<?xml version="1.0"')
+        assert 'width="64" height="64" viewBox="0 0 6 6"' in payload["svg"]
         assert payload["shape_count"] == len(payload["shapes"])
         assert payload["attempts"] >= 1
         if payload["shapes"]:
@@ -89,7 +107,14 @@ def test_stream_endpoint_returns_progress_events() -> None:
         body = json.dumps(
             {
                 "image": image_to_data_url(image),
-                "options": {"steps": 2, "shape_types": ["ellipse"], "shape_count": 5, "mutations": 5},
+                "options": {
+                    "steps": 2,
+                    "shape_types": ["ellipse"],
+                    "shape_count": 5,
+                    "mutations": 5,
+                    "max_size": 6,
+                    "export_size": 64,
+                },
             }
         ).encode("utf-8")
         request = urllib.request.Request(
@@ -100,10 +125,65 @@ def test_stream_endpoint_returns_progress_events() -> None:
         )
         with urllib.request.urlopen(request, timeout=10) as response:
             events = [json.loads(line) for line in response.read().decode("utf-8").splitlines()]
-        assert [event["event"] for event in events] == ["start", "step", "step", "complete"]
+        assert events[0]["event"] == "start"
+        assert events[0]["session_id"]
+        assert events[0]["continued"] is False
+        assert events[-1]["event"] == "complete"
+        assert any(event["event"] == "step" for event in events)
         assert events[0]["width"] == 6
-        assert events[-1]["attempts"] == 2
+        assert events[-1]["attempts"] >= 2
+        assert events[-1]["export_width"] == 64
         assert events[-1]["preview"].startswith("data:image/png;base64,")
     finally:
         server.shutdown()
         server.server_close()
+
+
+@pytest.mark.skipif(not native_available(), reason="native backend is not built")
+def test_stream_endpoint_can_continue_session_with_new_shape_options() -> None:
+    server = GeometrizeServer(("127.0.0.1", 0), GeometrizeRequestHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        image = Image.new("RGBA", (12, 12), (30, 40, 50, 255))
+        for x in range(6, 12):
+            for y in range(12):
+                image.putpixel((x, y), (220, 180, 80, 255))
+
+        first_events = _post_stream(
+            server.server_port,
+            {
+                "image": image_to_data_url(image),
+                "options": {"steps": 1, "shape_types": ["rectangle"], "shape_count": 8, "mutations": 8},
+            },
+        )
+        session_id = first_events[0]["session_id"]
+        first_count = first_events[-1]["shape_count"]
+
+        second_events = _post_stream(
+            server.server_port,
+            {
+                "session_id": session_id,
+                "options": {"steps": 1, "shape_types": ["triangle"], "shape_count": 8, "mutations": 8},
+            },
+        )
+
+        assert second_events[0]["continued"] is True
+        assert second_events[0]["shape_count"] == first_count
+        assert second_events[-1]["shape_count"] >= first_count
+        assert second_events[-1]["session_id"] == session_id
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def _post_stream(port: int, payload: dict) -> list[dict]:
+    body = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{port}/api/run/stream",
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=10) as response:
+        return [json.loads(line) for line in response.read().decode("utf-8").splitlines()]

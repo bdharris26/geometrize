@@ -117,7 +117,10 @@ form {
 .drop-zone {
   display: grid;
   min-height: 50px;
-  place-items: center;
+  align-content: center;
+  justify-items: start;
+  gap: 3px;
+  padding: 7px 12px;
   border: 1px dashed var(--line-strong);
   border-radius: 7px;
   background: rgba(36, 32, 23, 0.76);
@@ -129,8 +132,17 @@ form {
 
 #file-label {
   max-width: 100%;
-  padding: 0 12px;
   overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#image-name {
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 680;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -307,8 +319,18 @@ button.secondary:hover {
 }
 
 button:disabled {
-  cursor: wait;
+  cursor: not-allowed;
   opacity: 0.68;
+}
+
+#run-button:disabled {
+  cursor: progress;
+}
+
+.run-actions {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 10px;
 }
 
 button:focus-visible,
@@ -439,6 +461,33 @@ figcaption span {
   overflow-wrap: anywhere;
 }
 
+.batch-history {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  min-height: 0;
+}
+
+.batch-chip {
+  display: inline-grid;
+  grid-auto-flow: column;
+  gap: 6px;
+  align-items: center;
+  max-width: 100%;
+  min-height: 28px;
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: rgba(36, 32, 23, 0.72);
+  color: var(--muted);
+  font-size: 0.76rem;
+  font-weight: 760;
+}
+
+.batch-chip strong {
+  color: var(--accent-strong);
+}
+
 .telemetry-grid {
   display: grid;
   grid-template-columns: 1.2fr 1fr 1.2fr;
@@ -480,8 +529,7 @@ figcaption span {
 }
 
 .score-path,
-.shape-path,
-.area-path {
+.impact-axis {
   fill: none;
   stroke-linecap: round;
   stroke-linejoin: round;
@@ -492,14 +540,15 @@ figcaption span {
   stroke-width: 3;
 }
 
-.shape-path {
-  stroke: var(--accent);
-  stroke-width: 3;
+.impact-axis {
+  stroke: var(--gold);
+  stroke-width: 1.5;
+  stroke-opacity: 0.58;
 }
 
-.area-path {
-  stroke: var(--gold);
-  stroke-width: 2;
+.impact-bar {
+  fill: var(--gold);
+  opacity: 0.72;
 }
 
 .graph-dot {
@@ -642,7 +691,8 @@ figcaption span:last-child {
 @media (max-width: 420px) {
   .shape-grid,
   .field.two,
-  .range-with-input {
+  .range-with-input,
+  .run-actions {
     grid-template-columns: 1fr;
   }
 

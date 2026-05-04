@@ -22,6 +22,7 @@
           <label class="drop-zone" for="image-input">
             <input id="image-input" type="file" accept="image/*">
             <span id="file-label">Choose image</span>
+            <span id="image-name">No image selected</span>
           </label>
           <button id="sample-button" class="secondary" type="button">Sample</button>
         </div>
@@ -37,8 +38,8 @@
         </fieldset>
 
         <div class="field">
-          <label for="steps">Steps <output id="steps-out">75</output></label>
-          <input id="steps" name="steps" type="range" min="1" max="400" value="75">
+          <label for="steps" title="How many accepted primitives to add in this batch. Continue adds another batch to the current result.">Shapes to add <output id="steps-out">128</output></label>
+          <input id="steps" name="steps" type="range" min="1" max="4096" value="128">
         </div>
 
         <div class="field two">
@@ -47,19 +48,22 @@
         </div>
 
         <div class="field two">
-          <label>Candidates <input id="shape-count" name="shape_count" type="number" min="1" max="500" value="50"></label>
-          <label>Mutations <input id="mutations" name="mutations" type="number" min="1" max="1000" value="100"></label>
+          <label title="Candidate primitives tested for each accepted shape.">Candidates per shape <input id="shape-count" name="shape_count" type="number" min="1" max="512" value="64"></label>
+          <label title="Random refinements tried for each candidate primitive.">Mutations per candidate <input id="mutations" name="mutations" type="number" min="1" max="2048" value="128"></label>
         </div>
 
         <div class="field">
-          <label for="max-size">Max size <output id="max-size-out">1024</output></label>
+          <label for="max-size" title="Longest output dimension. Large values export sharper PNG/SVG results while the optimizer only downsizes oversized sources for speed.">Longest dimension <output id="max-size-out">1024</output></label>
           <div class="range-with-input">
             <input id="max-size" name="max_size" type="range" min="64" max="8192" step="64" value="1024">
-            <input id="max-size-number" type="number" min="64" max="8192" step="64" value="1024" aria-label="Max size value">
+            <input id="max-size-number" type="number" min="64" max="8192" step="64" value="1024" aria-label="Longest dimension value">
           </div>
         </div>
 
-        <button id="run-button" type="submit">Run</button>
+        <div class="run-actions">
+          <button id="run-button" type="submit">Run</button>
+          <button id="pause-button" class="secondary" type="button" disabled>Pause</button>
+        </div>
       </form>
     </aside>
 
@@ -83,10 +87,11 @@
       <section class="telemetry-console" aria-label="Optimization telemetry">
         <div class="run-strip">
           <span id="telemetry-state">Idle</span>
-          <span id="telemetry-acceptance">0 accepted / 0 attempts</span>
+          <span id="telemetry-acceptance" title="Attempts are optimizer steps. Some attempts can test candidates without accepting a new shape.">0 accepted / 0 attempts</span>
           <span id="telemetry-improvement">Score --</span>
           <span id="telemetry-duration">--</span>
         </div>
+        <div id="batch-history" class="batch-history" aria-label="Completed shape batches"></div>
         <div class="telemetry-grid">
           <article class="telemetry-card">
             <header><span>Convergence</span><output id="telemetry-score">--</output></header>
@@ -97,8 +102,8 @@
             <div id="primitive-mix" class="primitive-mix"></div>
           </article>
           <article class="telemetry-card">
-            <header><span>Resolution</span><output id="telemetry-resolution">--</output></header>
-            <svg id="resolution-graph" class="telemetry-graph" viewBox="0 0 360 120" role="img" aria-label="Resolution graph"></svg>
+            <header><span>Score Impact</span><output id="telemetry-impact">--</output></header>
+            <svg id="impact-graph" class="telemetry-graph" viewBox="0 0 360 120" role="img" aria-label="Score impact graph"></svg>
           </article>
         </div>
       </section>

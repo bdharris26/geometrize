@@ -1,10 +1,12 @@
 const form = document.querySelector("#run-form");
 const imageInput = document.querySelector("#image-input");
 const fileLabel = document.querySelector("#file-label");
+const imageName = document.querySelector("#image-name");
 const sourcePreview = document.querySelector("#source-preview");
 const resultPreview = document.querySelector("#result-preview");
 const resultCanvas = document.querySelector("#result-canvas");
 const runButton = document.querySelector("#run-button");
+const pauseButton = document.querySelector("#pause-button");
 const sampleButton = document.querySelector("#sample-button");
 const statusText = document.querySelector("#status");
 const nativeState = document.querySelector("#native-state");
@@ -23,10 +25,11 @@ const telemetryImprovement = document.querySelector("#telemetry-improvement");
 const telemetryDuration = document.querySelector("#telemetry-duration");
 const telemetryScore = document.querySelector("#telemetry-score");
 const telemetryTotal = document.querySelector("#telemetry-total");
-const telemetryResolution = document.querySelector("#telemetry-resolution");
+const telemetryImpact = document.querySelector("#telemetry-impact");
 const scoreGraph = document.querySelector("#score-graph");
-const resolutionGraph = document.querySelector("#resolution-graph");
+const impactGraph = document.querySelector("#impact-graph");
 const primitiveMix = document.querySelector("#primitive-mix");
+const batchHistory = document.querySelector("#batch-history");
 const maxSizeBounds = {
   min: Number(maxSize.min),
   max: Number(maxSize.max),
@@ -52,8 +55,11 @@ const SHAPE_LABELS = {
 };
 
 let sourceDataUrl = "";
+let activeSessionId = "";
 let activeUrls = [];
 let runStartedAt = 0;
+let runningController = null;
+let currentBatch = null;
 let runStats = createRunStats();
 let renderSpace = {
   width: 0,
@@ -74,23 +80,17 @@ steps.addEventListener("input", () => {
   stepsOut.value = steps.value;
 });
 
-maxSize.addEventListener("input", () => syncMaxSize(maxSize.value, maxSizeNumber));
-maxSizeNumber.addEventListener("input", () => syncMaxSize(maxSizeNumber.value, maxSize));
+maxSize.addEventListener("input", () => syncMaxSize(maxSize.value));
+maxSizeNumber.addEventListener("input", () => syncMaxSize(maxSizeNumber.value));
 
 imageInput.addEventListener("change", () => {
   const file = imageInput.files[0];
   if (!file) {
     return;
   }
-  fileLabel.textContent = file.name;
   const reader = new FileReader();
   reader.addEventListener("load", () => {
-    sourceDataUrl = reader.result;
-    sourcePreview.src = sourceDataUrl;
-    resetResultSurface();
-    clearDownloads();
-    resetTelemetry();
-    updateImageMeta(sourcePreview, sourceMeta);
+    setSourceImage(reader.result, file.name);
   });
   reader.readAsDataURL(file);
 });
@@ -117,69 +117,132 @@ sampleButton.addEventListener("click", () => {
   context.lineTo(190, 138);
   context.closePath();
   context.fill();
-  sourceDataUrl = canvas.toDataURL("image/png");
-  sourcePreview.src = sourceDataUrl;
-  fileLabel.textContent = "Generated sample";
-  clearDownloads();
-  resetResultSurface();
-  resetTelemetry();
-  statusText.textContent = "Ready";
-  metrics.textContent = "";
-  pipeline.textContent = "0 shapes";
-  updateImageMeta(sourcePreview, sourceMeta);
+  setSourceImage(canvas.toDataURL("image/png"), "Generated sample");
+});
+
+pauseButton.addEventListener("click", () => {
+  if (!runningController) {
+    return;
+  }
+  statusText.textContent = "Pausing";
+  telemetryState.textContent = "Pausing";
+  runningController.abort();
 });
 
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
-  if (!sourceDataUrl) {
+  if (!sourceDataUrl && !activeSessionId) {
     statusText.textContent = "Choose an image";
     return;
   }
 
-  const shapeTypes = [...document.querySelectorAll("input[name='shape']:checked")].map((item) => item.value);
+  const shapeTypes = selectedShapeTypes();
   if (shapeTypes.length === 0) {
     statusText.textContent = "Choose at least one shape";
     return;
   }
 
-  setBusy(true);
-  clearDownloads();
-  resetTelemetry();
-  resetResultSurface();
-  statusText.textContent = "Running";
-  telemetryState.textContent = "Running";
-  metrics.textContent = "";
-  pipeline.textContent = "Iterating";
-  runStartedAt = performance.now();
-
+  const isContinuation = Boolean(activeSessionId);
+  const options = currentOptions(shapeTypes);
   const payload = {
-    image: sourceDataUrl,
-    options: {
-      steps: Number(steps.value),
-      shape_types: shapeTypes,
-      alpha: Number(document.querySelector("#alpha").value),
-      seed: Number(document.querySelector("#seed").value),
-      shape_count: Number(document.querySelector("#shape-count").value),
-      mutations: Number(document.querySelector("#mutations").value),
-      max_size: Number(maxSize.value)
-    }
+    options
   };
+  if (isContinuation) {
+    payload.session_id = activeSessionId;
+  } else {
+    payload.image = sourceDataUrl;
+  }
+
+  prepareRun(isContinuation, options);
+  const controller = new AbortController();
+  runningController = controller;
 
   try {
-    await streamRun(payload);
+    await streamRun(payload, controller.signal);
   } catch (error) {
-    statusText.textContent = error.message;
-    telemetryState.textContent = "Error";
+    if (isAbortError(error)) {
+      recordCurrentBatch("Paused");
+      statusText.textContent = "Paused";
+      telemetryState.textContent = "Paused";
+    } else {
+      if (error.message.includes("Unknown render session")) {
+        activeSessionId = "";
+      }
+      statusText.textContent = error.message;
+      telemetryState.textContent = "Error";
+    }
   } finally {
+    runningController = null;
     setBusy(false);
   }
 });
 
-async function streamRun(payload) {
+function setSourceImage(dataUrl, label) {
+  sourceDataUrl = dataUrl;
+  activeSessionId = "";
+  currentBatch = null;
+  sourcePreview.src = sourceDataUrl;
+  fileLabel.textContent = "Change image";
+  imageName.textContent = label;
+  resetResultSurface();
+  clearDownloads();
+  resetTelemetry();
+  statusText.textContent = "Ready";
+  metrics.textContent = "";
+  pipeline.textContent = "0 shapes";
+  updateImageMeta(sourcePreview, sourceMeta);
+  setBusy(false);
+}
+
+function selectedShapeTypes() {
+  return [...document.querySelectorAll("input[name='shape']:checked")].map((item) => item.value);
+}
+
+function currentOptions(shapeTypes) {
+  const longestDimension = Number(maxSize.value);
+  return {
+    steps: Number(steps.value),
+    shape_types: shapeTypes,
+    alpha: Number(document.querySelector("#alpha").value),
+    seed: Number(document.querySelector("#seed").value),
+    shape_count: Number(document.querySelector("#shape-count").value),
+    mutations: Number(document.querySelector("#mutations").value),
+    max_size: longestDimension,
+    export_size: longestDimension
+  };
+}
+
+function prepareRun(isContinuation, options) {
+  if (!isContinuation) {
+    activeSessionId = "";
+    resetTelemetry();
+    resetResultSurface();
+  }
+  clearDownloads();
+  setBusy(true);
+  statusText.textContent = isContinuation ? "Continuing" : "Running";
+  telemetryState.textContent = isContinuation ? "Continuing" : "Running";
+  metrics.textContent = "";
+  pipeline.textContent = "Iterating";
+  runStartedAt = performance.now();
+  currentBatch = {
+    index: runStats.batches.length + 1,
+    startedAtShapeCount: runStats.shapes.length,
+    startedAtAttempts: runStats.attempts,
+    target: options.steps,
+    shapeTypes: options.shape_types,
+    candidates: options.shape_count,
+    mutations: options.mutations,
+    alpha: options.alpha
+  };
+}
+
+async function streamRun(payload, signal) {
   const response = await fetch("/api/run/stream", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload)
+    body: JSON.stringify(payload),
+    signal
   });
 
   if (!response.ok) {
@@ -213,10 +276,8 @@ async function streamRun(payload) {
 
 function handleRunEvent(event) {
   if (event.event === "start") {
-    startLiveCanvas(event.width, event.height, event.background);
-    resultMeta.textContent = `${event.width} x ${event.height}`;
-    telemetryResolution.textContent = `${event.width} x ${event.height}`;
-    renderResolutionGraph(event.width, event.height, 0, Number(steps.value));
+    activeSessionId = event.session_id || activeSessionId;
+    handleStartEvent(event);
     return;
   }
 
@@ -235,46 +296,111 @@ function handleRunEvent(event) {
   }
 }
 
+function handleStartEvent(event) {
+  startLiveCanvas(event.width, event.height, event.background);
+  if (event.continued && Array.isArray(event.shapes)) {
+    rebuildFromSnapshot(event.shapes, event.attempts);
+  }
+  if (event.continued && currentBatch) {
+    currentBatch.startedAtShapeCount = runStats.shapes.length;
+    currentBatch.startedAtAttempts = event.attempts || runStats.attempts;
+  }
+  resultMeta.textContent = `${event.width} x ${event.height}`;
+  telemetryAcceptance.textContent = `${runStats.shapes.length} accepted / ${event.attempts || runStats.attempts} attempts`;
+  telemetryTotal.textContent = String(runStats.shapes.length);
+  renderScoreGraph(runStats.scores);
+  renderImpactGraph(runStats.improvements);
+  renderPrimitiveMix();
+}
+
+function rebuildFromSnapshot(shapes, attempts) {
+  const batches = runStats.batches;
+  runStats = createRunStats(batches);
+  runStats.attempts = attempts || 0;
+  shapes.forEach((shape) => appendShape(shape, true));
+}
+
 function appendStep(event) {
   const shapes = event.shapes || [];
-  shapes.forEach((shape) => {
-    runStats.shapes.push(shape);
-    runStats.primitiveCounts.set(shape.type, (runStats.primitiveCounts.get(shape.type) || 0) + 1);
-    if (typeof shape.score === "number") {
-      runStats.scores.push(shape.score);
-    }
-    drawShape(shape);
-  });
+  shapes.forEach((shape) => appendShape(shape, true));
 
   runStats.attempts = event.attempts;
   const latestScore = runStats.scores.at(-1);
+  const latestImpact = runStats.improvements.at(-1);
   statusText.textContent = "Running";
-  pipeline.textContent = `${event.attempts} / ${steps.value} steps`;
+  pipeline.textContent = `${event.batch_shape_count} / ${event.batch_goal} shapes in batch`;
   metrics.textContent = `${runStats.shapes.length} shapes`;
   telemetryAcceptance.textContent = `${runStats.shapes.length} accepted / ${event.attempts} attempts`;
   telemetryTotal.textContent = String(runStats.shapes.length);
   telemetryDuration.textContent = formatDuration(performance.now() - runStartedAt);
   telemetryScore.textContent = formatScore(latestScore);
-  telemetryImprovement.textContent = formatScoreDelta(runStats.scores);
+  telemetryImprovement.textContent = formatImpact(latestImpact);
+  telemetryImpact.textContent = formatImpactValue(latestImpact);
   renderScoreGraph(runStats.scores);
+  renderImpactGraph(runStats.improvements);
   renderPrimitiveMix();
-  renderResolutionGraph(renderSpace.width, renderSpace.height, runStats.shapes.length, Number(steps.value));
+}
+
+function appendShape(shape, draw) {
+  const previousScore = runStats.scores.at(-1);
+  runStats.shapes.push(shape);
+  runStats.primitiveCounts.set(shape.type, (runStats.primitiveCounts.get(shape.type) || 0) + 1);
+  if (typeof shape.score === "number") {
+    if (typeof previousScore === "number") {
+      runStats.improvements.push(Math.max(0, previousScore - shape.score));
+    }
+    runStats.scores.push(shape.score);
+  }
+  if (draw) {
+    drawShape(shape);
+  }
 }
 
 function finishRun(data) {
   const elapsed = performance.now() - runStartedAt;
+  activeSessionId = data.session_id || activeSessionId;
   resultPreview.src = data.preview;
+  recordCurrentBatch("Complete");
   statusText.textContent = "Complete";
   telemetryState.textContent = "Complete";
-  metrics.textContent = `${data.shape_count} shapes, ${data.width} x ${data.height}`;
-  pipeline.textContent = `${data.attempts} steps`;
-  resultMeta.textContent = `${data.width} x ${data.height}`;
+  metrics.textContent = `${data.shape_count} shapes, ${data.export_width || data.width} x ${data.export_height || data.height}`;
+  pipeline.textContent = `${data.attempts} attempts`;
+  resultMeta.textContent = `${data.export_width || data.width} x ${data.export_height || data.height}`;
   telemetryAcceptance.textContent = `${data.shape_count} accepted / ${data.attempts} attempts`;
   telemetryDuration.textContent = formatDuration(elapsed);
   telemetryTotal.textContent = String(data.shape_count);
   setDownload(downloads.png, data.preview, "geometrize.png");
   setDownload(downloads.svg, makeObjectUrl(data.svg, "image/svg+xml"), "geometrize.svg");
   setDownload(downloads.json, makeObjectUrl(JSON.stringify(data.shapes, null, 2), "application/json"), "geometrize.json");
+}
+
+function recordCurrentBatch(state) {
+  if (!currentBatch) {
+    return;
+  }
+  const added = Math.max(0, runStats.shapes.length - currentBatch.startedAtShapeCount);
+  const attempts = Math.max(0, runStats.attempts - currentBatch.startedAtAttempts);
+  runStats.batches.push({
+    ...currentBatch,
+    added,
+    attempts,
+    state
+  });
+  currentBatch = null;
+  renderBatchHistory();
+}
+
+function renderBatchHistory() {
+  batchHistory.innerHTML = runStats.batches.map((batch) => {
+    const shapeLabel = batch.shapeTypes.map((type) => SHAPE_LABELS[type] || type).join(", ");
+    return `
+      <span class="batch-chip" title="${escapeAttribute(shapeLabel)}; ${batch.candidates} candidates, ${batch.mutations} mutations, alpha ${batch.alpha}">
+        <span>Batch ${batch.index}</span>
+        <strong>+${batch.added}</strong>
+        <span>${batch.state}</span>
+      </span>
+    `;
+  }).join("");
 }
 
 function startLiveCanvas(width, height, background) {
@@ -285,6 +411,7 @@ function startLiveCanvas(width, height, background) {
   resultCanvas.height = Math.max(1, Math.round(height * scale));
   resultCanvas.style.aspectRatio = `${width} / ${height}`;
   resultCanvas.hidden = false;
+  resultPreview.removeAttribute("src");
   const context = liveContext();
   context.fillStyle = rgba(background);
   context.fillRect(0, 0, width, height);
@@ -296,6 +423,7 @@ function resetResultSurface() {
   resultCanvas.width = 1;
   resultCanvas.height = 1;
   resultMeta.textContent = "";
+  renderSpace = { width: 0, height: 0, scale: 1 };
 }
 
 function drawShape(shape) {
@@ -390,15 +518,25 @@ function renderScoreGraph(series) {
   `;
 }
 
-function renderResolutionGraph(width, height, shapeCount, targetSteps) {
-  const area = width && height ? width * height : 0;
-  const shapeLevel = targetSteps > 0 ? Math.min(1, shapeCount / targetSteps) : 0;
-  const yArea = area ? 34 : 96;
-  const yShapes = 104 - shapeLevel * 70;
-  resolutionGraph.innerHTML = `
+function renderImpactGraph(series) {
+  const recent = series.slice(-96);
+  if (recent.length === 0) {
+    impactGraph.innerHTML = '<path class="graph-grid" d="M0 24H360M0 60H360M0 96H360" />';
+    return;
+  }
+  const max = Math.max(...recent, 0.000001);
+  const barWidth = Math.max(2, 360 / recent.length);
+  const bars = recent.map((value, index) => {
+    const normalized = Math.max(0, value) / max;
+    const height = Math.max(1, normalized * 86);
+    const x = index * barWidth;
+    const y = 106 - height;
+    return `<rect class="impact-bar" x="${x.toFixed(2)}" y="${y.toFixed(2)}" width="${Math.max(1, barWidth - 1).toFixed(2)}" height="${height.toFixed(2)}" />`;
+  }).join("");
+  impactGraph.innerHTML = `
     <path class="graph-grid" d="M0 24H360M0 60H360M0 96H360" />
-    <path class="area-path" d="M0 ${yArea}H360" />
-    <path class="shape-path" d="M0 104L360 ${yShapes}" />
+    <path class="impact-axis" d="M0 106H360" />
+    ${bars}
   `;
 }
 
@@ -451,33 +589,36 @@ function resetTelemetry() {
   telemetryDuration.textContent = "--";
   telemetryScore.textContent = "--";
   telemetryTotal.textContent = "0";
-  telemetryResolution.textContent = "--";
+  telemetryImpact.textContent = "--";
   primitiveMix.innerHTML = "";
+  batchHistory.innerHTML = "";
   renderScoreGraph([]);
-  renderResolutionGraph(0, 0, 0, Number(steps.value));
+  renderImpactGraph([]);
 }
 
-function createRunStats() {
+function createRunStats(batches = []) {
   return {
     attempts: 0,
     shapes: [],
     scores: [],
-    primitiveCounts: new Map()
+    improvements: [],
+    primitiveCounts: new Map(),
+    batches
   };
 }
 
 function setBusy(busy) {
   runButton.disabled = busy;
-  runButton.textContent = busy ? "Running" : "Run";
+  pauseButton.disabled = !busy;
+  runButton.textContent = busy ? "Running" : (activeSessionId ? "Continue" : "Run");
 }
 
-function syncMaxSize(value, mirror) {
+function syncMaxSize(value) {
   const numericValue = Math.max(maxSizeBounds.min, Math.min(maxSizeBounds.max, Number(value) || maxSizeBounds.min));
   const snapped = Math.round(numericValue / maxSizeBounds.step) * maxSizeBounds.step;
   maxSize.value = String(snapped);
   maxSizeNumber.value = String(snapped);
   maxSizeOut.value = String(snapped);
-  mirror.value = String(snapped);
 }
 
 function clearDownloads() {
@@ -519,15 +660,20 @@ function rgba(color) {
 }
 
 function formatScore(value) {
-  return typeof value === "number" ? value.toFixed(4) : "--";
+  return typeof value === "number" ? formatFixed(value) : "--";
 }
 
-function formatScoreDelta(series) {
-  if (series.length < 2) {
-    return "Score --";
-  }
-  const delta = series.at(-1) - series.at(-2);
-  return `Score ${delta >= 0 ? "+" : ""}${delta.toFixed(4)}`;
+function formatImpact(value) {
+  return typeof value === "number" ? `Impact +${formatFixed(Math.max(0, value))}` : "Impact --";
+}
+
+function formatImpactValue(value) {
+  return typeof value === "number" ? `+${formatFixed(Math.max(0, value))}` : "--";
+}
+
+function formatFixed(value) {
+  const normalized = Math.abs(value) < 0.00005 ? 0 : value;
+  return normalized.toFixed(4);
 }
 
 function formatDuration(ms) {
@@ -535,6 +681,14 @@ function formatDuration(ms) {
   const minutes = Math.floor(seconds / 60);
   const remainder = String(seconds % 60).padStart(2, "0");
   return `${minutes}:${remainder}`;
+}
+
+function escapeAttribute(value) {
+  return String(value).replaceAll("&", "&amp;").replaceAll('"', "&quot;").replaceAll("<", "&lt;");
+}
+
+function isAbortError(error) {
+  return error && error.name === "AbortError";
 }
 
 function degreesToRadians(value) {

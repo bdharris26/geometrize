@@ -15,9 +15,10 @@ py -3 -m venv .venv
 .\.venv\Scripts\python.exe -m geometrize_py serve --host 127.0.0.1 --port 7860
 ```
 
-Open `http://127.0.0.1:7860`, choose an image, tune the shape settings, and run
-the render. The UI draws accepted primitives into a live preview, charts the
-run telemetry, and exports PNG, SVG, and JSON shape data.
+Open `http://127.0.0.1:7860`, choose an image, tune the shape settings, and add
+a batch of primitives. The UI draws accepted shapes into a live preview, can
+pause or continue the same evolving result with different shape settings, charts
+the convergence and score impact, and exports PNG, SVG, and JSON shape data.
 
 ## Command Line
 
@@ -26,7 +27,8 @@ run telemetry, and exports PNG, SVG, and JSON shape data.
   --output C:\LocalRepos\geometrize\build\logo.png `
   --svg C:\LocalRepos\geometrize\build\logo.svg `
   --json C:\LocalRepos\geometrize\build\logo.json `
-  --steps 75 --shape-types ellipse,rotated_rectangle,triangle
+  --steps 128 --shape-types ellipse,rotated_rectangle,triangle `
+  --longest-dimension 2048
 ```
 
 Use `.\.venv\Scripts\python.exe -m geometrize_py doctor` to confirm that the
