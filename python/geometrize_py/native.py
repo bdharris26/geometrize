@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from dataclasses import dataclass
+from threading import Lock
 from typing import Any, Iterable
 
 from PIL import Image
@@ -40,14 +41,15 @@ else:
 
 @dataclass(frozen=True)
 class RunOptions:
-    steps: int = 75
+    steps: int = 128
     shape_types: tuple[str, ...] = DEFAULT_SHAPES
     alpha: int = 128
-    shape_count: int = 50
-    mutations: int = 100
+    shape_count: int = 64
+    mutations: int = 128
     seed: int = 9001
     max_threads: int = 0
     max_size: int = 1024
+    export_size: int = 1024
 
     @classmethod
     def from_mapping(cls, data: dict[str, Any] | None) -> "RunOptions":
@@ -55,15 +57,17 @@ class RunOptions:
         shape_types = data.get("shape_types", DEFAULT_SHAPES)
         if isinstance(shape_types, str):
             shape_types = tuple(s.strip() for s in shape_types.split(",") if s.strip())
+        max_size = _clamp_int(data.get("max_size", cls.max_size), 32, MAX_IMAGE_SIZE)
         return cls(
-            steps=_clamp_int(data.get("steps", cls.steps), 1, 2000),
+            steps=_clamp_int(data.get("steps", cls.steps), 1, 4096),
             shape_types=normalize_shape_types(shape_types),
             alpha=_clamp_int(data.get("alpha", cls.alpha), 1, 255),
-            shape_count=_clamp_int(data.get("shape_count", cls.shape_count), 1, 500),
-            mutations=_clamp_int(data.get("mutations", cls.mutations), 1, 1000),
+            shape_count=_clamp_int(data.get("shape_count", cls.shape_count), 1, 512),
+            mutations=_clamp_int(data.get("mutations", cls.mutations), 1, 2048),
             seed=_clamp_int(data.get("seed", cls.seed), 0, 2**31 - 1),
             max_threads=_clamp_int(data.get("max_threads", cls.max_threads), 0, 128),
-            max_size=_clamp_int(data.get("max_size", cls.max_size), 32, MAX_IMAGE_SIZE),
+            max_size=max_size,
+            export_size=_clamp_int(data.get("export_size", data.get("max_size", max_size)), 32, MAX_IMAGE_SIZE),
         )
 
     def to_native_dict(self) -> dict[str, Any]:
@@ -86,6 +90,70 @@ class RunResult:
     shapes: list[dict[str, Any]]
     attempts: int
     background: tuple[int, int, int, int]
+
+
+class ImageSession:
+    def __init__(
+        self,
+        width: int,
+        height: int,
+        background: tuple[int, int, int, int],
+        session: Any,
+    ) -> None:
+        self.width = width
+        self.height = height
+        self.background = background
+        self._session = session
+        self.shapes: list[dict[str, Any]] = []
+        self.batch_count = 0
+        self.lock = Lock()
+
+    @classmethod
+    def from_image(cls, image: Image.Image, options: RunOptions) -> "ImageSession":
+        backend = require_native()
+        source = fit_image(image, options.max_size).convert("RGBA")
+        width, height = source.size
+        background = average_color(source)
+        session = backend.RunnerSession(width, height, source.tobytes(), options.to_native_dict())
+        return cls(width, height, background, session)
+
+    @property
+    def attempts(self) -> int:
+        return int(self._session.attempts)
+
+    def run_batch(self, options: RunOptions) -> Iterator[dict[str, Any]]:
+        with self.lock:
+            self.batch_count += 1
+            batch_index = self.batch_count
+            accepted_at_start = len(self.shapes)
+            attempts_at_start = self.attempts
+            max_attempts = max(options.steps * 8, options.steps + 64)
+
+            while len(self.shapes) - accepted_at_start < options.steps and self.attempts - attempts_at_start < max_attempts:
+                step = self._session.step(options.to_native_dict())
+                step_shapes = list(step["shapes"])
+                self.shapes.extend(step_shapes)
+                yield {
+                    "event": "step",
+                    "batch": batch_index,
+                    "attempt": int(step["attempt"]),
+                    "attempts": int(step["attempt"]),
+                    "shapes": step_shapes,
+                    "shape_count": len(self.shapes),
+                    "batch_shape_count": len(self.shapes) - accepted_at_start,
+                    "batch_goal": options.steps,
+                }
+
+    def result(self) -> RunResult:
+        output = Image.frombytes("RGBA", (self.width, self.height), self._session.current_rgba())
+        return RunResult(
+            width=self.width,
+            height=self.height,
+            image=output,
+            shapes=self.shapes.copy(),
+            attempts=self.attempts,
+            background=self.background,
+        )
 
 
 def native_available() -> bool:
@@ -111,49 +179,29 @@ def run_image(image: Image.Image, options: RunOptions | None = None) -> RunResul
 
 def iter_image(image: Image.Image, options: RunOptions | None = None) -> Iterator[dict[str, Any]]:
     options = options or RunOptions()
-    backend = require_native()
-    source = fit_image(image, options.max_size).convert("RGBA")
-    width, height = source.size
-    background = average_color(source)
-    session = backend.RunnerSession(width, height, source.tobytes(), options.to_native_dict())
-    shapes: list[dict[str, Any]] = []
+    session = ImageSession.from_image(image, options)
 
     yield {
         "event": "start",
-        "width": width,
-        "height": height,
-        "background": background,
+        "width": session.width,
+        "height": session.height,
+        "background": session.background,
         "attempts": 0,
         "shape_count": 0,
+        "batch": 1,
+        "batch_goal": options.steps,
     }
 
-    for _ in range(options.steps):
-        step = session.step()
-        step_shapes = list(step["shapes"])
-        shapes.extend(step_shapes)
-        yield {
-            "event": "step",
-            "attempt": int(step["attempt"]),
-            "attempts": int(step["attempt"]),
-            "shapes": step_shapes,
-            "shape_count": len(shapes),
-        }
-
-    output = Image.frombytes("RGBA", (width, height), session.current_rgba())
+    yield from session.run_batch(options)
+    result = session.result()
     yield {
         "event": "complete",
-        "result": RunResult(
-            width=width,
-            height=height,
-            image=output,
-            shapes=shapes,
-            attempts=int(session.attempts),
-            background=background,
-        ),
-        "width": width,
-        "height": height,
-        "attempts": int(session.attempts),
-        "shape_count": len(shapes),
+        "result": result,
+        "width": result.width,
+        "height": result.height,
+        "attempts": result.attempts,
+        "shape_count": len(result.shapes),
+        "batch": session.batch_count,
     }
 
 

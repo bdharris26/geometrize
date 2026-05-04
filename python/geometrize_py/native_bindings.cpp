@@ -92,8 +92,8 @@ geometrize::ImageRunnerOptions runnerOptionsFromDict(const py::dict& options)
     geometrize::ImageRunnerOptions runnerOptions;
     runnerOptions.shapeTypes = static_cast<geometrize::ShapeTypes>(shapeMaskFromOptions(options));
     runnerOptions.alpha = static_cast<std::uint8_t>(readInt(options, "alpha", 128, 1, 255));
-    runnerOptions.shapeCount = static_cast<std::uint32_t>(readInt(options, "shape_count", 50, 1, 500));
-    runnerOptions.maxShapeMutations = static_cast<std::uint32_t>(readInt(options, "mutations", 100, 1, 1000));
+    runnerOptions.shapeCount = static_cast<std::uint32_t>(readInt(options, "shape_count", 64, 1, 512));
+    runnerOptions.maxShapeMutations = static_cast<std::uint32_t>(readInt(options, "mutations", 128, 1, 2048));
     runnerOptions.seed = static_cast<std::uint32_t>(readInt(options, "seed", 9001, 0, 2147483647));
     runnerOptions.maxThreads = static_cast<std::uint32_t>(readInt(options, "max_threads", 0, 0, 128));
     return runnerOptions;
@@ -190,8 +190,12 @@ public:
         m_attempts{0}
     {}
 
-    py::dict step()
+    py::dict step(const py::dict& options = py::dict())
     {
+        if(!options.empty()) {
+            m_options = runnerOptionsFromDict(options);
+        }
+
         std::vector<geometrize::ShapeResult> stepShapes;
         {
             py::gil_scoped_release release;
@@ -258,7 +262,7 @@ private:
 
 py::dict runRgba(const int width, const int height, const py::bytes& rgba, const py::dict& options)
 {
-    const int steps{readInt(options, "steps", 1, 1, 2000)};
+    const int steps{readInt(options, "steps", 1, 1, 4096)};
     RunnerSession session(width, height, rgba, options);
     py::list shapeList;
     for(int i = 0; i < steps; ++i) {
@@ -287,7 +291,7 @@ PYBIND11_MODULE(_native, module)
     module.def("run_rgba", &runRgba, py::arg("width"), py::arg("height"), py::arg("rgba"), py::arg("options"));
     py::class_<RunnerSession>(module, "RunnerSession")
         .def(py::init<int, int, const py::bytes&, const py::dict&>(), py::arg("width"), py::arg("height"), py::arg("rgba"), py::arg("options"))
-        .def("step", &RunnerSession::step)
+        .def("step", &RunnerSession::step, py::arg("options") = py::dict())
         .def("current_rgba", &RunnerSession::currentRgba)
         .def_property_readonly("width", &RunnerSession::width)
         .def_property_readonly("height", &RunnerSession::height)

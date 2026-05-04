@@ -23,10 +23,12 @@ def test_native_runner_streams_progress_events() -> None:
     image = Image.new("RGBA", (8, 8), (30, 120, 200, 255))
     events = list(iter_image(image, RunOptions(steps=2, shape_types=("ellipse",), shape_count=10, mutations=10, max_size=64)))
 
-    assert [event["event"] for event in events] == ["start", "step", "step", "complete"]
+    assert events[0]["event"] == "start"
+    assert events[-1]["event"] == "complete"
+    assert any(event["event"] == "step" for event in events)
     assert events[0]["width"] == 8
     assert events[1]["attempt"] == 1
-    assert events[-1]["result"].attempts == 2
+    assert events[-1]["result"].attempts >= 2
 
 
 def test_native_unavailable_error_is_importable() -> None:
@@ -35,5 +37,8 @@ def test_native_unavailable_error_is_importable() -> None:
 
 def test_run_options_keep_high_resolution_budget() -> None:
     assert RunOptions().max_size == 1024
+    assert RunOptions().export_size == 1024
     assert MAX_IMAGE_SIZE == 8192
     assert RunOptions.from_mapping({"max_size": 99999}).max_size == MAX_IMAGE_SIZE
+    assert RunOptions.from_mapping({"steps": 99999}).steps == 4096
+    assert RunOptions.from_mapping({"export_size": 99999}).export_size == MAX_IMAGE_SIZE

@@ -9,12 +9,16 @@ def shapes_to_svg(
     width: int,
     height: int,
     background: tuple[int, int, int, int] | None = None,
+    output_width: int | None = None,
+    output_height: int | None = None,
 ) -> str:
+    output_width = output_width or width
+    output_height = output_height or height
     parts = [
         '<?xml version="1.0" standalone="no"?>',
         (
             '<svg xmlns="http://www.w3.org/2000/svg" version="1.2" '
-            f'baseProfile="tiny" width="{width}" height="{height}" viewBox="0 0 {width} {height}">'
+            f'baseProfile="tiny" width="{output_width}" height="{output_height}" viewBox="0 0 {width} {height}">'
         ),
     ]
     if background:

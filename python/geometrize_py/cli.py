@@ -6,6 +6,7 @@ from pathlib import Path
 
 from .images import image_to_png_bytes, open_image_bytes
 from .native import RunOptions, native_available, run_image
+from .render import export_dimensions, render_shapes_to_image
 from .svg import shapes_to_svg
 from .web import run_server
 
@@ -59,6 +60,7 @@ def add_option_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--seed", type=int, default=RunOptions.seed)
     parser.add_argument("--max-threads", type=int, default=RunOptions.max_threads)
     parser.add_argument("--max-size", type=int, default=RunOptions.max_size)
+    parser.add_argument("--export-size", "--longest-dimension", dest="export_size", type=int, default=RunOptions.export_size)
 
 
 def options_from_args(args: argparse.Namespace) -> RunOptions:
@@ -72,16 +74,20 @@ def options_from_args(args: argparse.Namespace) -> RunOptions:
             "seed": args.seed,
             "max_threads": args.max_threads,
             "max_size": args.max_size,
+            "export_size": args.export_size,
         }
     )
 
 
 def run_once(args: argparse.Namespace) -> int:
     image = open_image_bytes(args.input.read_bytes())
-    result = run_image(image, options_from_args(args))
+    options = options_from_args(args)
+    result = run_image(image, options)
+    export_width, export_height = export_dimensions(result.width, result.height, options.export_size)
+    output = render_shapes_to_image(result.shapes, result.width, result.height, result.background, export_width, export_height)
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_bytes(image_to_png_bytes(result.image))
-    svg = shapes_to_svg(result.shapes, result.width, result.height, result.background)
+    args.output.write_bytes(image_to_png_bytes(output))
+    svg = shapes_to_svg(result.shapes, result.width, result.height, result.background, export_width, export_height)
     if args.svg:
         args.svg.parent.mkdir(parents=True, exist_ok=True)
         args.svg.write_text(svg, encoding="utf-8")
