@@ -52,6 +52,18 @@ Run the tests with:
 .\.venv\Scripts\python.exe -m pytest
 ```
 
+Run the linter after installing the development extras:
+
+```powershell
+.\.venv\Scripts\python.exe -m ruff check .
+```
+
 The extension is built by scikit-build-core and CMake when installing the
 package. A working C++17 compiler is required for a fresh native build, but no
 desktop UI toolchain is needed.
+
+For a quick packaging smoke test:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip wheel . -w build\wheel-smoke --no-deps
+```

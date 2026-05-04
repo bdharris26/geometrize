@@ -43,6 +43,13 @@ dist/
 *.pyc
 __pycache__/
 .pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
 
 # Python virtual environments
 .venv/
+
+# Local scratch tooling and generated experiment outputs
+.tools/

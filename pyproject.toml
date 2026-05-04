@@ -12,7 +12,7 @@ license = { file = "LICENSE" }
 dependencies = ["Pillow>=10"]
 
 [project.optional-dependencies]
-dev = ["pytest>=8"]
+dev = ["pytest>=8", "ruff>=0.8"]
 
 [project.scripts]
 geometrize = "geometrize_py.cli:main"
@@ -29,4 +29,13 @@ source-dir = "."
 [tool.pytest.ini_options]
 testpaths = ["tests/python"]
 pythonpath = ["python"]
-addopts = "-q"
+addopts = "-q --strict-config --strict-markers"
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+src = ["python", "tests"]
+extend-exclude = ["lib/geometrize"]
+
+[tool.ruff.lint]
+select = ["B", "E", "F", "I", "UP"]
