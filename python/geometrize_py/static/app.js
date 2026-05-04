@@ -1,35 +1,41 @@
-const form = document.querySelector("#run-form");
-const imageInput = document.querySelector("#image-input");
-const fileLabel = document.querySelector("#file-label");
-const imageName = document.querySelector("#image-name");
-const sourcePreview = document.querySelector("#source-preview");
-const resultPreview = document.querySelector("#result-preview");
-const resultCanvas = document.querySelector("#result-canvas");
-const runButton = document.querySelector("#run-button");
-const pauseButton = document.querySelector("#pause-button");
-const sampleButton = document.querySelector("#sample-button");
-const statusText = document.querySelector("#status");
-const nativeState = document.querySelector("#native-state");
-const metrics = document.querySelector("#metrics");
-const steps = document.querySelector("#steps");
-const stepsOut = document.querySelector("#steps-out");
-const maxSize = document.querySelector("#max-size");
-const maxSizeOut = document.querySelector("#max-size-out");
-const maxSizeNumber = document.querySelector("#max-size-number");
-const sourceMeta = document.querySelector("#source-meta");
-const resultMeta = document.querySelector("#result-meta");
-const pipeline = document.querySelector("#pipeline");
-const telemetryState = document.querySelector("#telemetry-state");
-const telemetryAcceptance = document.querySelector("#telemetry-acceptance");
-const telemetryImprovement = document.querySelector("#telemetry-improvement");
-const telemetryDuration = document.querySelector("#telemetry-duration");
-const telemetryScore = document.querySelector("#telemetry-score");
-const telemetryTotal = document.querySelector("#telemetry-total");
-const telemetryImpact = document.querySelector("#telemetry-impact");
-const scoreGraph = document.querySelector("#score-graph");
-const impactGraph = document.querySelector("#impact-graph");
-const primitiveMix = document.querySelector("#primitive-mix");
-const batchHistory = document.querySelector("#batch-history");
+"use strict";
+
+const form = byId("run-form");
+const imageInput = byId("image-input");
+const fileLabel = byId("file-label");
+const imageName = byId("image-name");
+const sourcePreview = byId("source-preview");
+const resultPreview = byId("result-preview");
+const resultCanvas = byId("result-canvas");
+const runButton = byId("run-button");
+const pauseButton = byId("pause-button");
+const sampleButton = byId("sample-button");
+const statusText = byId("status");
+const nativeState = byId("native-state");
+const metrics = byId("metrics");
+const steps = byId("steps");
+const stepsOut = byId("steps-out");
+const maxSize = byId("max-size");
+const maxSizeOut = byId("max-size-out");
+const maxSizeNumber = byId("max-size-number");
+const sourceMeta = byId("source-meta");
+const resultMeta = byId("result-meta");
+const pipeline = byId("pipeline");
+const alpha = byId("alpha");
+const seed = byId("seed");
+const shapeCount = byId("shape-count");
+const mutations = byId("mutations");
+const telemetryState = byId("telemetry-state");
+const telemetryAcceptance = byId("telemetry-acceptance");
+const telemetryImprovement = byId("telemetry-improvement");
+const telemetryDuration = byId("telemetry-duration");
+const telemetryScore = byId("telemetry-score");
+const telemetryTotal = byId("telemetry-total");
+const telemetryImpact = byId("telemetry-impact");
+const scoreGraph = byId("score-graph");
+const impactGraph = byId("impact-graph");
+const primitiveMix = byId("primitive-mix");
+const batchHistory = byId("batch-history");
 const maxSizeBounds = {
   min: Number(maxSize.min),
   max: Number(maxSize.max),
@@ -203,10 +209,10 @@ function currentOptions(shapeTypes) {
   return {
     steps: Number(steps.value),
     shape_types: shapeTypes,
-    alpha: Number(document.querySelector("#alpha").value),
-    seed: Number(document.querySelector("#seed").value),
-    shape_count: Number(document.querySelector("#shape-count").value),
-    mutations: Number(document.querySelector("#mutations").value),
+    alpha: Number(alpha.value),
+    seed: Number(seed.value),
+    shape_count: Number(shapeCount.value),
+    mutations: Number(mutations.value),
     max_size: longestDimension,
     export_size: longestDimension
   };
@@ -359,6 +365,8 @@ function appendShape(shape, draw) {
 function finishRun(data) {
   const elapsed = performance.now() - runStartedAt;
   activeSessionId = data.session_id || activeSessionId;
+  resultCanvas.hidden = true;
+  resultPreview.removeAttribute("aria-hidden");
   resultPreview.src = data.preview;
   recordCurrentBatch("Complete");
   statusText.textContent = "Complete";
@@ -391,16 +399,22 @@ function recordCurrentBatch(state) {
 }
 
 function renderBatchHistory() {
-  batchHistory.innerHTML = runStats.batches.map((batch) => {
+  const chips = runStats.batches.map((batch) => {
     const shapeLabel = batch.shapeTypes.map((type) => SHAPE_LABELS[type] || type).join(", ");
-    return `
-      <span class="batch-chip" title="${escapeAttribute(shapeLabel)}; ${batch.candidates} candidates, ${batch.mutations} mutations, alpha ${batch.alpha}">
-        <span>Batch ${batch.index}</span>
-        <strong>+${batch.added}</strong>
-        <span>${batch.state}</span>
-      </span>
-    `;
-  }).join("");
+    const chip = document.createElement("span");
+    const label = document.createElement("span");
+    const added = document.createElement("strong");
+    const state = document.createElement("span");
+
+    chip.className = "batch-chip";
+    chip.title = `${shapeLabel}; ${batch.candidates} candidates, ${batch.mutations} mutations, alpha ${batch.alpha}`;
+    label.textContent = `Batch ${batch.index}`;
+    added.textContent = `+${batch.added}`;
+    state.textContent = batch.state;
+    chip.replaceChildren(label, added, state);
+    return chip;
+  });
+  batchHistory.replaceChildren(...chips);
 }
 
 function startLiveCanvas(width, height, background) {
@@ -411,6 +425,7 @@ function startLiveCanvas(width, height, background) {
   resultCanvas.height = Math.max(1, Math.round(height * scale));
   resultCanvas.style.aspectRatio = `${width} / ${height}`;
   resultCanvas.hidden = false;
+  resultPreview.setAttribute("aria-hidden", "true");
   resultPreview.removeAttribute("src");
   const context = liveContext();
   context.fillStyle = rgba(background);
@@ -418,6 +433,7 @@ function startLiveCanvas(width, height, background) {
 }
 
 function resetResultSurface() {
+  resultPreview.setAttribute("aria-hidden", "true");
   resultPreview.removeAttribute("src");
   resultCanvas.hidden = true;
   resultCanvas.width = 1;
@@ -545,16 +561,24 @@ function renderPrimitiveMix() {
     .sort((a, b) => b[1] - a[1])
     .slice(0, 6);
   const total = Math.max(1, runStats.shapes.length);
-  primitiveMix.innerHTML = rows.map(([type, count]) => {
+  const elements = rows.map(([type, count]) => {
     const percent = count / total;
-    return `
-      <div class="mix-row">
-        <span>${SHAPE_LABELS[type] || type}</span>
-        <div class="mix-track"><span style="inline-size:${Math.max(2, percent * 100)}%"></span></div>
-        <output>${count}</output>
-      </div>
-    `;
-  }).join("");
+    const row = document.createElement("div");
+    const label = document.createElement("span");
+    const track = document.createElement("div");
+    const fill = document.createElement("span");
+    const output = document.createElement("output");
+
+    row.className = "mix-row";
+    track.className = "mix-track";
+    fill.style.inlineSize = `${Math.max(2, percent * 100)}%`;
+    label.textContent = SHAPE_LABELS[type] || type;
+    output.textContent = String(count);
+    track.append(fill);
+    row.replaceChildren(label, track, output);
+    return row;
+  });
+  primitiveMix.replaceChildren(...elements);
 }
 
 function pathForSeries(series, width, height) {
@@ -590,8 +614,8 @@ function resetTelemetry() {
   telemetryScore.textContent = "--";
   telemetryTotal.textContent = "0";
   telemetryImpact.textContent = "--";
-  primitiveMix.innerHTML = "";
-  batchHistory.innerHTML = "";
+  primitiveMix.replaceChildren();
+  batchHistory.replaceChildren();
   renderScoreGraph([]);
   renderImpactGraph([]);
 }
@@ -683,16 +707,20 @@ function formatDuration(ms) {
   return `${minutes}:${remainder}`;
 }
 
-function escapeAttribute(value) {
-  return String(value).replaceAll("&", "&amp;").replaceAll('"', "&quot;").replaceAll("<", "&lt;");
-}
-
 function isAbortError(error) {
   return error && error.name === "AbortError";
 }
 
 function degreesToRadians(value) {
   return (Number(value) || 0) * Math.PI / 180;
+}
+
+function byId(id) {
+  const element = document.getElementById(id);
+  if (!element) {
+    throw new Error(`Missing required UI element: #${id}`);
+  }
+  return element;
 }
 
 resetResultSurface();
