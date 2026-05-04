@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import io
 
 from PIL import Image
@@ -30,11 +31,14 @@ def image_to_data_url(image: Image.Image) -> str:
 
 
 def image_from_data_url(data_url: str) -> Image.Image:
-    marker = "base64,"
-    if marker not in data_url:
+    header, separator, payload = data_url.partition(",")
+    if not separator or not header.lower().startswith("data:image/") or ";base64" not in header.lower():
         raise ValueError("Expected a base64 image data URL")
-    payload = data_url.split(marker, 1)[1]
-    return open_image_bytes(base64.b64decode(payload))
+    try:
+        image_bytes = base64.b64decode(payload, validate=True)
+    except binascii.Error as exc:
+        raise ValueError("Expected a valid base64 image data URL") from exc
+    return open_image_bytes(image_bytes)
 
 
 def average_color(image: Image.Image) -> tuple[int, int, int, int]:
