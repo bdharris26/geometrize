@@ -3,9 +3,12 @@ from __future__ import annotations
 import json
 import mimetypes
 import threading
+import time
 import uuid
 import webbrowser
 from collections import OrderedDict
+from collections.abc import Callable
+from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib import resources
@@ -19,30 +22,104 @@ from .render import export_dimensions, render_shapes_to_image
 from .svg import shapes_to_svg
 
 MAX_REQUEST_BYTES = 64 * 1024 * 1024
+DEFAULT_MAX_SESSIONS = 8
+DEFAULT_MAX_ACTIVE_RENDERS = 2
+DEFAULT_SESSION_IDLE_SECONDS = 30 * 60
+DEFAULT_SESSION_MEMORY_BYTES = 512 * 1024 * 1024
+ESTIMATED_BYTES_PER_PIXEL = 16
+ESTIMATED_BYTES_PER_SHAPE = 512
+ESTIMATED_SESSION_OVERHEAD_BYTES = 64 * 1024
+
+
+@dataclass
+class _StoredSession:
+    session: ImageSession
+    last_accessed: float
+    estimated_bytes: int
 
 
 class GeometrizeServer(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, server_address: tuple[str, int], RequestHandlerClass: type[BaseHTTPRequestHandler]) -> None:
+    def __init__(
+        self,
+        server_address: tuple[str, int],
+        RequestHandlerClass: type[BaseHTTPRequestHandler],
+        *,
+        max_sessions: int = DEFAULT_MAX_SESSIONS,
+        max_active_renders: int = DEFAULT_MAX_ACTIVE_RENDERS,
+        session_idle_seconds: float = DEFAULT_SESSION_IDLE_SECONDS,
+        max_session_bytes: int = DEFAULT_SESSION_MEMORY_BYTES,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        if max_sessions < 1:
+            raise ValueError("max_sessions must be positive")
+        if max_active_renders < 1:
+            raise ValueError("max_active_renders must be positive")
+        if session_idle_seconds <= 0:
+            raise ValueError("session_idle_seconds must be positive")
+        if max_session_bytes < 1:
+            raise ValueError("max_session_bytes must be positive")
         super().__init__(server_address, RequestHandlerClass)
-        self.sessions: OrderedDict[str, ImageSession] = OrderedDict()
+        self.sessions: OrderedDict[str, _StoredSession] = OrderedDict()
         self.sessions_lock = threading.Lock()
-        self.max_sessions = 8
+        self._render_slots = threading.BoundedSemaphore(max_active_renders)
+        self.max_sessions = max_sessions
+        self.session_idle_seconds = session_idle_seconds
+        self.max_session_bytes = max_session_bytes
+        self._clock = clock
+        self._stored_session_bytes = 0
+
+    def try_acquire_render_slot(self) -> bool:
+        return self._render_slots.acquire(blocking=False)
+
+    def release_render_slot(self) -> None:
+        self._render_slots.release()
 
     def store_session(self, session_id: str, session: ImageSession) -> None:
         with self.sessions_lock:
-            self.sessions[session_id] = session
+            now = self._clock()
+            self._remove_expired_sessions(now)
+            previous = self.sessions.pop(session_id, None)
+            if previous is not None:
+                self._stored_session_bytes -= previous.estimated_bytes
+            record = _StoredSession(session, now, _estimate_session_bytes(session))
+            self.sessions[session_id] = record
+            self._stored_session_bytes += record.estimated_bytes
             self.sessions.move_to_end(session_id)
-            while len(self.sessions) > self.max_sessions:
-                self.sessions.popitem(last=False)
+            self._enforce_session_limits()
 
     def get_session(self, session_id: str) -> ImageSession | None:
         with self.sessions_lock:
-            session = self.sessions.get(session_id)
-            if session is not None:
+            now = self._clock()
+            self._remove_expired_sessions(now)
+            record = self.sessions.get(session_id)
+            if record is not None:
+                record.last_accessed = now
                 self.sessions.move_to_end(session_id)
-            return session
+                return record.session
+            return None
+
+    def service_actions(self) -> None:
+        super().service_actions()
+        with self.sessions_lock:
+            self._remove_expired_sessions(self._clock())
+
+    def _remove_expired_sessions(self, now: float) -> None:
+        while self.sessions:
+            session_id, record = next(iter(self.sessions.items()))
+            if now - record.last_accessed < self.session_idle_seconds:
+                break
+            self._remove_session(session_id)
+
+    def _enforce_session_limits(self) -> None:
+        while len(self.sessions) > self.max_sessions or self._stored_session_bytes > self.max_session_bytes:
+            session_id = next(iter(self.sessions))
+            self._remove_session(session_id)
+
+    def _remove_session(self, session_id: str) -> None:
+        record = self.sessions.pop(session_id)
+        self._stored_session_bytes -= record.estimated_bytes
 
 
 def run_server(host: str = "127.0.0.1", port: int = 7860, open_browser: bool = False) -> None:
@@ -77,12 +154,24 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = self.path.split("?", 1)[0]
-        if path == "/api/run/stream":
-            self._run_stream()
-            return
-        if path != "/api/run":
+        if path not in {"/api/run", "/api/run/stream"}:
             self.send_error(HTTPStatus.NOT_FOUND)
             return
+        if not self.geometrize_server.try_acquire_render_slot():
+            self._send_json(
+                {"error": "The renderer is busy. Wait for an active render to finish."},
+                HTTPStatus.TOO_MANY_REQUESTS,
+            )
+            return
+        try:
+            if path == "/api/run/stream":
+                self._run_stream()
+            else:
+                self._run_once()
+        finally:
+            self.geometrize_server.release_render_slot()
+
+    def _run_once(self) -> None:
         try:
             payload = self._read_json()
             image = image_from_data_url(_required_text(payload, "image"))
@@ -151,6 +240,10 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
                 self._write_stream_event({"event": "error", "error": str(exc)})
             except (BrokenPipeError, ConnectionResetError):
                 return
+        finally:
+            # Refresh the LRU position, idle deadline, and size estimate after a
+            # batch. The local reference remains valid if the cache evicts it.
+            self.geometrize_server.store_session(session_id, session)
 
     def log_message(self, format: str, *args: Any) -> None:
         return
@@ -261,3 +354,13 @@ def _safe_static_path(name: str) -> PurePosixPath | None:
     if path.is_absolute() or not path.parts or any(part in {"", ".", ".."} for part in path.parts):
         return None
     return path
+
+
+def _estimate_session_bytes(session: ImageSession) -> int:
+    """Approximate the native bitmaps plus Python-side shape metadata."""
+    pixels = max(0, session.width) * max(0, session.height)
+    return (
+        ESTIMATED_SESSION_OVERHEAD_BYTES
+        + pixels * ESTIMATED_BYTES_PER_PIXEL
+        + len(session.shapes) * ESTIMATED_BYTES_PER_SHAPE
+    )

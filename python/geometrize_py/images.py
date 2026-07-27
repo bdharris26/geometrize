@@ -4,12 +4,15 @@ import base64
 import binascii
 import io
 
-from PIL import Image
-from PIL import ImageStat
+from PIL import Image, ImageStat
+
+MAX_SOURCE_DIMENSION = 16384
+MAX_SOURCE_PIXELS = 8192 * 8192
 
 
 def open_image_bytes(data: bytes) -> Image.Image:
     with Image.open(io.BytesIO(data)) as image:
+        _validate_source_size(image.width, image.height)
         return image.convert("RGBA")
 
 
@@ -47,3 +50,12 @@ def average_color(image: Image.Image) -> tuple[int, int, int, int]:
         return (255, 255, 255, 255)
     red, green, blue, alpha = ImageStat.Stat(rgba).mean
     return (int(red), int(green), int(blue), int(alpha))
+
+
+def _validate_source_size(width: int, height: int) -> None:
+    if width <= 0 or height <= 0:
+        raise ValueError("Image dimensions must be positive")
+    if width > MAX_SOURCE_DIMENSION or height > MAX_SOURCE_DIMENSION:
+        raise ValueError(f"Image dimensions cannot exceed {MAX_SOURCE_DIMENSION} pixels")
+    if width * height > MAX_SOURCE_PIXELS:
+        raise ValueError(f"Image cannot exceed {MAX_SOURCE_PIXELS:,} pixels")

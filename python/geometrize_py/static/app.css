@@ -114,6 +114,32 @@ form {
   gap: 10px;
 }
 
+.project-files {
+  display: grid;
+  gap: 7px;
+}
+
+.project-files legend {
+  margin-bottom: 1px;
+}
+
+.project-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.project-actions button {
+  min-width: 0;
+}
+
+.project-files p {
+  margin: 0;
+  color: var(--soft);
+  font-size: 0.72rem;
+  line-height: 1.4;
+}
+
 .drop-zone {
   display: grid;
   min-height: 50px;
@@ -699,7 +725,8 @@ figcaption span:last-child {
   .shape-grid,
   .field.two,
   .range-with-input,
-  .run-actions {
+  .run-actions,
+  .project-actions {
     grid-template-columns: 1fr;
   }
 

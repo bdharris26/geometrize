@@ -4,8 +4,7 @@ import math
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from PIL import Image
-from PIL import ImageDraw
+from PIL import Image, ImageDraw
 
 Shape = Mapping[str, Any]
 
@@ -67,7 +66,10 @@ def _draw_shape(draw: ImageDraw.ImageDraw, shape: Shape, scale_x: float, scale_y
         )
     elif shape_type == "line":
         draw.line(
-            [(_sx(data["x1"], scale_x), _sy(data["y1"], scale_y)), (_sx(data["x2"], scale_x), _sy(data["y2"], scale_y))],
+            [
+                (_sx(data["x1"], scale_x), _sy(data["y1"], scale_y)),
+                (_sx(data["x2"], scale_x), _sy(data["y2"], scale_y)),
+            ],
             fill=color,
             width=line_width,
         )
@@ -121,7 +123,13 @@ def _rotated_rect_points(data: Mapping[str, Any], scale_x: float, scale_y: float
     half_width, half_height = abs(x2 - x1) / 2, abs(y2 - y1) / 2
     radians = math.radians(data["angle"])
     points = []
-    for px, py in [(-half_width, -half_height), (half_width, -half_height), (half_width, half_height), (-half_width, half_height)]:
+    corners = [
+        (-half_width, -half_height),
+        (half_width, -half_height),
+        (half_width, half_height),
+        (-half_width, half_height),
+    ]
+    for px, py in corners:
         rotated_x = cx + px * math.cos(radians) - py * math.sin(radians)
         rotated_y = cy + px * math.sin(radians) + py * math.cos(radians)
         points.append((_sx(rotated_x, scale_x), _sy(rotated_y, scale_y)))
@@ -152,7 +160,14 @@ def _channel(value: int) -> int:
     return max(0, min(255, int(value)))
 
 
-def _rect(x1: float, y1: float, x2: float, y2: float, scale_x: float, scale_y: float) -> tuple[float, float, float, float]:
+def _rect(
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+    scale_x: float,
+    scale_y: float,
+) -> tuple[float, float, float, float]:
     return (
         min(_sx(x1, scale_x), _sx(x2, scale_x)),
         min(_sy(y1, scale_y), _sy(y2, scale_y)),

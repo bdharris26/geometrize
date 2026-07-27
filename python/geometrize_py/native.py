@@ -1,14 +1,13 @@
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from threading import Lock
-from typing import Any, Iterable
+from typing import Any
 
 from PIL import Image
 
 from .images import average_color, fit_image
-
 
 SHAPE_TYPES: dict[str, int] = {
     "rectangle": 1,
@@ -23,6 +22,7 @@ SHAPE_TYPES: dict[str, int] = {
 }
 
 DEFAULT_SHAPES = ("ellipse", "rotated_rectangle", "triangle")
+MAX_WORKING_IMAGE_SIZE = 2048
 MAX_IMAGE_SIZE = 8192
 
 
@@ -52,12 +52,12 @@ class RunOptions:
     export_size: int = 1024
 
     @classmethod
-    def from_mapping(cls, data: dict[str, Any] | None) -> "RunOptions":
+    def from_mapping(cls, data: dict[str, Any] | None) -> RunOptions:
         data = data or {}
         shape_types = data.get("shape_types", DEFAULT_SHAPES)
         if isinstance(shape_types, str):
             shape_types = tuple(s.strip() for s in shape_types.split(",") if s.strip())
-        max_size = _clamp_int(data.get("max_size", cls.max_size), 32, MAX_IMAGE_SIZE)
+        max_size = _clamp_int(data.get("max_size", cls.max_size), 32, MAX_WORKING_IMAGE_SIZE)
         return cls(
             steps=_clamp_int(data.get("steps", cls.steps), 1, 4096),
             shape_types=normalize_shape_types(shape_types),
@@ -109,7 +109,7 @@ class ImageSession:
         self.lock = Lock()
 
     @classmethod
-    def from_image(cls, image: Image.Image, options: RunOptions) -> "ImageSession":
+    def from_image(cls, image: Image.Image, options: RunOptions) -> ImageSession:
         backend = require_native()
         source = fit_image(image, options.max_size).convert("RGBA")
         width, height = source.size
@@ -129,7 +129,10 @@ class ImageSession:
             attempts_at_start = self.attempts
             max_attempts = max(options.steps * 8, options.steps + 64)
 
-            while len(self.shapes) - accepted_at_start < options.steps and self.attempts - attempts_at_start < max_attempts:
+            while (
+                len(self.shapes) - accepted_at_start < options.steps
+                and self.attempts - attempts_at_start < max_attempts
+            ):
                 step = self._session.step(options.to_native_dict())
                 step_shapes = list(step["shapes"])
                 self.shapes.extend(step_shapes)
