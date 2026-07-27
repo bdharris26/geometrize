@@ -4,7 +4,7 @@ import base64
 import binascii
 import io
 
-from PIL import Image, ImageStat
+from PIL import Image, ImageOps, ImageStat
 
 MAX_SOURCE_DIMENSION = 16384
 MAX_SOURCE_PIXELS = 8192 * 8192
@@ -13,7 +13,9 @@ MAX_SOURCE_PIXELS = 8192 * 8192
 def open_image_bytes(data: bytes) -> Image.Image:
     with Image.open(io.BytesIO(data)) as image:
         _validate_source_size(image.width, image.height)
-        return image.convert("RGBA")
+        oriented = ImageOps.exif_transpose(image)
+        _validate_source_size(oriented.width, oriented.height)
+        return oriented.convert("RGBA")
 
 
 def fit_image(image: Image.Image, max_size: int) -> Image.Image:
@@ -48,8 +50,11 @@ def average_color(image: Image.Image) -> tuple[int, int, int, int]:
     rgba = image.convert("RGBA")
     if rgba.width == 0 or rgba.height == 0:
         return (255, 255, 255, 255)
-    red, green, blue, alpha = ImageStat.Stat(rgba).mean
-    return (int(red), int(green), int(blue), int(alpha))
+    red, green, blue, _alpha = ImageStat.Stat(rgba).mean
+    # The native model starts from an opaque RGB average even when the source
+    # contains transparency. Exports must use the same background the optimizer
+    # evaluated shapes against.
+    return (int(red), int(green), int(blue), 255)
 
 
 def _validate_source_size(width: int, height: int) -> None:

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import io
+
 import pytest
 from PIL import Image
 
@@ -7,8 +9,10 @@ from geometrize_py.images import (
     MAX_SOURCE_DIMENSION,
     MAX_SOURCE_PIXELS,
     _validate_source_size,
+    average_color,
     image_from_data_url,
     image_to_data_url,
+    open_image_bytes,
 )
 
 
@@ -34,3 +38,31 @@ def test_source_size_rejects_oversized_dimensions_and_pixel_counts() -> None:
 
     with pytest.raises(ValueError, match="cannot exceed"):
         _validate_source_size(8193, MAX_SOURCE_PIXELS // 8193 + 1)
+
+
+def test_open_image_bytes_applies_exif_orientation() -> None:
+    source = Image.new("RGB", (2, 3))
+    source.putdata(
+        [
+            (255, 0, 0),
+            (0, 255, 0),
+            (0, 0, 255),
+            (255, 255, 0),
+            (0, 255, 255),
+            (255, 0, 255),
+        ]
+    )
+    exif = source.getexif()
+    exif[274] = 6
+    buffer = io.BytesIO()
+    source.save(buffer, format="JPEG", quality=100, subsampling=0, exif=exif)
+
+    oriented = open_image_bytes(buffer.getvalue())
+
+    assert oriented.size == (3, 2)
+    assert oriented.getpixel((0, 0))[1:3] == pytest.approx((255, 255), abs=15)
+    assert oriented.getpixel((2, 0))[0] == pytest.approx(255, abs=15)
+
+
+def test_average_color_matches_native_opaque_background() -> None:
+    assert average_color(Image.new("RGBA", (2, 2), (20, 40, 60, 0))) == (20, 40, 60, 255)

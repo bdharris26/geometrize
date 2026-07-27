@@ -63,6 +63,8 @@ const PROJECT_FORMAT = "geometrize-project";
 const PROJECT_VERSION = 1;
 const PROJECT_FILE_MAX_BYTES = 64 * 1024 * 1024;
 const PROJECT_SHAPE_MAX = 100000;
+const SOURCE_MAX_DIMENSION = 16384;
+const SOURCE_MAX_PIXELS = 8192 * 8192;
 const RASTER_IMAGE_TYPES = new Set([
   "image/bmp",
   "image/gif",
@@ -92,6 +94,11 @@ const SHAPE_DATA_FIELDS = {
   rotated_rectangle: ["x1", "y1", "x2", "y2", "angle"],
   triangle: ["x1", "y1", "x2", "y2", "x3", "y3"]
 };
+const SHAPE_RADIUS_FIELDS = {
+  circle: ["r"],
+  ellipse: ["rx", "ry"],
+  rotated_ellipse: ["rx", "ry"]
+};
 const FORM_SHAPE_TYPES = new Set(
   [...document.querySelectorAll("input[name='shape']")].map((item) => item.value)
 );
@@ -105,6 +112,8 @@ let runningController = null;
 let currentBatch = null;
 let runStats = createRunStats();
 let renderBackground = null;
+let sourceLoadVersion = 0;
+let projectLoadVersion = 0;
 let renderSpace = {
   width: 0,
   height: 0,
@@ -129,24 +138,47 @@ maxSizeNumber.addEventListener("input", () => syncMaxSize(maxSizeNumber.value));
 exportSize.addEventListener("input", () => syncExportSize(exportSize.value));
 exportSizeNumber.addEventListener("input", () => syncExportSize(exportSizeNumber.value));
 
-imageInput.addEventListener("change", () => {
+imageInput.addEventListener("change", async () => {
   const file = imageInput.files[0];
   if (!file) {
     return;
   }
-  if (file.type && !RASTER_IMAGE_TYPES.has(file.type.toLowerCase())) {
+  const loadVersion = ++sourceLoadVersion;
+  const fileType = file.type.toLowerCase();
+  if (
+    (fileType && fileType !== "application/octet-stream" && !RASTER_IMAGE_TYPES.has(fileType)) ||
+    file.name.toLowerCase().endsWith(".svg")
+  ) {
     imageInput.value = "";
     statusText.textContent = "Choose a PNG, JPEG, WebP, BMP, GIF, or TIFF image";
     return;
   }
-  const reader = new FileReader();
-  reader.addEventListener("load", () => {
-    setSourceImage(reader.result, file.name);
-  });
-  reader.addEventListener("error", () => {
-    statusText.textContent = "Could not read image";
-  });
-  reader.readAsDataURL(file);
+  try {
+    let dataUrl;
+    if (RASTER_IMAGE_TYPES.has(fileType)) {
+      dataUrl = await readFileAsDataUrl(file);
+      await decodeProjectImage(dataUrl, "source image");
+      dataUrl = validateRasterDataUrl(dataUrl, "source image");
+    } else {
+      const objectUrl = URL.createObjectURL(file);
+      try {
+        const image = await decodeProjectImage(objectUrl, "source image");
+        dataUrl = imageToPngDataUrl(image);
+      } finally {
+        URL.revokeObjectURL(objectUrl);
+      }
+    }
+    if (loadVersion !== sourceLoadVersion || runningController) {
+      return;
+    }
+    setSourceImage(dataUrl, file.name);
+  } catch (error) {
+    if (loadVersion === sourceLoadVersion && !runningController) {
+      imageInput.value = "";
+      const message = error instanceof Error ? error.message : "Could not decode image";
+      statusText.textContent = `Could not load image: ${message}`;
+    }
+  }
 });
 
 loadProjectButton.addEventListener("click", () => {
@@ -159,11 +191,18 @@ projectInput.addEventListener("change", async () => {
   if (!file) {
     return;
   }
+  const loadVersion = ++projectLoadVersion;
   try {
-    await openProjectFile(file);
+    const project = await openProjectFile(file);
+    if (loadVersion !== projectLoadVersion || runningController) {
+      return;
+    }
+    applyProject(project);
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Invalid project file";
-    statusText.textContent = `Could not open project: ${message}`;
+    if (loadVersion === projectLoadVersion && !runningController) {
+      const message = error instanceof Error ? error.message : "Invalid project file";
+      statusText.textContent = `Could not open project: ${message}`;
+    }
   }
 });
 
@@ -177,6 +216,8 @@ saveProjectButton.addEventListener("click", () => {
 });
 
 sampleButton.addEventListener("click", () => {
+  sourceLoadVersion += 1;
+  projectLoadVersion += 1;
   const canvas = document.createElement("canvas");
   canvas.width = 220;
   canvas.height = 160;
@@ -359,7 +400,7 @@ async function openProjectFile(file) {
     images.push(decodeProjectImage(project.result.preview_data_url, "result preview"));
   }
   await Promise.all(images);
-  applyProject(project);
+  return project;
 }
 
 function applyProject(project) {
@@ -509,7 +550,7 @@ function validateProjectOptions(raw) {
   const maxSize = steppedInteger(options.max_size, 64, 2048, 64, "optimizer size");
   const exportSize = options.export_size === undefined
     ? maxSize
-    : steppedInteger(options.export_size, 64, 8192, 64, "export size");
+    : steppedInteger(options.export_size, 64, 4096, 64, "export size");
   return {
     steps: integerBetween(options.steps, 1, 4096, "shapes to add"),
     shape_types: shapeTypes,
@@ -558,6 +599,11 @@ function validateShape(raw, index) {
   } else {
     for (const field of SHAPE_DATA_FIELDS[shape.type]) {
       data[field] = finiteShapeNumber(rawData[field], `shape ${index + 1} ${field}`);
+    }
+  }
+  for (const field of SHAPE_RADIUS_FIELDS[shape.type] || []) {
+    if (data[field] < 0) {
+      throw new Error(`Shape ${index + 1} ${field} cannot be negative`);
     }
   }
   const normalized = {
@@ -632,10 +678,46 @@ function validateRasterDataUrl(value, label) {
 function decodeProjectImage(dataUrl, label) {
   return new Promise((resolve, reject) => {
     const image = new Image();
-    image.addEventListener("load", () => resolve(), { once: true });
+    image.addEventListener("load", () => {
+      if (
+        image.naturalWidth <= 0 ||
+        image.naturalHeight <= 0 ||
+        image.naturalWidth > SOURCE_MAX_DIMENSION ||
+        image.naturalHeight > SOURCE_MAX_DIMENSION ||
+        image.naturalWidth * image.naturalHeight > SOURCE_MAX_PIXELS
+      ) {
+        reject(new Error(`Project ${label} dimensions are too large`));
+        return;
+      }
+      resolve(image);
+    }, { once: true });
     image.addEventListener("error", () => reject(new Error(`Project ${label} could not be decoded`)), { once: true });
     image.src = dataUrl;
   });
+}
+
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.addEventListener("load", () => {
+      if (typeof reader.result !== "string") {
+        reject(new Error("Could not read image"));
+        return;
+      }
+      resolve(reader.result);
+    }, { once: true });
+    reader.addEventListener("error", () => reject(new Error("Could not read image")), { once: true });
+    reader.readAsDataURL(file);
+  });
+}
+
+function imageToPngDataUrl(image) {
+  const canvas = document.createElement("canvas");
+  canvas.width = image.naturalWidth;
+  canvas.height = image.naturalHeight;
+  const context = canvas.getContext("2d");
+  context.drawImage(image, 0, 0);
+  return canvas.toDataURL("image/png");
 }
 
 function requireObject(value, label) {
@@ -715,6 +797,8 @@ function normalizedIntegerInput(input, defaultValue, min, max) {
 }
 
 function prepareRun(isContinuation, options) {
+  sourceLoadVersion += 1;
+  projectLoadVersion += 1;
   if (!isContinuation) {
     activeSessionId = "";
     resetTelemetry();
@@ -1141,6 +1225,8 @@ function setBusy(busy) {
   pauseButton.disabled = !busy;
   loadProjectButton.disabled = busy;
   projectInput.disabled = busy;
+  imageInput.disabled = busy;
+  sampleButton.disabled = busy;
   saveProjectButton.disabled = busy || !sourceDataUrl;
   maxSize.disabled = busy || hasActiveSession;
   maxSizeNumber.disabled = busy || hasActiveSession;

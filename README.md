@@ -31,6 +31,8 @@ the convergence and score impact, and exports PNG, SVG, and JSON shape data.
 Working resolution is kept separate from export resolution so sharper output
 does not require a much larger native optimizer session. Project JSON files can
 restore the source, result, settings, and run history after restarting the app.
+Export resolution is capped at 4096px to keep PNG/SVG generation within a
+predictable memory budget.
 
 ## Command Line
 
@@ -95,4 +97,5 @@ For a quick packaging smoke test:
 
 The application remains GPL-3.0-or-later. The bundled native
 `geometrize-lib` core is MIT-licensed; its required attribution is included in
-`THIRD_PARTY_NOTICES.md` and in built wheels.
+`THIRD_PARTY_NOTICES.md` and in built wheels. Project copyright notices are in
+`COPYRIGHT.md`, and the complete GPLv3 terms are in `LICENSE`.

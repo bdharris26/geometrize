@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 
+import pytest
 from PIL import Image, ImageDraw
 
 from geometrize_py import cli
@@ -70,3 +71,29 @@ def test_run_command_writes_all_output_formats(tmp_path, capsys) -> None:
     shapes = json.loads(json_path.read_text(encoding="utf-8"))
     assert len(shapes) == 1
     assert shapes[0]["type"] == "rectangle"
+
+
+@pytest.mark.parametrize(
+    "extra_args",
+    [
+        ["--output", "{source}"],
+        ["--output", "{shared}", "--svg", "{shared}"],
+        ["--output", "{shared}", "--json", "{shared}"],
+        ["--output", "{png}", "--svg", "{shared}", "--json", "{shared}"],
+    ],
+)
+def test_run_command_rejects_colliding_paths(tmp_path, capsys, extra_args: list[str]) -> None:
+    source = tmp_path / "source.png"
+    Image.new("RGB", (2, 2), (1, 2, 3)).save(source)
+    values = {
+        "source": str(source),
+        "shared": str(tmp_path / "shared.out"),
+        "png": str(tmp_path / "result.png"),
+    }
+    arguments = [value.format(**values) for value in extra_args]
+
+    with pytest.raises(SystemExit) as error:
+        cli.main(["run", str(source), *arguments])
+
+    assert error.value.code == 2
+    assert "path must differ" in capsys.readouterr().err

@@ -24,6 +24,7 @@ from .svg import shapes_to_svg
 MAX_REQUEST_BYTES = 64 * 1024 * 1024
 DEFAULT_MAX_SESSIONS = 8
 DEFAULT_MAX_ACTIVE_RENDERS = 2
+DEFAULT_REQUEST_TIMEOUT_SECONDS = 30.0
 DEFAULT_SESSION_IDLE_SECONDS = 30 * 60
 DEFAULT_SESSION_MEMORY_BYTES = 512 * 1024 * 1024
 ESTIMATED_BYTES_PER_PIXEL = 16
@@ -48,6 +49,7 @@ class GeometrizeServer(ThreadingHTTPServer):
         *,
         max_sessions: int = DEFAULT_MAX_SESSIONS,
         max_active_renders: int = DEFAULT_MAX_ACTIVE_RENDERS,
+        request_timeout_seconds: float = DEFAULT_REQUEST_TIMEOUT_SECONDS,
         session_idle_seconds: float = DEFAULT_SESSION_IDLE_SECONDS,
         max_session_bytes: int = DEFAULT_SESSION_MEMORY_BYTES,
         clock: Callable[[], float] = time.monotonic,
@@ -56,6 +58,8 @@ class GeometrizeServer(ThreadingHTTPServer):
             raise ValueError("max_sessions must be positive")
         if max_active_renders < 1:
             raise ValueError("max_active_renders must be positive")
+        if request_timeout_seconds <= 0:
+            raise ValueError("request_timeout_seconds must be positive")
         if session_idle_seconds <= 0:
             raise ValueError("session_idle_seconds must be positive")
         if max_session_bytes < 1:
@@ -65,6 +69,7 @@ class GeometrizeServer(ThreadingHTTPServer):
         self.sessions_lock = threading.Lock()
         self._render_slots = threading.BoundedSemaphore(max_active_renders)
         self.max_sessions = max_sessions
+        self.request_timeout_seconds = request_timeout_seconds
         self.session_idle_seconds = session_idle_seconds
         self.max_session_bytes = max_session_bytes
         self._clock = clock
@@ -139,6 +144,10 @@ def run_server(host: str = "127.0.0.1", port: int = 7860, open_browser: bool = F
 class GeometrizeRequestHandler(BaseHTTPRequestHandler):
     server_version = "GeometrizePython/0.2"
 
+    def setup(self) -> None:
+        super().setup()
+        self.connection.settimeout(self.geometrize_server.request_timeout_seconds)
+
     def do_GET(self) -> None:
         path = PurePosixPath(unquote(urlsplit(self.path).path))
         if str(path) in {"/", "/index.html"}:
@@ -159,6 +168,10 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
             return
         try:
             payload = self._read_json()
+        except TimeoutError:
+            self.close_connection = True
+            self._send_json({"error": "Request body timed out"}, HTTPStatus.REQUEST_TIMEOUT)
+            return
         except Exception as exc:
             self._send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
             return
@@ -188,6 +201,7 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
             self._send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
 
     def _run_stream(self, payload: dict[str, Any]) -> None:
+        run_acquired = False
         try:
             options = RunOptions.from_mapping(payload.get("options"))
             if not native_available():
@@ -204,6 +218,13 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
                 session = ImageSession.from_image(image, options)
                 session_id = uuid.uuid4().hex
                 self.geometrize_server.store_session(session_id, session)
+            run_acquired = session.try_acquire_run()
+            if not run_acquired:
+                self._send_json(
+                    {"error": "This render session is already active."},
+                    HTTPStatus.CONFLICT,
+                )
+                return
         except NativeBackendUnavailable as exc:
             self._send_json({"error": str(exc)}, HTTPStatus.SERVICE_UNAVAILABLE)
             return
@@ -211,13 +232,12 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
             self._send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
             return
 
-        self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
-        self.send_header("Cache-Control", "no-cache")
-        self.send_header("X-Content-Type-Options", "nosniff")
-        self.end_headers()
-
         try:
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
             self._write_stream_event(
                 {
                     "event": "start",
@@ -233,20 +253,22 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
                     "batch_goal": options.steps,
                 }
             )
-            for event in session.run_batch(options):
+            for event in session.run_reserved_batch(options):
                 self._write_stream_event(event)
             self._write_stream_event(self._result_payload(session.result(), options, session_id))
-        except (BrokenPipeError, ConnectionResetError):
+        except (BrokenPipeError, ConnectionResetError, TimeoutError):
             return
         except Exception as exc:
             try:
                 self._write_stream_event({"event": "error", "error": str(exc)})
-            except (BrokenPipeError, ConnectionResetError):
+            except (BrokenPipeError, ConnectionResetError, TimeoutError):
                 return
         finally:
             # Refresh the LRU position, idle deadline, and size estimate after a
             # batch. The local reference remains valid if the cache evicts it.
             self.geometrize_server.store_session(session_id, session)
+            if run_acquired:
+                session.release_run()
 
     def log_message(self, format: str, *args: Any) -> None:
         return

@@ -51,11 +51,11 @@ def test_index_supports_sample_without_required_file_input(server: GeometrizeSer
     assert "Export resolution" in html
     assert 'id="seed" name="seed" type="number" min="0" max="2147483647" value="9001"' in html
     assert 'id="max-size" name="max_size" type="range" min="64" max="2048" step="64" value="1024"' in html
-    assert 'id="export-size" name="export_size" type="range" min="64" max="8192" step="64" value="1024"' in html
+    assert 'id="export-size" name="export_size" type="range" min="64" max="4096" step="64" value="1024"' in html
     assert 'id="load-project-button"' in html
     assert 'id="save-project-button"' in html
     assert 'id="max-size-number" type="number" min="64" max="2048" step="64" value="1024"' in html
-    assert 'id="export-size-number" type="number" min="64" max="8192" step="64" value="1024"' in html
+    assert 'id="export-size-number" type="number" min="64" max="4096" step="64" value="1024"' in html
     assert 'id="pause-button"' in html
     assert 'class="telemetry-console"' in html
     assert 'id="result-canvas"' in html
@@ -161,7 +161,7 @@ def test_render_concurrency_slots_are_bounded(server: GeometrizeServer) -> None:
     server.release_render_slot()
 
 
-def test_partial_request_body_does_not_acquire_render_slot() -> None:
+def test_partial_request_body_times_out_without_acquiring_render_slot() -> None:
     class ObservedReadHandler(GeometrizeRequestHandler):
         read_started = threading.Event()
 
@@ -173,6 +173,7 @@ def test_partial_request_body_does_not_acquire_render_slot() -> None:
         ("127.0.0.1", 0),
         ObservedReadHandler,
         max_active_renders=1,
+        request_timeout_seconds=0.2,
     )
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -191,14 +192,49 @@ def test_partial_request_body_does_not_acquire_render_slot() -> None:
         assert ObservedReadHandler.read_started.wait(timeout=5)
         slot_acquired = server.try_acquire_render_slot()
         assert slot_acquired
+        server.release_render_slot()
+        slot_acquired = False
+        response = _read_socket_response(client)
+        assert b"408 Request Timeout" in response
+        assert b"Request body timed out" in response
     finally:
         if slot_acquired:
             server.release_render_slot()
-        client.sendall(b"}")
         client.close()
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+@pytest.mark.skipif(not native_available(), reason="native backend is not built")
+def test_stream_rejects_concurrent_use_of_same_session(server: GeometrizeServer) -> None:
+    native_state = SimpleNamespace(attempts=0)
+    session = ImageSession(1, 1, (0, 0, 0, 255), native_state)
+    assert session.try_acquire_run()
+    server.store_session("busy", session)
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{server.server_port}/api/run/stream",
+        data=json.dumps(
+            {
+                "session_id": "busy",
+                "options": {"steps": 1, "shape_types": ["rectangle"]},
+            }
+        ).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with pytest.raises(HTTPError) as error:
+            urllib.request.urlopen(request, timeout=5)
+        assert error.value.code == HTTPStatus.CONFLICT
+        assert json.loads(error.value.read().decode("utf-8")) == {
+            "error": "This render session is already active."
+        }
+    finally:
+        session.release_run()
+
+    assert server.try_acquire_render_slot()
+    server.release_render_slot()
 
 
 @pytest.mark.skipif(not native_available(), reason="native backend is not built")
@@ -307,6 +343,15 @@ def _post_stream(server: GeometrizeServer, payload: dict) -> list[dict]:
     )
     with urllib.request.urlopen(request, timeout=10) as response:
         return [json.loads(line) for line in response.read().decode("utf-8").splitlines()]
+
+
+def _read_socket_response(client: socket.socket) -> bytes:
+    response = bytearray()
+    while True:
+        chunk = client.recv(4096)
+        if not chunk:
+            return bytes(response)
+        response.extend(chunk)
 
 
 class _FakeClock:

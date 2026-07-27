@@ -84,7 +84,7 @@ jobs:
         shell: pwsh
         run: |
           $wheel = (Get-ChildItem dist -Filter *.whl).FullName
-          python -c "import sys, zipfile; names = zipfile.ZipFile(sys.argv[1]).namelist(); assert any(name.endswith('/licenses/LICENSE') for name in names), names; assert any(name.endswith('/licenses/THIRD_PARTY_NOTICES.md') for name in names), names" $wheel
+          python -c "import sys, zipfile; archive = zipfile.ZipFile(sys.argv[1]); names = archive.namelist(); license_name = next((name for name in names if name.endswith('/licenses/LICENSE')), None); assert license_name, names; license_text = archive.read(license_name).decode('utf-8'); assert 'GNU GENERAL PUBLIC LICENSE' in license_text and 'Version 3, 29 June 2007' in license_text and len(license_text) > 30000; assert any(name.endswith('/licenses/COPYRIGHT.md') for name in names), names; assert any(name.endswith('/licenses/THIRD_PARTY_NOTICES.md') for name in names), names" $wheel
 
   browser:
     name: Browser smoke / Chromium

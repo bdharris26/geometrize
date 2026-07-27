@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 
 from .images import image_to_png_bytes, open_image_bytes
@@ -22,6 +23,10 @@ def main(argv: list[str] | None = None) -> int:
         run_server(args.host, args.port, args.open)
         return 0
     if command == "run":
+        try:
+            _validate_distinct_paths(args)
+        except ValueError as exc:
+            parser.error(str(exc))
         return run_once(args)
     if command == "doctor":
         print(f"native backend: {'available' if native_available() else 'unavailable'}")
@@ -74,7 +79,7 @@ def add_option_arguments(parser: argparse.ArgumentParser) -> None:
         dest="export_size",
         type=int,
         default=RunOptions.export_size,
-        help="output resolution (longest dimension, capped at 8192)",
+        help="output resolution (longest dimension, capped at 4096)",
     )
 
 
@@ -118,6 +123,24 @@ def run_once(args: argparse.Namespace) -> int:
         args.json.write_text(json.dumps(result.shapes, indent=2), encoding="utf-8")
     print(f"wrote {args.output} with {len(result.shapes)} shapes")
     return 0
+
+
+def _validate_distinct_paths(args: argparse.Namespace) -> None:
+    paths = [
+        ("input", args.input),
+        ("PNG output", args.output),
+        ("SVG output", args.svg),
+        ("JSON output", args.json),
+    ]
+    seen: dict[str, str] = {}
+    for label, path in paths:
+        if path is None:
+            continue
+        key = os.path.normcase(str(path.resolve()))
+        previous = seen.get(key)
+        if previous is not None:
+            raise ValueError(f"{label} path must differ from the {previous} path")
+        seen[key] = label
 
 
 def entrypoint() -> int:

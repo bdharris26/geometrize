@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import io
 import json
 import threading
 from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from PIL import Image
 from playwright.sync_api import Page, expect, sync_playwright
 
 from geometrize_py.web import GeometrizeRequestHandler, GeometrizeServer
@@ -36,6 +38,29 @@ def test_sample_continue_and_project_round_trip(server_url: str, tmp_path: Path)
         )
         page.on("pageerror", lambda error: page_errors.append(str(error)))
         page.goto(server_url, wait_until="networkidle")
+
+        source_buffer = io.BytesIO()
+        Image.new("RGB", (3, 2), (20, 80, 160)).save(source_buffer, format="PNG")
+        page.locator("#image-input").set_input_files(
+            {
+                "name": "source.unknown",
+                "mimeType": "",
+                "buffer": source_buffer.getvalue(),
+            }
+        )
+        expect(page.locator("#status")).to_have_text("Ready")
+        expect(page.locator("#save-project-button")).to_be_enabled()
+        unknown_project_path = tmp_path / "unknown-source.geometrize-project.json"
+        with page.expect_download() as download_info:
+            page.get_by_role("button", name="Save project", exact=True).click()
+        download_info.value.save_as(unknown_project_path)
+        unknown_project = json.loads(unknown_project_path.read_text(encoding="utf-8"))
+        assert unknown_project["source"]["data_url"].startswith("data:image/png;base64,")
+        page.locator("#project-input").set_input_files(unknown_project_path)
+        expect(page.locator("#status")).to_have_text(
+            "Project loaded — Run starts a new render",
+            timeout=30_000,
+        )
 
         _run_sample(page, shapes=4)
         expect(page.locator("#max-size")).to_be_disabled()
@@ -91,10 +116,65 @@ def test_sample_continue_and_project_round_trip(server_url: str, tmp_path: Path)
         )
         expect(page.locator("#max-size")).to_have_value("128")
 
+        invalid_radius_project = json.loads(json.dumps(project))
+        invalid_radius_project["result"]["preview_data_url"] = None
+        invalid_radius_project["result"]["shapes"] = [
+            {
+                "type": "circle",
+                "color": {"r": 0, "g": 0, "b": 0, "a": 255},
+                "data": {"x": 10, "y": 10, "r": -1},
+            }
+        ]
+        invalid_radius_path = tmp_path / "invalid-radius.geometrize-project.json"
+        invalid_radius_path.write_text(json.dumps(invalid_radius_project), encoding="utf-8")
+        page.locator("#project-input").set_input_files(invalid_radius_path)
+        expect(page.locator("#status")).to_have_text(
+            "Could not open project: Shape 1 r cannot be negative",
+        )
+        expect(page.locator("#max-size")).to_have_value("128")
+        expect(page.locator("#image-name")).to_have_text(project["source"]["name"])
+
         browser.close()
 
     assert console_errors == []
     assert page_errors == []
+
+
+def test_source_controls_stay_locked_during_run(server_url: str) -> None:
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = browser.new_page()
+        page.goto(server_url, wait_until="networkidle")
+        page.get_by_role("button", name="Sample", exact=True).click()
+        page.evaluate(
+            """
+            () => {
+              const originalFetch = window.fetch;
+              window.fetch = (url, options = {}) => {
+                if (String(url).endsWith("/api/run/stream")) {
+                  return new Promise((resolve, reject) => {
+                    options.signal.addEventListener(
+                      "abort",
+                      () => reject(new DOMException("Aborted", "AbortError")),
+                      { once: true }
+                    );
+                  });
+                }
+                return originalFetch(url, options);
+              };
+            }
+            """
+        )
+
+        page.get_by_role("button", name="Run", exact=True).click()
+        expect(page.locator("#image-input")).to_be_disabled()
+        expect(page.get_by_role("button", name="Sample", exact=True)).to_be_disabled()
+        page.get_by_role("button", name="Pause", exact=True).click()
+        expect(page.locator("#status")).to_have_text("Paused")
+        expect(page.locator("#image-input")).to_be_enabled()
+        expect(page.get_by_role("button", name="Sample", exact=True)).to_be_enabled()
+
+        browser.close()
 
 
 def _run_sample(page: Page, shapes: int) -> None:
