@@ -1,19 +1,22 @@
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from html import escape
 from typing import Any
 
+Shape = Mapping[str, Any]
+
 
 def shapes_to_svg(
-    shapes: list[dict[str, Any]],
+    shapes: Sequence[Shape],
     width: int,
     height: int,
     background: tuple[int, int, int, int] | None = None,
     output_width: int | None = None,
     output_height: int | None = None,
 ) -> str:
-    output_width = output_width or width
-    output_height = output_height or height
+    output_width = width if output_width is None else output_width
+    output_height = height if output_height is None else output_height
     parts = [
         '<?xml version="1.0" standalone="no"?>',
         (
@@ -21,7 +24,7 @@ def shapes_to_svg(
             f'baseProfile="tiny" width="{output_width}" height="{output_height}" viewBox="0 0 {width} {height}">'
         ),
     ]
-    if background:
+    if background is not None:
         parts.append(
             f'<rect x="0" y="0" width="{width}" height="{height}" '
             f'fill="{_rgb(background)}" fill-opacity="{_alpha(background)}" />'
@@ -32,7 +35,7 @@ def shapes_to_svg(
     return "\n".join(parts)
 
 
-def _shape_to_svg(shape: dict[str, Any], index: int) -> str:
+def _shape_to_svg(shape: Shape, index: int) -> str:
     shape_type = str(shape.get("type", ""))
     color = _shape_color(shape)
     style = _style(shape_type, color, index)
@@ -53,16 +56,18 @@ def _shape_to_svg(shape: dict[str, Any], index: int) -> str:
         )
     if shape_type == "rectangle":
         x1, y1, x2, y2 = data["x1"], data["y1"], data["x2"], data["y2"]
+        x, y, rect_width, rect_height = _rect_bounds(x1, y1, x2, y2)
         return (
-            f'<rect x="{_num(x1)}" y="{_num(y1)}" width="{_num(x2 - x1)}" '
-            f'height="{_num(y2 - y1)}" {style} />'
+            f'<rect x="{_num(x)}" y="{_num(y)}" width="{_num(rect_width)}" '
+            f'height="{_num(rect_height)}" {style} />'
         )
     if shape_type == "rotated_rectangle":
         x1, y1, x2, y2 = data["x1"], data["y1"], data["x2"], data["y2"]
         cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+        x, y, rect_width, rect_height = _rect_bounds(x1, y1, x2, y2)
         return (
-            f'<rect x="{_num(x1)}" y="{_num(y1)}" width="{_num(x2 - x1)}" '
-            f'height="{_num(y2 - y1)}" transform="rotate({_num(data["angle"])} {_num(cx)} {_num(cy)})" {style} />'
+            f'<rect x="{_num(x)}" y="{_num(y)}" width="{_num(rect_width)}" '
+            f'height="{_num(rect_height)}" transform="rotate({_num(data["angle"])} {_num(cx)} {_num(cy)})" {style} />'
         )
     if shape_type == "triangle":
         points = (
@@ -88,9 +93,9 @@ def _shape_to_svg(shape: dict[str, Any], index: int) -> str:
     raise ValueError(f"Cannot export unknown shape type '{shape_type}'")
 
 
-def _shape_color(shape: dict[str, Any]) -> tuple[int, int, int, int]:
+def _shape_color(shape: Shape) -> tuple[int, int, int, int]:
     color = shape.get("color", {})
-    return (int(color["r"]), int(color["g"]), int(color["b"]), int(color["a"]))
+    return (_channel(color["r"]), _channel(color["g"]), _channel(color["b"]), _channel(color["a"]))
 
 
 def _style(shape_type: str, color: tuple[int, int, int, int], index: int) -> str:
@@ -112,3 +117,11 @@ def _alpha(color: tuple[int, int, int, int]) -> str:
 
 def _num(value: float) -> str:
     return f"{float(value):.4g}"
+
+
+def _rect_bounds(x1: float, y1: float, x2: float, y2: float) -> tuple[float, float, float, float]:
+    return (min(x1, x2), min(y1, y2), abs(x2 - x1), abs(y2 - y1))
+
+
+def _channel(value: Any) -> int:
+    return max(0, min(255, int(value)))

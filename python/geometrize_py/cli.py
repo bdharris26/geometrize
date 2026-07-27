@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 
 from .images import image_to_png_bytes, open_image_bytes
@@ -22,6 +23,10 @@ def main(argv: list[str] | None = None) -> int:
         run_server(args.host, args.port, args.open)
         return 0
     if command == "run":
+        try:
+            _validate_distinct_paths(args)
+        except ValueError as exc:
+            parser.error(str(exc))
         return run_once(args)
     if command == "doctor":
         print(f"native backend: {'available' if native_available() else 'unavailable'}")
@@ -31,7 +36,10 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="geometrize", description="Run the Python Geometrize UI or headless renderer.")
+    parser = argparse.ArgumentParser(
+        prog="geometrize",
+        description="Run the Python Geometrize UI or headless renderer.",
+    )
     subparsers = parser.add_subparsers(dest="command")
 
     serve = subparsers.add_parser("serve", help="start the browser UI")
@@ -59,8 +67,20 @@ def add_option_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--mutations", type=int, default=RunOptions.mutations)
     parser.add_argument("--seed", type=int, default=RunOptions.seed)
     parser.add_argument("--max-threads", type=int, default=RunOptions.max_threads)
-    parser.add_argument("--max-size", type=int, default=RunOptions.max_size)
-    parser.add_argument("--export-size", "--longest-dimension", dest="export_size", type=int, default=RunOptions.export_size)
+    parser.add_argument(
+        "--max-size",
+        type=int,
+        default=RunOptions.max_size,
+        help="optimizer working resolution (longest dimension, capped at 2048)",
+    )
+    parser.add_argument(
+        "--export-size",
+        "--longest-dimension",
+        dest="export_size",
+        type=int,
+        default=RunOptions.export_size,
+        help="output resolution (longest dimension, capped at 4096)",
+    )
 
 
 def options_from_args(args: argparse.Namespace) -> RunOptions:
@@ -84,7 +104,14 @@ def run_once(args: argparse.Namespace) -> int:
     options = options_from_args(args)
     result = run_image(image, options)
     export_width, export_height = export_dimensions(result.width, result.height, options.export_size)
-    output = render_shapes_to_image(result.shapes, result.width, result.height, result.background, export_width, export_height)
+    output = render_shapes_to_image(
+        result.shapes,
+        result.width,
+        result.height,
+        result.background,
+        export_width,
+        export_height,
+    )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_bytes(image_to_png_bytes(output))
     svg = shapes_to_svg(result.shapes, result.width, result.height, result.background, export_width, export_height)
@@ -96,6 +123,24 @@ def run_once(args: argparse.Namespace) -> int:
         args.json.write_text(json.dumps(result.shapes, indent=2), encoding="utf-8")
     print(f"wrote {args.output} with {len(result.shapes)} shapes")
     return 0
+
+
+def _validate_distinct_paths(args: argparse.Namespace) -> None:
+    paths = [
+        ("input", args.input),
+        ("PNG output", args.output),
+        ("SVG output", args.svg),
+        ("JSON output", args.json),
+    ]
+    seen: dict[str, str] = {}
+    for label, path in paths:
+        if path is None:
+            continue
+        key = os.path.normcase(str(path.resolve()))
+        previous = seen.get(key)
+        if previous is not None:
+            raise ValueError(f"{label} path must differ from the {previous} path")
+        seen[key] = label
 
 
 def entrypoint() -> int:

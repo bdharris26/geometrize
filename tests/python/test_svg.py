@@ -32,3 +32,19 @@ def test_shapes_to_svg_can_scale_output_dimensions_with_viewbox() -> None:
     svg = shapes_to_svg([], 2, 3, (1, 2, 3, 255), 200, 300)
 
     assert 'width="200" height="300" viewBox="0 0 2 3"' in svg
+
+
+def test_shapes_to_svg_normalizes_reversed_rectangles() -> None:
+    svg = shapes_to_svg(
+        [
+            {
+                "type": "rectangle",
+                "color": {"r": 10, "g": 20, "b": 30, "a": 255},
+                "data": {"x1": 8, "y1": 7, "x2": 2, "y2": 3},
+            }
+        ],
+        10,
+        10,
+    )
+
+    assert '<rect x="2" y="3" width="6" height="4"' in svg

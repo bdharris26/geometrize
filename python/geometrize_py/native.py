@@ -1,14 +1,13 @@
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
-from threading import Lock
-from typing import Any, Iterable
+from threading import RLock
+from typing import Any
 
 from PIL import Image
 
 from .images import average_color, fit_image
-
 
 SHAPE_TYPES: dict[str, int] = {
     "rectangle": 1,
@@ -23,7 +22,8 @@ SHAPE_TYPES: dict[str, int] = {
 }
 
 DEFAULT_SHAPES = ("ellipse", "rotated_rectangle", "triangle")
-MAX_IMAGE_SIZE = 8192
+MAX_WORKING_IMAGE_SIZE = 2048
+MAX_IMAGE_SIZE = 4096
 
 
 class NativeBackendUnavailable(RuntimeError):
@@ -51,13 +51,27 @@ class RunOptions:
     max_size: int = 1024
     export_size: int = 1024
 
+    def __post_init__(self) -> None:
+        shape_types = self.shape_types
+        if isinstance(shape_types, str):
+            shape_types = tuple(value.strip() for value in shape_types.split(",") if value.strip())
+        object.__setattr__(self, "shape_types", normalize_shape_types(shape_types))
+        _validate_int_option("steps", self.steps, 1, 4096)
+        _validate_int_option("alpha", self.alpha, 1, 255)
+        _validate_int_option("shape_count", self.shape_count, 1, 512)
+        _validate_int_option("mutations", self.mutations, 1, 2048)
+        _validate_int_option("seed", self.seed, 0, 2**31 - 1)
+        _validate_int_option("max_threads", self.max_threads, 0, 128)
+        _validate_int_option("max_size", self.max_size, 32, MAX_WORKING_IMAGE_SIZE)
+        _validate_int_option("export_size", self.export_size, 32, MAX_IMAGE_SIZE)
+
     @classmethod
-    def from_mapping(cls, data: dict[str, Any] | None) -> "RunOptions":
+    def from_mapping(cls, data: dict[str, Any] | None) -> RunOptions:
         data = data or {}
         shape_types = data.get("shape_types", DEFAULT_SHAPES)
         if isinstance(shape_types, str):
             shape_types = tuple(s.strip() for s in shape_types.split(",") if s.strip())
-        max_size = _clamp_int(data.get("max_size", cls.max_size), 32, MAX_IMAGE_SIZE)
+        max_size = _clamp_int(data.get("max_size", cls.max_size), 32, MAX_WORKING_IMAGE_SIZE)
         return cls(
             steps=_clamp_int(data.get("steps", cls.steps), 1, 4096),
             shape_types=normalize_shape_types(shape_types),
@@ -106,10 +120,10 @@ class ImageSession:
         self._session = session
         self.shapes: list[dict[str, Any]] = []
         self.batch_count = 0
-        self.lock = Lock()
+        self._run_lock = RLock()
 
     @classmethod
-    def from_image(cls, image: Image.Image, options: RunOptions) -> "ImageSession":
+    def from_image(cls, image: Image.Image, options: RunOptions) -> ImageSession:
         backend = require_native()
         source = fit_image(image, options.max_size).convert("RGBA")
         width, height = source.size
@@ -121,39 +135,56 @@ class ImageSession:
     def attempts(self) -> int:
         return int(self._session.attempts)
 
-    def run_batch(self, options: RunOptions) -> Iterator[dict[str, Any]]:
-        with self.lock:
-            self.batch_count += 1
-            batch_index = self.batch_count
-            accepted_at_start = len(self.shapes)
-            attempts_at_start = self.attempts
-            max_attempts = max(options.steps * 8, options.steps + 64)
+    def try_acquire_run(self) -> bool:
+        return self._run_lock.acquire(blocking=False)
 
-            while len(self.shapes) - accepted_at_start < options.steps and self.attempts - attempts_at_start < max_attempts:
-                step = self._session.step(options.to_native_dict())
-                step_shapes = list(step["shapes"])
-                self.shapes.extend(step_shapes)
-                yield {
-                    "event": "step",
-                    "batch": batch_index,
-                    "attempt": int(step["attempt"]),
-                    "attempts": int(step["attempt"]),
-                    "shapes": step_shapes,
-                    "shape_count": len(self.shapes),
-                    "batch_shape_count": len(self.shapes) - accepted_at_start,
-                    "batch_goal": options.steps,
-                }
+    def release_run(self) -> None:
+        self._run_lock.release()
+
+    def run_batch(self, options: RunOptions) -> Iterator[dict[str, Any]]:
+        with self._run_lock:
+            yield from self._run_batch(options)
+
+    def run_reserved_batch(self, options: RunOptions) -> Iterator[dict[str, Any]]:
+        """Run while the caller holds the reservation from try_acquire_run()."""
+        yield from self._run_batch(options)
+
+    def _run_batch(self, options: RunOptions) -> Iterator[dict[str, Any]]:
+        self.batch_count += 1
+        batch_index = self.batch_count
+        accepted_at_start = len(self.shapes)
+        attempts_at_start = self.attempts
+        max_attempts = max(options.steps * 8, options.steps + 64)
+
+        while (
+            len(self.shapes) - accepted_at_start < options.steps
+            and self.attempts - attempts_at_start < max_attempts
+        ):
+            step = self._session.step(options.to_native_dict())
+            step_shapes = list(step["shapes"])
+            self.shapes.extend(step_shapes)
+            yield {
+                "event": "step",
+                "batch": batch_index,
+                "attempt": int(step["attempt"]),
+                "attempts": int(step["attempt"]),
+                "shapes": step_shapes,
+                "shape_count": len(self.shapes),
+                "batch_shape_count": len(self.shapes) - accepted_at_start,
+                "batch_goal": options.steps,
+            }
 
     def result(self) -> RunResult:
-        output = Image.frombytes("RGBA", (self.width, self.height), self._session.current_rgba())
-        return RunResult(
-            width=self.width,
-            height=self.height,
-            image=output,
-            shapes=self.shapes.copy(),
-            attempts=self.attempts,
-            background=self.background,
-        )
+        with self._run_lock:
+            output = Image.frombytes("RGBA", (self.width, self.height), self._session.current_rgba())
+            return RunResult(
+                width=self.width,
+                height=self.height,
+                image=output,
+                shapes=self.shapes.copy(),
+                attempts=self.attempts,
+                background=self.background,
+            )
 
 
 def native_available() -> bool:
@@ -224,3 +255,8 @@ def normalize_shape_types(values: Iterable[str]) -> tuple[str, ...]:
 def _clamp_int(value: Any, lower: int, upper: int) -> int:
     number = int(value)
     return max(lower, min(upper, number))
+
+
+def _validate_int_option(name: str, value: Any, lower: int, upper: int) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < lower or value > upper:
+        raise ValueError(f"{name} must be an integer from {lower} to {upper}")

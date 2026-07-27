@@ -20,12 +20,22 @@
       <form id="run-form">
         <div class="input-actions">
           <label class="drop-zone" for="image-input">
-            <input id="image-input" type="file" accept="image/*">
+          <input id="image-input" type="file" accept=".png,.jpg,.jpeg,.webp,.bmp,.gif,.tif,.tiff,image/png,image/jpeg,image/webp,image/bmp,image/gif,image/tiff">
             <span id="file-label">Choose image</span>
             <span id="image-name">No image selected</span>
           </label>
           <button id="sample-button" class="secondary" type="button">Sample</button>
         </div>
+
+        <fieldset class="project-files" aria-describedby="project-help">
+          <legend>Project</legend>
+          <input id="project-input" type="file" accept=".json,application/json" hidden>
+          <div class="project-actions">
+            <button id="load-project-button" class="secondary" type="button">Open project</button>
+            <button id="save-project-button" class="secondary" type="button" disabled>Save project</button>
+          </div>
+          <p id="project-help">Project JSON restores the source, result, options, and run history.</p>
+        </fieldset>
 
         <fieldset class="shape-grid">
           <legend>Shapes</legend>
@@ -44,7 +54,7 @@
 
         <div class="field two">
           <label>Alpha <input id="alpha" name="alpha" type="number" min="1" max="255" value="128"></label>
-          <label>Seed <input id="seed" name="seed" type="number" min="0" value="9001"></label>
+          <label>Seed <input id="seed" name="seed" type="number" min="0" max="2147483647" value="9001"></label>
         </div>
 
         <div class="field two">
@@ -53,10 +63,18 @@
         </div>
 
         <div class="field">
-          <label for="max-size" title="Longest output dimension. Large values export sharper PNG/SVG results while the optimizer only downsizes oversized sources for speed.">Longest dimension <output id="max-size-out">1024</output></label>
+          <label for="max-size" title="Longest source dimension used by the optimizer. Lower values run faster and retain smaller resumable sessions.">Working resolution <output id="max-size-out">1024</output></label>
           <div class="range-with-input">
-            <input id="max-size" name="max_size" type="range" min="64" max="8192" step="64" value="1024">
-            <input id="max-size-number" type="number" min="64" max="8192" step="64" value="1024" aria-label="Longest dimension value">
+            <input id="max-size" name="max_size" type="range" min="64" max="2048" step="64" value="1024">
+            <input id="max-size-number" type="number" min="64" max="2048" step="64" value="1024" aria-label="Working resolution value">
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="export-size" title="Longest dimension for PNG and SVG output. This does not increase optimizer memory use.">Export resolution <output id="export-size-out">1024</output></label>
+          <div class="range-with-input">
+            <input id="export-size" name="export_size" type="range" min="64" max="4096" step="64" value="1024">
+            <input id="export-size-number" type="number" min="64" max="4096" step="64" value="1024" aria-label="Export resolution value">
           </div>
         </div>
 
@@ -110,14 +128,14 @@
 
       <footer class="statusbar">
         <div class="status-group">
-          <span id="status">Ready</span>
+          <span id="status" role="status" aria-live="polite">Ready</span>
           <span id="pipeline">0 shapes</span>
         </div>
         <span id="metrics"></span>
         <div class="downloads">
           <a id="download-png" aria-disabled="true">PNG</a>
           <a id="download-svg" aria-disabled="true">SVG</a>
-          <a id="download-json" aria-disabled="true">JSON</a>
+          <a id="download-json" aria-disabled="true">Shapes JSON</a>
         </div>
       </footer>
     </main>
