@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import socket
 import threading
 import urllib.request
 from collections.abc import Iterator
@@ -48,6 +49,7 @@ def test_index_supports_sample_without_required_file_input(server: GeometrizeSer
     assert "Mutations per candidate" in html
     assert "Working resolution" in html
     assert "Export resolution" in html
+    assert 'id="seed" name="seed" type="number" min="0" max="2147483647" value="9001"' in html
     assert 'id="max-size" name="max_size" type="range" min="64" max="2048" step="64" value="1024"' in html
     assert 'id="export-size" name="export_size" type="range" min="64" max="8192" step="64" value="1024"' in html
     assert 'id="load-project-button"' in html
@@ -157,6 +159,46 @@ def test_render_concurrency_slots_are_bounded(server: GeometrizeServer) -> None:
 
     assert server.try_acquire_render_slot()
     server.release_render_slot()
+
+
+def test_partial_request_body_does_not_acquire_render_slot() -> None:
+    class ObservedReadHandler(GeometrizeRequestHandler):
+        read_started = threading.Event()
+
+        def _read_json(self) -> dict[str, object]:
+            self.read_started.set()
+            return super()._read_json()
+
+    server = GeometrizeServer(
+        ("127.0.0.1", 0),
+        ObservedReadHandler,
+        max_active_renders=1,
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    client = socket.create_connection(server.server_address, timeout=5)
+    slot_acquired = False
+    try:
+        client.sendall(
+            b"POST /api/run HTTP/1.1\r\n"
+            b"Host: 127.0.0.1\r\n"
+            b"Content-Type: application/json\r\n"
+            b"Content-Length: 2\r\n"
+            b"Connection: close\r\n"
+            b"\r\n"
+            b"{"
+        )
+        assert ObservedReadHandler.read_started.wait(timeout=5)
+        slot_acquired = server.try_acquire_render_slot()
+        assert slot_acquired
+    finally:
+        if slot_acquired:
+            server.release_render_slot()
+        client.sendall(b"}")
+        client.close()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
 
 
 @pytest.mark.skipif(not native_available(), reason="native backend is not built")

@@ -46,6 +46,10 @@ def test_sample_continue_and_project_round_trip(server_url: str, tmp_path: Path)
         page.get_by_role("button", name="Continue", exact=True).wait_for(timeout=120_000)
         assert "6 accepted" in page.locator("#telemetry-acceptance").inner_text()
 
+        page.locator("#alpha").fill("0")
+        page.locator("#seed").fill(str(2**31))
+        page.locator("#shape-count").fill("")
+        page.locator("#mutations").fill("")
         project_path = tmp_path / "sample.geometrize-project.json"
         with page.expect_download() as download_info:
             page.get_by_role("button", name="Save project", exact=True).click()
@@ -56,7 +60,15 @@ def test_sample_continue_and_project_round_trip(server_url: str, tmp_path: Path)
         assert project["version"] == 1
         assert project["options"]["max_size"] == 128
         assert project["options"]["export_size"] == 256
+        assert project["options"]["alpha"] == 1
+        assert project["options"]["seed"] == 2**31 - 1
+        assert project["options"]["shape_count"] == 64
+        assert project["options"]["mutations"] == 128
         assert len(project["result"]["shapes"]) == 6
+        expect(page.locator("#alpha")).to_have_value("1")
+        expect(page.locator("#seed")).to_have_value(str(2**31 - 1))
+        expect(page.locator("#shape-count")).to_have_value("64")
+        expect(page.locator("#mutations")).to_have_value("128")
 
         page.reload(wait_until="networkidle")
         page.locator("#project-input").set_input_files(project_path)

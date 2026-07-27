@@ -157,6 +157,11 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
         if path not in {"/api/run", "/api/run/stream"}:
             self.send_error(HTTPStatus.NOT_FOUND)
             return
+        try:
+            payload = self._read_json()
+        except Exception as exc:
+            self._send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return
         if not self.geometrize_server.try_acquire_render_slot():
             self._send_json(
                 {"error": "The renderer is busy. Wait for an active render to finish."},
@@ -165,15 +170,14 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
             return
         try:
             if path == "/api/run/stream":
-                self._run_stream()
+                self._run_stream(payload)
             else:
-                self._run_once()
+                self._run_once(payload)
         finally:
             self.geometrize_server.release_render_slot()
 
-    def _run_once(self) -> None:
+    def _run_once(self, payload: dict[str, Any]) -> None:
         try:
-            payload = self._read_json()
             image = image_from_data_url(_required_text(payload, "image"))
             options = RunOptions.from_mapping(payload.get("options"))
             result = run_image(image, options)
@@ -183,9 +187,8 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
         except Exception as exc:
             self._send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
 
-    def _run_stream(self) -> None:
+    def _run_stream(self, payload: dict[str, Any]) -> None:
         try:
-            payload = self._read_json()
             options = RunOptions.from_mapping(payload.get("options"))
             if not native_available():
                 raise NativeBackendUnavailable("Geometrize native backend is unavailable")

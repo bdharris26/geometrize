@@ -695,15 +695,23 @@ function selectedShapeTypes() {
 
 function currentOptions(shapeTypes) {
   return {
-    steps: Number(steps.value),
+    steps: normalizedIntegerInput(steps, 128, 1, 4096),
     shape_types: shapeTypes,
-    alpha: Number(alpha.value),
-    seed: Number(seed.value),
-    shape_count: Number(shapeCount.value),
-    mutations: Number(mutations.value),
+    alpha: normalizedIntegerInput(alpha, 128, 1, 255),
+    seed: normalizedIntegerInput(seed, 9001, 0, 2147483647),
+    shape_count: normalizedIntegerInput(shapeCount, 64, 1, 512),
+    mutations: normalizedIntegerInput(mutations, 128, 1, 2048),
     max_size: Number(maxSize.value),
     export_size: Number(exportSize.value)
   };
+}
+
+function normalizedIntegerInput(input, defaultValue, min, max) {
+  const raw = input.valueAsNumber;
+  const value = Number.isFinite(raw) ? Math.trunc(raw) : defaultValue;
+  const normalized = Math.max(min, Math.min(max, value));
+  input.value = String(normalized);
+  return normalized;
 }
 
 function prepareRun(isContinuation, options) {
