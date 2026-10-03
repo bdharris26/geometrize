@@ -616,15 +616,19 @@ async function downloadResult(type) {
 }
 
 function bindEvents() {
-  ui.steps.addEventListener("input", () => { syncPair(ui.steps, ui.stepsNumber, ui.stepsOut, ui.steps.value); ui.preset.value = "custom"; });
-  ui.stepsNumber.addEventListener("change", () => { syncPair(ui.steps, ui.stepsNumber, ui.stepsOut, ui.stepsNumber.value); ui.preset.value = "custom"; });
-  ui.maxSize.addEventListener("input", () => { syncPair(ui.maxSize, ui.maxSizeNumber, ui.maxSizeOut, ui.maxSize.value); ui.preset.value = "custom"; });
-  ui.maxSizeNumber.addEventListener("change", () => { syncPair(ui.maxSize, ui.maxSizeNumber, ui.maxSizeOut, ui.maxSizeNumber.value); ui.preset.value = "custom"; });
-  const exportChanged = (value) => {
-    commitExportSize(value);
-  };
-  ui.exportSize.addEventListener("input", () => exportChanged(ui.exportSize.value));
-  ui.exportSizeNumber.addEventListener("change", () => exportChanged(ui.exportSizeNumber.value));
+  for (const [slider, number, output] of [
+    [ui.steps, ui.stepsNumber, ui.stepsOut],
+    [ui.maxSize, ui.maxSizeNumber, ui.maxSizeOut]
+  ]) {
+    const update = (value) => {
+      syncPair(slider, number, output, value);
+      ui.preset.value = "custom";
+    };
+    slider.addEventListener("input", () => update(slider.value));
+    number.addEventListener("change", () => update(number.value));
+  }
+  ui.exportSize.addEventListener("input", () => commitExportSize(ui.exportSize.value));
+  ui.exportSizeNumber.addEventListener("change", () => commitExportSize(ui.exportSizeNumber.value));
   ui.preset.addEventListener("change", () => {
     const preset = contract.presets[ui.preset.value];
     if (!preset) return;

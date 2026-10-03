@@ -68,14 +68,6 @@ export class Telemetry {
     this.render();
   }
 
-  setBaseline(score) {
-    if (typeof score === "number" && Number.isFinite(score)) {
-      this.initialScore = score;
-      this.rebuildSeries();
-    }
-    this.render();
-  }
-
   replace(shapes, attempts, initialScore = this.initialScore) {
     this.shapes = [...shapes];
     this.attempts = attempts || 0;

@@ -13,7 +13,6 @@
   --accent-soft: rgba(88, 195, 168, 0.18);
   --gold: #e0b84f;
   --clay: #d87368;
-  --focus: #e0b84f;
   --grid: rgba(243, 240, 232, 0.055);
 }
 
@@ -649,22 +648,12 @@ figcaption span {
   stroke-width: 1;
 }
 
-.score-path,
-.impact-axis {
+.score-path {
   fill: none;
   stroke-linecap: round;
   stroke-linejoin: round;
-}
-
-.score-path {
   stroke: var(--accent);
   stroke-width: 3;
-}
-
-.impact-axis {
-  stroke: var(--gold);
-  stroke-width: 1.5;
-  stroke-opacity: 0.58;
 }
 
 .impact-bar {

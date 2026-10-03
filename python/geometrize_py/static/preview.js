@@ -72,7 +72,6 @@ export class Preview {
     this.zoomOutput = zoomOutput;
     this.sourceSize = null;
     this.resultSize = null;
-    this.background = null;
     this.canvasScale = 1;
     this.zoom = 1;
     this.pan = { x: 0, y: 0 };
@@ -141,7 +140,6 @@ export class Preview {
 
   clearResult() {
     this.resultSize = null;
-    this.background = null;
     this.resultImage.removeAttribute("src");
     this.resultImage.hidden = true;
     this.resultCanvas.hidden = true;
@@ -152,7 +150,6 @@ export class Preview {
 
   beginResult(width, height, background) {
     this.resultSize = { width, height };
-    this.background = background;
     this.canvasScale = Math.min(1, LIVE_CANVAS_MAX / Math.max(width, height));
     this.resultCanvas.width = Math.max(1, Math.round(width * this.canvasScale));
     this.resultCanvas.height = Math.max(1, Math.round(height * this.canvasScale));
