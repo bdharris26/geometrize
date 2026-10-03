@@ -1,29 +1,45 @@
 from __future__ import annotations
 
+import os
+import platform
+import sys
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
-from threading import RLock
+from threading import Event, RLock
 from typing import Any
 
 from PIL import Image
 
+from .contracts import (
+    DEFAULT_SHAPES,
+    MAX_IMAGE_SIZE,
+    MAX_WORKING_IMAGE_SIZE,
+    OPTION_DEFAULTS,
+    OPTION_LIMITS,
+    SHAPE_TYPES,
+)
 from .images import average_color, fit_image
 
-SHAPE_TYPES: dict[str, int] = {
-    "rectangle": 1,
-    "rotated_rectangle": 2,
-    "triangle": 4,
-    "ellipse": 8,
-    "rotated_ellipse": 16,
-    "circle": 32,
-    "line": 64,
-    "quadratic_bezier": 128,
-    "polyline": 256,
-}
+__all__ = [
+    "DEFAULT_SHAPES",
+    "MAX_IMAGE_SIZE",
+    "MAX_WORKING_IMAGE_SIZE",
+    "SHAPE_TYPES",
+    "ImageSession",
+    "NativeBackendUnavailable",
+    "RunOptions",
+    "RunResult",
+    "diagnostics",
+    "effective_max_threads",
+    "iter_image",
+    "native_available",
+    "normalize_shape_types",
+    "require_native",
+    "run_image",
+]
 
-DEFAULT_SHAPES = ("ellipse", "rotated_rectangle", "triangle")
-MAX_WORKING_IMAGE_SIZE = 2048
-MAX_IMAGE_SIZE = 4096
+MAX_AUTO_THREADS = 8
+PERFECT_FIT_EPSILON = 1e-9
 
 
 class NativeBackendUnavailable(RuntimeError):
@@ -41,29 +57,24 @@ else:
 
 @dataclass(frozen=True)
 class RunOptions:
-    steps: int = 128
+    steps: int = OPTION_DEFAULTS["steps"]
     shape_types: tuple[str, ...] = DEFAULT_SHAPES
-    alpha: int = 128
-    shape_count: int = 64
-    mutations: int = 128
-    seed: int = 9001
-    max_threads: int = 0
-    max_size: int = 1024
-    export_size: int = 1024
+    alpha: int = OPTION_DEFAULTS["alpha"]
+    shape_count: int = OPTION_DEFAULTS["shape_count"]
+    mutations: int = OPTION_DEFAULTS["mutations"]
+    seed: int = OPTION_DEFAULTS["seed"]
+    max_threads: int = OPTION_DEFAULTS["max_threads"]
+    max_size: int = OPTION_DEFAULTS["max_size"]
+    export_size: int = OPTION_DEFAULTS["export_size"]
+    stagnation_limit: int = OPTION_DEFAULTS["stagnation_limit"]
 
     def __post_init__(self) -> None:
         shape_types = self.shape_types
         if isinstance(shape_types, str):
             shape_types = tuple(value.strip() for value in shape_types.split(",") if value.strip())
         object.__setattr__(self, "shape_types", normalize_shape_types(shape_types))
-        _validate_int_option("steps", self.steps, 1, 4096)
-        _validate_int_option("alpha", self.alpha, 1, 255)
-        _validate_int_option("shape_count", self.shape_count, 1, 512)
-        _validate_int_option("mutations", self.mutations, 1, 2048)
-        _validate_int_option("seed", self.seed, 0, 2**31 - 1)
-        _validate_int_option("max_threads", self.max_threads, 0, 128)
-        _validate_int_option("max_size", self.max_size, 32, MAX_WORKING_IMAGE_SIZE)
-        _validate_int_option("export_size", self.export_size, 32, MAX_IMAGE_SIZE)
+        for name, (lower, upper) in OPTION_LIMITS.items():
+            _validate_int_option(name, getattr(self, name), lower, upper)
 
     @classmethod
     def from_mapping(cls, data: dict[str, Any] | None) -> RunOptions:
@@ -71,17 +82,18 @@ class RunOptions:
         shape_types = data.get("shape_types", DEFAULT_SHAPES)
         if isinstance(shape_types, str):
             shape_types = tuple(s.strip() for s in shape_types.split(",") if s.strip())
-        max_size = _clamp_int(data.get("max_size", cls.max_size), 32, MAX_WORKING_IMAGE_SIZE)
+        max_size = _clamp_option("max_size", data.get("max_size", cls.max_size))
         return cls(
-            steps=_clamp_int(data.get("steps", cls.steps), 1, 4096),
+            steps=_clamp_option("steps", data.get("steps", cls.steps)),
             shape_types=normalize_shape_types(shape_types),
-            alpha=_clamp_int(data.get("alpha", cls.alpha), 1, 255),
-            shape_count=_clamp_int(data.get("shape_count", cls.shape_count), 1, 512),
-            mutations=_clamp_int(data.get("mutations", cls.mutations), 1, 2048),
-            seed=_clamp_int(data.get("seed", cls.seed), 0, 2**31 - 1),
-            max_threads=_clamp_int(data.get("max_threads", cls.max_threads), 0, 128),
+            alpha=_clamp_option("alpha", data.get("alpha", cls.alpha)),
+            shape_count=_clamp_option("shape_count", data.get("shape_count", cls.shape_count)),
+            mutations=_clamp_option("mutations", data.get("mutations", cls.mutations)),
+            seed=_clamp_option("seed", data.get("seed", cls.seed)),
+            max_threads=_clamp_option("max_threads", data.get("max_threads", cls.max_threads)),
             max_size=max_size,
-            export_size=_clamp_int(data.get("export_size", data.get("max_size", max_size)), 32, MAX_IMAGE_SIZE),
+            export_size=_clamp_option("export_size", data.get("export_size", data.get("max_size", max_size))),
+            stagnation_limit=_clamp_option("stagnation_limit", data.get("stagnation_limit", cls.stagnation_limit)),
         )
 
     def to_native_dict(self) -> dict[str, Any]:
@@ -92,8 +104,12 @@ class RunOptions:
             "shape_count": self.shape_count,
             "mutations": self.mutations,
             "seed": self.seed,
-            "max_threads": self.max_threads,
+            "max_threads": effective_max_threads(self.max_threads),
         }
+
+    @property
+    def actual_max_threads(self) -> int:
+        return effective_max_threads(self.max_threads)
 
 
 @dataclass(frozen=True)
@@ -121,6 +137,12 @@ class ImageSession:
         self.shapes: list[dict[str, Any]] = []
         self.batch_count = 0
         self._run_lock = RLock()
+        self._cancel_requested = Event()
+        self.initial_score = float(getattr(session, "initial_score", 1.0))
+        self._score = float(getattr(session, "score", self.initial_score))
+        self.revision = 0
+        self.stop_reason: str | None = None
+        self._batch_summary: dict[str, Any] | None = None
 
     @classmethod
     def from_image(cls, image: Image.Image, options: RunOptions) -> ImageSession:
@@ -135,14 +157,32 @@ class ImageSession:
     def attempts(self) -> int:
         return int(self._session.attempts)
 
+    @property
+    def score(self) -> float:
+        return self._score
+
+    @property
+    def batch_summary(self) -> dict[str, Any] | None:
+        return self._batch_summary.copy() if self._batch_summary is not None else None
+
     def try_acquire_run(self) -> bool:
         return self._run_lock.acquire(blocking=False)
 
     def release_run(self) -> None:
         self._run_lock.release()
 
+    def prepare_run(self) -> None:
+        """Clear a prior cancellation while holding the run reservation."""
+        self._cancel_requested.clear()
+        self.stop_reason = None
+
+    def request_cancel(self) -> None:
+        """Ask the active batch to stop after its current native step."""
+        self._cancel_requested.set()
+
     def run_batch(self, options: RunOptions) -> Iterator[dict[str, Any]]:
         with self._run_lock:
+            self.prepare_run()
             yield from self._run_batch(options)
 
     def run_reserved_batch(self, options: RunOptions) -> Iterator[dict[str, Any]]:
@@ -155,24 +195,99 @@ class ImageSession:
         accepted_at_start = len(self.shapes)
         attempts_at_start = self.attempts
         max_attempts = max(options.steps * 8, options.steps + 64)
+        native_options = options.to_native_dict()
+        rejected_in_a_row = 0
+        reason: str | None = None
+        self._batch_summary = {
+            "index": batch_index,
+            "target": options.steps,
+            "shapeTypes": list(options.shape_types),
+            "candidates": options.shape_count,
+            "mutations": options.mutations,
+            "alpha": options.alpha,
+            "seed": options.seed,
+            "max_threads": options.actual_max_threads,
+            "stagnation_limit": options.stagnation_limit,
+            "start_shape_count": accepted_at_start,
+            "start_attempts": attempts_at_start,
+            "start_score": self.score,
+            "added": 0,
+            "attempts": 0,
+            "score": self.score,
+            "revision": self.revision,
+            "state": "running",
+            "reason": None,
+        }
 
-        while (
-            len(self.shapes) - accepted_at_start < options.steps
-            and self.attempts - attempts_at_start < max_attempts
-        ):
-            step = self._session.step(options.to_native_dict())
-            step_shapes = list(step["shapes"])
-            self.shapes.extend(step_shapes)
-            yield {
-                "event": "step",
-                "batch": batch_index,
-                "attempt": int(step["attempt"]),
-                "attempts": int(step["attempt"]),
-                "shapes": step_shapes,
-                "shape_count": len(self.shapes),
-                "batch_shape_count": len(self.shapes) - accepted_at_start,
-                "batch_goal": options.steps,
-            }
+        try:
+            while True:
+                added = len(self.shapes) - accepted_at_start
+                batch_attempts = self.attempts - attempts_at_start
+                if self._cancel_requested.is_set():
+                    reason = "paused"
+                    break
+                if self.score <= PERFECT_FIT_EPSILON:
+                    reason = "adequate_fit"
+                    break
+                if added >= options.steps:
+                    reason = "target_reached"
+                    break
+                if batch_attempts >= max_attempts:
+                    reason = "attempt_limit"
+                    break
+                if options.stagnation_limit and rejected_in_a_row >= options.stagnation_limit:
+                    reason = "no_further_improvement"
+                    break
+
+                # The C++ call releases the GIL. Cancellation is checked after
+                # it returns so an accepted shape is never lost from history.
+                step = self._session.step(native_options)
+                step_shapes = list(step["shapes"])
+                self.shapes.extend(step_shapes)
+                if step_shapes:
+                    self._score = float(getattr(self._session, "score", step_shapes[-1].get("score", self.score)))
+                    self.revision += len(step_shapes)
+                    rejected_in_a_row = 0
+                else:
+                    rejected_in_a_row += 1
+                added = len(self.shapes) - accepted_at_start
+                batch_attempts = self.attempts - attempts_at_start
+                self._batch_summary.update(
+                    added=added,
+                    attempts=batch_attempts,
+                    score=self.score,
+                    revision=self.revision,
+                )
+                yield {
+                    "event": "step",
+                    "batch": batch_index,
+                    "attempt": int(step["attempt"]),
+                    "attempts": int(step["attempt"]),
+                    "shapes": step_shapes,
+                    "shape_count": len(self.shapes),
+                    "batch_shape_count": added,
+                    "batch_goal": options.steps,
+                    "score": self.score,
+                    "initial_score": self.initial_score,
+                    "revision": self.revision,
+                }
+        except GeneratorExit:
+            reason = "paused"
+            raise
+        finally:
+            # Generator close on a disconnected client also leaves a coherent
+            # session that can be exported or continued.
+            self.stop_reason = reason or ("paused" if self._cancel_requested.is_set() else "error")
+            self._batch_summary.update(
+                added=len(self.shapes) - accepted_at_start,
+                attempts=self.attempts - attempts_at_start,
+                score=self.score,
+                revision=self.revision,
+                state="paused" if self.stop_reason == "paused" else (
+                    "error" if self.stop_reason == "error" else "complete"
+                ),
+                reason=self.stop_reason,
+            )
 
     def result(self) -> RunResult:
         with self._run_lock:
@@ -189,6 +304,19 @@ class ImageSession:
 
 def native_available() -> bool:
     return bool(_native and _native.is_available())
+
+
+def diagnostics() -> dict[str, Any]:
+    """Return concise native import details for the CLI doctor command."""
+    return {
+        "available": native_available(),
+        "module": "geometrize_py._native",
+        "module_path": str(getattr(_native, "__file__", "")) if _native else None,
+        "import_error_type": type(_IMPORT_ERROR).__name__ if _IMPORT_ERROR else None,
+        "import_error": str(_IMPORT_ERROR) if _IMPORT_ERROR else None,
+        "python": sys.version.split()[0],
+        "platform": platform.platform(),
+    }
 
 
 def require_native() -> Any:
@@ -221,6 +349,9 @@ def iter_image(image: Image.Image, options: RunOptions | None = None) -> Iterato
         "shape_count": 0,
         "batch": 1,
         "batch_goal": options.steps,
+        "score": session.score,
+        "initial_score": session.initial_score,
+        "revision": session.revision,
     }
 
     yield from session.run_batch(options)
@@ -233,6 +364,11 @@ def iter_image(image: Image.Image, options: RunOptions | None = None) -> Iterato
         "attempts": result.attempts,
         "shape_count": len(result.shapes),
         "batch": session.batch_count,
+        "score": session.score,
+        "initial_score": session.initial_score,
+        "revision": session.revision,
+        "stop_reason": session.stop_reason,
+        "batch_summary": session.batch_summary,
     }
 
 
@@ -255,6 +391,15 @@ def normalize_shape_types(values: Iterable[str]) -> tuple[str, ...]:
 def _clamp_int(value: Any, lower: int, upper: int) -> int:
     number = int(value)
     return max(lower, min(upper, number))
+
+
+def _clamp_option(name: str, value: Any) -> int:
+    return _clamp_int(value, *OPTION_LIMITS[name])
+
+
+def effective_max_threads(requested: int) -> int:
+    """Bound the automatic CLI setting before it reaches upstream C++."""
+    return requested or min(MAX_AUTO_THREADS, max(1, os.cpu_count() or 1))
 
 
 def _validate_int_option(name: str, value: Any, lower: int, upper: int) -> None:
