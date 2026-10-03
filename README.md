@@ -17,6 +17,9 @@ distinct from the historical upstream `v1.*` releases.
 
 ## Quick Start
 
+Requires Python 3.10+ and a C++17 compiler for the native extension. Run these
+commands from the repository root:
+
 ```powershell
 git submodule update --init --recursive
 py -3 -m venv .venv
@@ -49,10 +52,10 @@ Continuing after reopening a project starts a new native fit.
 ## Command Line
 
 ```powershell
-.\.venv\Scripts\python.exe -m geometrize_py run C:\LocalRepos\geometrize\screenshots\logo.png `
-  --output C:\LocalRepos\geometrize\build\logo.png `
-  --svg C:\LocalRepos\geometrize\build\logo.svg `
-  --json C:\LocalRepos\geometrize\build\logo.json `
+.\.venv\Scripts\python.exe -m geometrize_py run screenshots\logo.png `
+  --output build\logo.png `
+  --svg build\logo.svg `
+  --json build\logo.json `
   --steps 128 --shape-types ellipse,rotated_rectangle,triangle `
   --max-size 1024 --export-size 2048
 ```
@@ -80,7 +83,7 @@ is a conservative admission estimate, not an operating-system memory limit.
 
 ## Development
 
-Run the tests with:
+Run the Python tests with:
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest
@@ -92,17 +95,15 @@ Run the linter after installing the development extras:
 .\.venv\Scripts\python.exe -m ruff check .
 ```
 
-Run the real browser smoke test separately:
+Run the browser tests separately:
 
 ```powershell
-.\.venv\Scripts\python.exe -m pip install -e ".[browser]"
+.\.venv\Scripts\python.exe -m pip install -e ".[dev,browser]"
 .\.venv\Scripts\python.exe -m playwright install chromium
 .\.venv\Scripts\python.exe -m pytest tests\browser
 ```
 
-The extension is built by scikit-build-core and CMake when installing the
-package. A working C++17 compiler is required for a fresh native build, but no
-desktop UI toolchain is needed.
+Installing the package builds the extension with scikit-build-core and CMake.
 
 For a quick packaging smoke test:
 

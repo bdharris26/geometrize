@@ -30,13 +30,17 @@ current so the next agent can find the important edges quickly.
 
 ## Build And Verification
 
+- `README.md` is the entrypoint for setup and usage; keep package notes linked
+  to it instead of duplicating commands.
 - Expected setup: Python 3.10+, Pillow, pytest for development, initialized
   submodules, and a C++17 compiler for fresh native extension builds.
 - Bootstrap submodules with `git submodule update --init --recursive`.
 - Install locally with `.\.venv\Scripts\python.exe -m pip install -e ".[dev]"`.
 - Start the UI with
   `.\.venv\Scripts\python.exe -m geometrize_py serve --host 127.0.0.1 --port 7860`.
-- Run tests with `.\.venv\Scripts\python.exe -m pytest`.
+- Run Python tests with `.\.venv\Scripts\python.exe -m pytest`; browser tests
+  are separate: `.\.venv\Scripts\python.exe -m pytest tests\browser` (see README
+  for Playwright setup).
 - Use `.\.venv\Scripts\python.exe -m geometrize_py doctor` when native import
   behavior is in question.
 
