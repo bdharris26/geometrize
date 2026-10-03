@@ -6,7 +6,9 @@ import json
 import socket
 import threading
 import urllib.request
+import uuid
 from collections.abc import Iterator
+from contextlib import contextmanager
 from http import HTTPStatus
 from types import SimpleNamespace
 from typing import cast
@@ -20,9 +22,26 @@ from geometrize_py.native import ImageSession, native_available
 from geometrize_py.web import GeometrizeRequestHandler, GeometrizeServer, _estimate_session_bytes
 
 
+class _ObservedServer(GeometrizeServer):
+    post_completions: dict[str, threading.Event]
+
+
+class _ObservedHandler(GeometrizeRequestHandler):
+    def do_POST(self) -> None:
+        try:
+            super().do_POST()
+        finally:
+            request_id = self.headers.get("X-Test-Request-ID")
+            if request_id:
+                completion = cast(_ObservedServer, self.server).post_completions.get(request_id)
+                if completion is not None:
+                    completion.set()
+
+
 @pytest.fixture
 def server() -> Iterator[GeometrizeServer]:
-    server = GeometrizeServer(("127.0.0.1", 0), GeometrizeRequestHandler)
+    server = _ObservedServer(("127.0.0.1", 0), _ObservedHandler)
+    server.post_completions = {}
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -73,14 +92,8 @@ def test_static_route_rejects_path_traversal(server: GeometrizeServer) -> None:
 
 
 def test_run_endpoint_rejects_non_object_json(server: GeometrizeServer) -> None:
-    request = urllib.request.Request(
-        f"http://127.0.0.1:{server.server_port}/api/run",
-        data=b"[]",
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
     with pytest.raises(HTTPError) as error:
-        urllib.request.urlopen(request, timeout=5)
+        _post(server, "/api/run", body=b"[]")
     assert error.value.code == 400
     payload = json.loads(error.value.read().decode("utf-8"))
     assert payload == {"error": "Expected a JSON object", "code": "invalid_request"}
@@ -344,14 +357,15 @@ def test_stream_endpoint_can_continue_session_with_new_shape_options(server: Geo
 
 def _post_stream(server: GeometrizeServer, payload: dict) -> list[dict]:
     body = json.dumps(payload).encode("utf-8")
-    request = urllib.request.Request(
-        f"http://127.0.0.1:{server.server_port}/api/run/stream",
-        data=body,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    with urllib.request.urlopen(request, timeout=10) as response:
-        return [json.loads(line) for line in response.read().decode("utf-8").splitlines()]
+    with _tracked_post(server) as request_id:
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{server.server_port}/api/run/stream",
+            data=body,
+            headers={"Content-Type": "application/json", "X-Test-Request-ID": request_id},
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=10) as response:
+            return [json.loads(line) for line in response.read().decode("utf-8").splitlines()]
 
 
 def _read_socket_response(client: socket.socket) -> bytes:
@@ -646,14 +660,30 @@ def test_pause_waits_for_current_shape_and_reconciles_terminal_snapshot(server: 
 
 
 def _post(server: GeometrizeServer, path: str, payload: dict | None = None, *, body: bytes | None = None) -> dict:
-    request = urllib.request.Request(
-        f"http://127.0.0.1:{server.server_port}{path}",
-        data=body if body is not None else json.dumps(payload or {}).encode(),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    with urllib.request.urlopen(request, timeout=5) as response:
-        return json.load(response)
+    with _tracked_post(server) as request_id:
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{server.server_port}{path}",
+            data=body if body is not None else json.dumps(payload or {}).encode(),
+            headers={"Content-Type": "application/json", "X-Test-Request-ID": request_id},
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=5) as response:
+            return json.load(response)
+
+
+@contextmanager
+def _tracked_post(server: GeometrizeServer) -> Iterator[str]:
+    observed = cast(_ObservedServer, server)
+    request_id = uuid.uuid4().hex
+    completion = threading.Event()
+    observed.post_completions[request_id] = completion
+    try:
+        yield request_id
+    finally:
+        try:
+            assert completion.wait(timeout=5), "POST handler did not finish"
+        finally:
+            del observed.post_completions[request_id]
 
 
 def _png_size(data_url: str) -> tuple[int, int]:
