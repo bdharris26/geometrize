@@ -1,3 +1,20 @@
+"""Pillow PNG renderer for the fitted source-coordinate geometry.
+
+Each shape is rasterized at export resolution on its own transparent layer and
+alpha-composited in sequence. Strokes are at least one output pixel wide;
+circles use the smaller axis scale to stay circular. Rotated ellipses and
+quadratic curves are sampled as 48-sided polygons and 32 line segments. SVG
+and browser Canvas use continuous paths, so both antialiased edge coverage and
+curve sampling can differ. Sampling error grows with export scale; it is not
+limited to a fixed antialiasing band. Degenerate shapes can also cover a Pillow
+pixel even when their continuous zero-area path is invisible.
+The native scorer truncates coordinates to integer scanlines, uses 20 vertices
+for rotated ellipses and 20 segments for quadratic curves, and blends with
+integer arithmetic. Its fitting bitmap can therefore differ in actual shape
+coverage and color from this PNG, even at source size. Byte identity here means
+identity with the previous Pillow exporter, not the native fitting bitmap.
+"""
+
 from __future__ import annotations
 
 import math
@@ -30,11 +47,20 @@ def render_shapes_to_image(
     scale_x = output_width / width
     scale_y = output_height / height
     image = Image.new("RGBA", (output_width, output_height), _scaled_color(background))
+    if not shapes:
+        return image
+    # Pillow's rasterization depends on drawing into the output-sized image.
+    # Keep that canvas and its coordinates, but composite only pixels that the
+    # current shape touched. Reusing it also avoids one large allocation per
+    # shape at high export resolutions.
+    overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay, "RGBA")
     for shape in shapes:
-        overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
-        draw = ImageDraw.Draw(overlay, "RGBA")
         _draw_shape(draw, shape, scale_x, scale_y)
-        image.alpha_composite(overlay)
+        bounds = overlay.getbbox()
+        if bounds is not None:
+            image.alpha_composite(overlay.crop(bounds), dest=bounds[:2])
+            overlay.paste((0, 0, 0, 0), bounds)
     return image
 
 

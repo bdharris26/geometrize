@@ -10,6 +10,7 @@
 #include <pybind11/stl.h>
 
 #include "geometrize/bitmap/bitmap.h"
+#include "geometrize/core.h"
 #include "geometrize/exporter/bitmapdataexporter.h"
 #include "geometrize/exporter/shapeserializer.h"
 #include "geometrize/runner/imagerunner.h"
@@ -187,6 +188,8 @@ public:
         m_target{static_cast<std::uint32_t>(width), static_cast<std::uint32_t>(height), m_pixels},
         m_runner{m_target},
         m_options{runnerOptionsFromDict(options)},
+        m_initialScore{geometrize::core::differenceFull(m_target, m_runner.getCurrent())},
+        m_score{m_initialScore},
         m_attempts{0}
     {}
 
@@ -203,6 +206,10 @@ public:
         }
 
         m_attempts++;
+
+        if(!stepShapes.empty()) {
+            m_score = stepShapes.back().score;
+        }
 
         py::list shapes;
         for(const geometrize::ShapeResult& shape : stepShapes) {
@@ -235,6 +242,16 @@ public:
         return m_attempts;
     }
 
+    double initialScore() const
+    {
+        return m_initialScore;
+    }
+
+    double score() const
+    {
+        return m_score;
+    }
+
 private:
     static std::vector<std::uint8_t> bytesToPixels(const int width, const int height, const py::bytes& rgba)
     {
@@ -257,6 +274,8 @@ private:
     geometrize::Bitmap m_target;
     geometrize::ImageRunner m_runner;
     geometrize::ImageRunnerOptions m_options;
+    double m_initialScore;
+    double m_score;
     int m_attempts;
 };
 
@@ -295,5 +314,7 @@ PYBIND11_MODULE(_native, module)
         .def("current_rgba", &RunnerSession::currentRgba)
         .def_property_readonly("width", &RunnerSession::width)
         .def_property_readonly("height", &RunnerSession::height)
-        .def_property_readonly("attempts", &RunnerSession::attempts);
+        .def_property_readonly("attempts", &RunnerSession::attempts)
+        .def_property_readonly("initial_score", &RunnerSession::initialScore)
+        .def_property_readonly("score", &RunnerSession::score);
 }

@@ -29,6 +29,19 @@ def test_serve_args_are_parsed() -> None:
     assert args.open is True
 
 
+def test_serve_resource_budgets_are_forwarded(monkeypatch) -> None:
+    calls = []
+    monkeypatch.setattr(cli, "run_server", lambda *args, **kwargs: calls.append((args, kwargs)))
+    assert cli.main(["serve", "--workers", "3", "--active-memory-mb", "256"]) == 0
+    assert calls[0][1] == {"worker_budget": 3, "active_memory_bytes": 256 * 1024 * 1024}
+
+
+def test_doctor_json_explains_native_import_failure(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(cli, "diagnostics", lambda: {"available": False, "import_error": "missing runtime"})
+    assert cli.main(["doctor", "--json"]) == 1
+    assert json.loads(capsys.readouterr().out)["import_error"] == "missing runtime"
+
+
 def test_run_command_writes_all_output_formats(tmp_path, capsys) -> None:
     source_path = tmp_path / "source.png"
     png_path = tmp_path / "result.png"

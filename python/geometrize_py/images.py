@@ -6,8 +6,7 @@ import io
 
 from PIL import Image, ImageOps, ImageStat
 
-MAX_SOURCE_DIMENSION = 16384
-MAX_SOURCE_PIXELS = 8192 * 8192
+from .contracts import MAX_SOURCE_DIMENSION, MAX_SOURCE_PIXELS
 
 
 def open_image_bytes(data: bytes) -> Image.Image:
@@ -36,6 +35,10 @@ def image_to_data_url(image: Image.Image) -> str:
 
 
 def image_from_data_url(data_url: str) -> Image.Image:
+    return open_image_bytes(image_data_url_bytes(data_url))
+
+
+def image_data_url_bytes(data_url: str) -> bytes:
     header, separator, payload = data_url.partition(",")
     if not separator or not header.lower().startswith("data:image/") or ";base64" not in header.lower():
         raise ValueError("Expected a base64 image data URL")
@@ -43,7 +46,14 @@ def image_from_data_url(data_url: str) -> Image.Image:
         image_bytes = base64.b64decode(payload, validate=True)
     except binascii.Error as exc:
         raise ValueError("Expected a valid base64 image data URL") from exc
-    return open_image_bytes(image_bytes)
+    return image_bytes
+
+
+def image_bytes_size(data: bytes) -> tuple[int, int]:
+    """Inspect dimensions before reserving memory for a full image decode."""
+    with Image.open(io.BytesIO(data)) as image:
+        _validate_source_size(image.width, image.height)
+        return image.size
 
 
 def average_color(image: Image.Image) -> tuple[int, int, int, int]:
