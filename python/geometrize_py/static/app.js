@@ -182,6 +182,7 @@ function clearResult() {
   activeRunId = "";
   stableResult = null;
   workingResult = null;
+  lastDurationMs = 0;
   exportCache.clear();
   pendingExports.clear();
   lastArtifact = null;
@@ -334,6 +335,41 @@ function acceptSnapshot(event, eventName) {
   setControls();
 }
 
+function captureConfirmedView() {
+  return {
+    sceneVersion,
+    previewImage: stableResult ? "" : preview.currentPreview(),
+    previewSize: stableResult ? null : preview.resultSize && { ...preview.resultSize },
+    shapes: [...telemetry.shapes],
+    attempts: telemetry.attempts,
+    initialScore: telemetry.initialScore,
+    batches: [...telemetry.batches],
+    elapsed: telemetry.elapsed,
+    resultMeta: ui.resultMeta.textContent,
+    metrics: ui.metrics.textContent,
+    pipeline: ui.pipeline.textContent
+  };
+}
+
+function restoreConfirmedView(confirmed) {
+  if (sceneVersion !== confirmed.sceneVersion) return;
+  workingResult = null;
+  activeRunId = "";
+  if (stableResult) {
+    preview.rebuild(stableResult.width, stableResult.height, stableResult.background, stableResult.shapes);
+  } else if (confirmed.previewImage && confirmed.previewSize) {
+    preview.showImage(confirmed.previewImage, confirmed.previewSize.width, confirmed.previewSize.height);
+  } else {
+    preview.clearResult();
+  }
+  telemetry.replace(confirmed.shapes, confirmed.attempts, confirmed.initialScore);
+  telemetry.batches = confirmed.batches;
+  telemetry.setState("Error", confirmed.elapsed);
+  ui.resultMeta.textContent = confirmed.resultMeta;
+  ui.metrics.textContent = confirmed.metrics;
+  ui.pipeline.textContent = confirmed.pipeline;
+}
+
 async function recoverSnapshot(version) {
   if (!sessionId) return false;
   ui.status.textContent = "Recovering final result";
@@ -381,6 +417,7 @@ async function startRun() {
   const payload = continuing
     ? { session_id: sessionId, options }
     : { image: sourceDataUrl, options };
+  const confirmedView = captureConfirmedView();
   const version = ++runVersion;
   contentVersion += 1;
   phase = "running";
@@ -409,6 +446,7 @@ async function startRun() {
   } catch (error) {
     if (version !== runVersion) return;
     if (sessionId && sawStart && await recoverSnapshot(version)) return;
+    restoreConfirmedView(confirmedView);
     const code = error.code || "request_failed";
     if (code === "unknown_session") sessionId = "";
     if (sessionId && sawStart) {
@@ -418,7 +456,7 @@ async function startRun() {
       phase = stableResult ? "ready" : "error";
       ui.status.textContent = error.message || "Render failed";
     }
-    telemetry.setState("Error", performance.now() - runStartedAt);
+    telemetry.setState("Error", lastDurationMs);
   } finally {
     if (version === runVersion) setControls();
   }

@@ -368,6 +368,69 @@ def test_incomplete_stream_reconciles_from_idle_snapshot(
         browser.close()
 
 
+def test_failed_recovery_saves_only_the_last_confirmed_scene(server_url: str, tmp_path: Path) -> None:
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = browser.new_page()
+        page.goto(server_url, wait_until="networkidle")
+        _run_sample(page, shapes=3)
+        original_path = tmp_path / "confirmed.geometrize-project.json"
+        with page.expect_download() as download_info:
+            page.get_by_role("button", name="Save project", exact=True).click()
+        download_info.value.save_as(original_path)
+        original = json.loads(original_path.read_text(encoding="utf-8"))
+
+        page.reload(wait_until="networkidle")
+        page.locator("#project-input").set_input_files(original_path)
+        expect(page.locator("#status")).to_have_text("Project loaded — Run starts a new render")
+        confirmed_preview = page.locator("#result-canvas").evaluate("canvas => canvas.toDataURL()")
+        confirmed_acceptance = page.locator("#telemetry-acceptance").inner_text()
+        confirmed_history = page.locator("#batch-history").inner_text()
+
+        width = original["result"]["render_width"]
+        height = original["result"]["render_height"]
+        start = {
+            "event": "start", "session_id": "unconfirmed", "run_id": "broken-run",
+            "continued": False, "width": width, "height": height,
+            "background": {"r": 255, "g": 255, "b": 255, "a": 255},
+            "shapes": [], "attempts": 0, "revision": 0, "initial_score": 0.9,
+        }
+        step = {
+            "event": "step", "shapes": [{
+                "type": "rectangle", "color": {"r": 0, "g": 0, "b": 0, "a": 255},
+                "data": {"x1": 0, "y1": 0, "x2": width, "y2": height}, "score": 0.5,
+            }],
+            "attempts": 1, "revision": 1, "batch_shape_count": 1, "batch_goal": 2,
+        }
+        page.route("**/api/run/stream", lambda route: route.fulfill(
+            status=200, content_type="application/x-ndjson",
+            body=f"{json.dumps(start)}\n{json.dumps(step)}\n",
+        ))
+        page.route("**/api/sessions/unconfirmed/snapshot", lambda route: route.fulfill(
+            status=503, content_type="application/json",
+            body=json.dumps({"code": "snapshot_unavailable", "error": "Snapshot unavailable"}),
+        ))
+        page.get_by_role("button", name="Run", exact=True).click()
+        expect(page.locator("#run-button")).to_have_text("Recover result")
+        expect(page.locator("#telemetry-state")).to_have_text("Error")
+        assert page.locator("#result-canvas").evaluate("canvas => canvas.toDataURL()") == confirmed_preview
+        assert page.locator("#telemetry-acceptance").inner_text() == confirmed_acceptance
+        assert page.locator("#batch-history").inner_text() == confirmed_history
+
+        saved_path = tmp_path / "after-failed-recovery.geometrize-project.json"
+        with page.expect_download() as download_info:
+            page.get_by_role("button", name="Save project", exact=True).click()
+        download_info.value.save_as(saved_path)
+        saved = json.loads(saved_path.read_text(encoding="utf-8"))
+        assert saved["result"]["shapes"] == original["result"]["shapes"]
+        assert saved["result"]["preview_data_url"] == original["result"]["preview_data_url"]
+        assert saved["result"]["render_width"] == original["result"]["render_width"]
+        assert saved["result"]["render_height"] == original["result"]["render_height"]
+        assert [saved["result"]["background"][key] for key in ("r", "g", "b", "a")] == original["result"]["background"]
+        assert saved["telemetry"] == original["telemetry"]
+        browser.close()
+
+
 def _run_sample(page: Page, shapes: int) -> None:
     expect(page.locator("#native-state")).to_have_text("Core ready")
     page.get_by_role("button", name="Sample", exact=True).click()
