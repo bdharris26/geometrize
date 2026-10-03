@@ -63,13 +63,21 @@ function drawShape(context, shape) {
 }
 
 export class Preview {
-  constructor({ sourceStage, resultStage, sourceImage, resultImage, resultCanvas, zoomOutput }) {
+  constructor({ sourceStage, resultStage, sourceImage, resultImage, resultCanvas, zoomOutput,
+    focusOverlay = null, onFocusMove = () => {}, onFocusDisable = () => {}, onPaint = () => {} }) {
     this.sourceStage = sourceStage;
     this.resultStage = resultStage;
     this.sourceImage = sourceImage;
     this.resultImage = resultImage;
     this.resultCanvas = resultCanvas;
     this.zoomOutput = zoomOutput;
+    this.focusOverlay = focusOverlay;
+    this.onFocusMove = onFocusMove;
+    this.onFocusDisable = onFocusDisable;
+    this.onPaint = onPaint;
+    this.focus = null;
+    this.focusMode = "pan";
+    this.blankResult = false;
     this.sourceSize = null;
     this.resultSize = null;
     this.canvasScale = 1;
@@ -77,6 +85,7 @@ export class Preview {
     this.pan = { x: 0, y: 0 };
     this.sourceImage.addEventListener("load", () => {
       this.sourceSize = { width: sourceImage.naturalWidth, height: sourceImage.naturalHeight };
+      this.ensurePaintTarget();
       this.layout();
     });
     new ResizeObserver(() => this.layout()).observe(sourceStage);
@@ -88,12 +97,32 @@ export class Preview {
       }, { passive: false });
       stage.addEventListener("pointerdown", (event) => {
         if (event.button !== 0) return;
+        if (stage === resultStage && this.focus && !event.shiftKey) {
+          const point = this.resultPoint(event.clientX, event.clientY);
+          if (!point) return;
+          event.preventDefault();
+          stage.focus({ preventScroll: true });
+          stage.setPointerCapture(event.pointerId);
+          stage.dataset.gesture = this.focusMode;
+          if (this.focusMode === "paint") this.onPaint(point);
+          else this.onFocusMove(point);
+          return;
+        }
+        event.preventDefault();
         stage.setPointerCapture(event.pointerId);
+        stage.dataset.gesture = "pan";
         stage.dataset.dragX = String(event.clientX);
         stage.dataset.dragY = String(event.clientY);
       });
       stage.addEventListener("pointermove", (event) => {
         if (!stage.hasPointerCapture(event.pointerId)) return;
+        if (stage.dataset.gesture !== "pan") {
+          if (stage.dataset.gesture === "focus" && this.focusMode === "focus") {
+            const point = this.resultPoint(event.clientX, event.clientY);
+            if (point) this.onFocusMove(point);
+          }
+          return;
+        }
         const dx = event.clientX - Number(stage.dataset.dragX);
         const dy = event.clientY - Number(stage.dataset.dragY);
         this.pan.x += dx / Math.max(1, stage.clientWidth);
@@ -102,8 +131,60 @@ export class Preview {
         stage.dataset.dragY = String(event.clientY);
         this.layout();
       });
+      const release = (event) => {
+        if (stage.hasPointerCapture(event.pointerId)) stage.releasePointerCapture(event.pointerId);
+        delete stage.dataset.gesture;
+      };
+      stage.addEventListener("pointerup", release);
+      stage.addEventListener("pointercancel", release);
+      stage.addEventListener("lostpointercapture", () => { delete stage.dataset.gesture; });
     }
+    resultStage.addEventListener("keydown", (event) => {
+      if (!this.focus || !this.resultSize) return;
+      if (event.key === "Escape") {
+        event.preventDefault();
+        this.onFocusDisable();
+        return;
+      }
+      if (this.focusMode !== "focus") return;
+      const direction = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] }[event.key];
+      if (!direction && event.key !== "Home") return;
+      event.preventDefault();
+      const step = event.shiftKey ? 0.05 : 0.01;
+      this.onFocusMove(event.key === "Home" ? { x: 0.5, y: 0.5 } : {
+        x: Math.max(0, Math.min(1, this.focus.x + direction[0] * step)),
+        y: Math.max(0, Math.min(1, this.focus.y + direction[1] * step))
+      });
+    });
     this.layout();
+  }
+
+  setFocus(value, mode = value ? "focus" : "pan") {
+    this.focus = value ? { ...value } : null;
+    this.focusMode = mode;
+    this.resultStage.dataset.focusMode = mode;
+    this.resultStage.setAttribute("aria-label", mode === "paint" ? "Live result. Click to add one shape; Shift drag to pan." :
+      mode === "focus" ? "Live result. Click or drag to move focus; arrow keys adjust it; Shift drag to pan." :
+        "Live result. Drag to pan.");
+    if (mode !== "paint" && this.blankResult) this.clearResult();
+    this.ensurePaintTarget();
+    this.layout();
+  }
+
+  ensurePaintTarget() {
+    if (this.focusMode !== "paint" || this.resultSize || !this.sourceSize) return;
+    this.beginResult(this.sourceSize.width, this.sourceSize.height, [18, 20, 22, 255]);
+    this.blankResult = true;
+  }
+
+  resultPoint(clientX, clientY) {
+    if (!this.resultSize) return null;
+    const media = this.resultCanvas.hidden ? this.resultImage : this.resultCanvas;
+    if (media.hidden) return null;
+    const box = media.getBoundingClientRect();
+    if (box.width <= 0 || box.height <= 0 || clientX < box.left || clientX > box.right ||
+        clientY < box.top || clientY > box.bottom) return null;
+    return { x: (clientX - box.left) / box.width, y: (clientY - box.top) / box.height };
   }
 
   setZoom(value) {
@@ -128,6 +209,30 @@ export class Preview {
     this.place(this.sourceStage, this.sourceImage, this.sourceSize);
     const visible = this.resultCanvas.hidden ? this.resultImage : this.resultCanvas;
     this.place(this.resultStage, visible, this.resultSize);
+    this.layoutFocus(visible);
+  }
+
+  layoutFocus(visible) {
+    if (!this.focusOverlay) return;
+    const shown = this.focus && this.resultSize && !visible.hidden;
+    this.focusOverlay.toggleAttribute("hidden", !shown);
+    if (!shown) return;
+    const { width, height } = this.resultSize;
+    this.focusOverlay.setAttribute("viewBox", `0 0 ${width} ${height}`);
+    this.place(this.resultStage, this.focusOverlay, this.resultSize);
+    const cx = this.focus.x * width;
+    const cy = this.focus.y * height;
+    const radius = this.focus.radius * Math.min(width, height);
+    for (const ring of this.focusOverlay.querySelectorAll(".focus-ring")) {
+      ring.setAttribute("cx", cx);
+      ring.setAttribute("cy", cy);
+      ring.setAttribute("r", radius);
+    }
+    const pixelScale = visible.getBoundingClientRect().width / width || 1;
+    const center = this.focusOverlay.querySelector(".focus-center");
+    center.setAttribute("cx", cx);
+    center.setAttribute("cy", cy);
+    center.setAttribute("r", 3 / pixelScale);
   }
 
   place(stage, media, size) {
@@ -139,16 +244,19 @@ export class Preview {
   }
 
   clearResult() {
+    this.blankResult = false;
     this.resultSize = null;
     this.resultImage.removeAttribute("src");
     this.resultImage.hidden = true;
     this.resultCanvas.hidden = true;
     this.resultCanvas.width = 1;
     this.resultCanvas.height = 1;
+    this.ensurePaintTarget();
     this.layout();
   }
 
   beginResult(width, height, background) {
+    this.blankResult = false;
     this.resultSize = { width, height };
     this.canvasScale = Math.min(1, LIVE_CANVAS_MAX / Math.max(width, height));
     this.resultCanvas.width = Math.max(1, Math.round(width * this.canvasScale));
@@ -171,6 +279,7 @@ export class Preview {
   }
 
   showImage(dataUrl, width, height) {
+    this.blankResult = false;
     this.resultSize = { width, height };
     this.resultImage.src = dataUrl;
     this.resultImage.hidden = false;
@@ -179,6 +288,7 @@ export class Preview {
   }
 
   currentPreview() {
+    if (this.blankResult) return "";
     if (!this.resultCanvas.hidden) return this.resultCanvas.toDataURL("image/png");
     const image = this.resultImage.getAttribute("src") || "";
     return image.startsWith("data:image/") ? image : "";

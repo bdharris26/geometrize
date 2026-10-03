@@ -120,6 +120,9 @@ export class Telemetry {
       state: summary.state ?? "Complete",
       reason: summary.reason ?? ""
     };
+    for (const key of ["focus", "initial_focus"]) {
+      if (key in summary) batch[key] = summary[key] ? { ...summary[key] } : null;
+    }
     const previous = this.batches.findIndex((item) => item.index === batch.index);
     if (previous >= 0) this.batches[previous] = batch;
     else this.batches.push(batch);
