@@ -1,8 +1,20 @@
+"""Continuous SVG geometry in source coordinates with exact output scaling.
+
+The viewBox stretches positions along each output axis. On nonuniform exports,
+circles counter that stretch to keep Pillow's circular radius convention;
+strokes retain Pillow's rounded output-pixel width. Browser SVG rasterization
+still differs from Pillow at antialiased edges and from the native scorer's
+pixel grid.
+"""
+
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping, Sequence
 from html import escape
 from typing import Any
+
+from .contracts import STROKE_SHAPES
 
 Shape = Mapping[str, Any]
 
@@ -17,11 +29,17 @@ def shapes_to_svg(
 ) -> str:
     output_width = width if output_width is None else output_width
     output_height = height if output_height is None else output_height
+    if min(width, height, output_width, output_height) <= 0:
+        raise ValueError("Image dimensions must be positive")
+    scale_x = output_width / width
+    scale_y = output_height / height
+    stroke_width = max(1, round(min(scale_x, scale_y)))
     parts = [
         '<?xml version="1.0" standalone="no"?>',
         (
             '<svg xmlns="http://www.w3.org/2000/svg" version="1.2" '
-            f'baseProfile="tiny" width="{output_width}" height="{output_height}" viewBox="0 0 {width} {height}">'
+            f'baseProfile="tiny" width="{output_width}" height="{output_height}" '
+            f'viewBox="0 0 {width} {height}" preserveAspectRatio="none">'
         ),
     ]
     if background is not None:
@@ -30,18 +48,26 @@ def shapes_to_svg(
             f'fill="{_rgb(background)}" fill-opacity="{_alpha(background)}" />'
         )
     for index, shape in enumerate(shapes):
-        parts.append(_shape_to_svg(shape, index))
+        parts.append(_shape_to_svg(shape, index, scale_x, scale_y, stroke_width))
     parts.append("</svg>")
     return "\n".join(parts)
 
 
-def _shape_to_svg(shape: Shape, index: int) -> str:
+def _shape_to_svg(shape: Shape, index: int, scale_x: float, scale_y: float, stroke_width: int) -> str:
     shape_type = str(shape.get("type", ""))
     color = _shape_color(shape)
-    style = _style(shape_type, color, index)
+    style = _style(shape_type, color, index, stroke_width)
     data = shape.get("data", {})
 
     if shape_type == "circle":
+        if scale_x != scale_y:
+            # Pillow keeps the radius circular at the smaller output scale.
+            # Counter the anisotropic viewBox transform to keep that geometry.
+            radius = float(data["r"]) * min(scale_x, scale_y)
+            return (
+                f'<ellipse cx="{_num(data["x"])}" cy="{_num(data["y"])}" '
+                f'rx="{_num(radius / scale_x)}" ry="{_num(radius / scale_y)}" {style} />'
+            )
         return f'<circle cx="{_num(data["x"])}" cy="{_num(data["y"])}" r="{_num(data["r"])}" {style} />'
     if shape_type == "ellipse":
         return (
@@ -57,10 +83,7 @@ def _shape_to_svg(shape: Shape, index: int) -> str:
     if shape_type == "rectangle":
         x1, y1, x2, y2 = data["x1"], data["y1"], data["x2"], data["y2"]
         x, y, rect_width, rect_height = _rect_bounds(x1, y1, x2, y2)
-        return (
-            f'<rect x="{_num(x)}" y="{_num(y)}" width="{_num(rect_width)}" '
-            f'height="{_num(rect_height)}" {style} />'
-        )
+        return f'<rect x="{_num(x)}" y="{_num(y)}" width="{_num(rect_width)}" height="{_num(rect_height)}" {style} />'
     if shape_type == "rotated_rectangle":
         x1, y1, x2, y2 = data["x1"], data["y1"], data["x2"], data["y2"]
         cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
@@ -71,9 +94,9 @@ def _shape_to_svg(shape: Shape, index: int) -> str:
         )
     if shape_type == "triangle":
         points = (
-            f'{_num(data["x1"])},{_num(data["y1"])} '
-            f'{_num(data["x2"])},{_num(data["y2"])} '
-            f'{_num(data["x3"])},{_num(data["y3"])}'
+            f"{_num(data['x1'])},{_num(data['y1'])} "
+            f"{_num(data['x2'])},{_num(data['y2'])} "
+            f"{_num(data['x3'])},{_num(data['y3'])}"
         )
         return f'<polygon points="{points}" {style} />'
     if shape_type == "line":
@@ -83,12 +106,12 @@ def _shape_to_svg(shape: Shape, index: int) -> str:
         )
     if shape_type == "quadratic_bezier":
         path = (
-            f'M{_num(data["x1"])} {_num(data["y1"])} '
-            f'Q {_num(data["cx"])} {_num(data["cy"])} {_num(data["x2"])} {_num(data["y2"])}'
+            f"M{_num(data['x1'])} {_num(data['y1'])} "
+            f"Q {_num(data['cx'])} {_num(data['cy'])} {_num(data['x2'])} {_num(data['y2'])}"
         )
         return f'<path d="{path}" {style} />'
     if shape_type == "polyline":
-        points = " ".join(f'{_num(x)},{_num(y)}' for x, y in data.get("points", []))
+        points = " ".join(f"{_num(x)},{_num(y)}" for x, y in data.get("points", []))
         return f'<polyline points="{escape(points)}" {style} />'
     raise ValueError(f"Cannot export unknown shape type '{shape_type}'")
 
@@ -98,10 +121,11 @@ def _shape_color(shape: Shape) -> tuple[int, int, int, int]:
     return (_channel(color["r"]), _channel(color["g"]), _channel(color["b"]), _channel(color["a"]))
 
 
-def _style(shape_type: str, color: tuple[int, int, int, int], index: int) -> str:
-    if shape_type in {"line", "polyline", "quadratic_bezier"}:
+def _style(shape_type: str, color: tuple[int, int, int, int], index: int, stroke_width: int) -> str:
+    if shape_type in STROKE_SHAPES:
         return (
-            f'id="shape-{index}" stroke="{_rgb(color)}" stroke-width="1" '
+            f'id="shape-{index}" stroke="{_rgb(color)}" stroke-width="{stroke_width}" '
+            'vector-effect="non-scaling-stroke" '
             f'stroke-opacity="{_alpha(color)}" fill="none"'
         )
     return f'id="shape-{index}" fill="{_rgb(color)}" fill-opacity="{_alpha(color)}"'
@@ -112,11 +136,16 @@ def _rgb(color: tuple[int, int, int, int]) -> str:
 
 
 def _alpha(color: tuple[int, int, int, int]) -> str:
-    return f"{color[3] / 255:.4g}"
+    return _num(color[3] / 255)
 
 
 def _num(value: float) -> str:
-    return f"{float(value):.4g}"
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError("Shape coordinates must be finite")
+    # Python's float repr is the shortest decimal that round-trips exactly.
+    encoded = repr(number)
+    return encoded[:-2] if encoded.endswith(".0") else encoded
 
 
 def _rect_bounds(x1: float, y1: float, x2: float, y2: float) -> tuple[float, float, float, float]:
