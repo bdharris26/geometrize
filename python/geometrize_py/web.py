@@ -22,7 +22,7 @@ from urllib.parse import unquote, urlsplit
 
 from .contracts import MAX_REQUEST_BYTES, OPTION_LIMITS, app_contract
 from .errors import APIError
-from .exporting import ExportArtifact, ExportCache, RenderScene, build_export, validate_scene
+from .exporting import ExportArtifact, ExportCache, RenderScene, build_export, inspect_scene, validate_scene
 from .images import image_bytes_size, image_data_url_bytes, image_to_data_url, open_image_bytes
 from .native import ImageSession, NativeBackendUnavailable, RunOptions, native_available
 from .render import export_dimensions
@@ -33,6 +33,7 @@ from .resources import (
     WorkBudget,
     export_memory_bytes,
     fitting_memory_bytes,
+    scene_memory_bytes,
 )
 
 DEFAULT_MAX_SESSIONS = 8
@@ -40,11 +41,16 @@ DEFAULT_MAX_ACTIVE_RENDERS = 2
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 30.0
 DEFAULT_SESSION_IDLE_SECONDS = 30 * 60
 DEFAULT_SESSION_MEMORY_BYTES = 512 * 1024 * 1024
+MAX_SESSION_ACTION_BYTES = 16 * 1024
+MAX_PAUSE_BODY_BYTES = 4 * 1024
+REQUEST_MEMORY_FLOOR = 64 * 1024
+JSON_EXPANSION_FACTOR = 32
 ESTIMATED_BYTES_PER_PIXEL = 16
 ESTIMATED_BYTES_PER_SHAPE = 512
 ESTIMATED_SESSION_OVERHEAD_BYTES = 64 * 1024
 LOGGER = logging.getLogger(__name__)
 SESSION_ACTION = re.compile(r"^/api/sessions/([a-zA-Z0-9_-]+)/(pause|snapshot)$")
+IMAGE_LITERAL = re.compile(rb'"image"\s*:\s*"(data:image/[^"\\]{0,128};base64,[A-Za-z0-9+/=]*)"')
 
 
 @dataclass
@@ -218,19 +224,39 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
         if path not in {"/api/run", "/api/run/stream", "/api/export"} and action is None:
             self.send_error(HTTPStatus.NOT_FOUND)
             return
-        try:
-            payload = self._read_json()
-        except TimeoutError:
-            self.close_connection = True
-            self._send_error(APIError("request_timeout", "Request body timed out", HTTPStatus.REQUEST_TIMEOUT))
-            return
-        except (APIError, ValueError) as exc:
-            self._send_error(exc if isinstance(exc, APIError) else APIError("invalid_request", str(exc)))
-            return
-        except ConnectionError:
-            return
+        self._request_lease: ResourceLease | None = None
+        self._request_image_bytes = 0
+        self._request_body_memory = 0
         has_slot = False
         try:
+            try:
+                length = self._content_length()
+                if action is not None and length > MAX_SESSION_ACTION_BYTES:
+                    raise APIError(
+                        "request_too_large", "Session request body is too large", HTTPStatus.REQUEST_ENTITY_TOO_LARGE
+                    )
+                # A pause is a tiny control message that must remain available
+                # even when fitting has consumed the full CPU and memory budget.
+                if action is not None and action.group(2) == "pause":
+                    if length > MAX_PAUSE_BODY_BYTES:
+                        raise APIError(
+                            "request_too_large", "Pause request body is too large", HTTPStatus.REQUEST_ENTITY_TOO_LARGE
+                        )
+                else:
+                    self._request_lease = self._reserve_work(0, _request_memory(path, length, 0, parsed=False))
+                payload = self._read_json()
+                if self._request_lease is not None:
+                    self._request_body_memory = _request_memory(path, length, self._request_image_bytes, parsed=True)
+                    self._resize_request_memory(self._request_body_memory)
+            except TimeoutError:
+                self.close_connection = True
+                self._send_error(APIError("request_timeout", "Request body timed out", HTTPStatus.REQUEST_TIMEOUT))
+                return
+            except (APIError, ValueError) as exc:
+                self._send_error(exc if isinstance(exc, APIError) else APIError("invalid_request", str(exc)))
+                return
+            except ConnectionError:
+                return
             if action is not None:
                 self._session_action(action.group(1), action.group(2), payload)
                 return
@@ -261,6 +287,9 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
         finally:
             if has_slot:
                 self.geometrize_server.release_render_slot()
+            if self._request_lease is not None:
+                self.geometrize_server.work_budget.release(self._request_lease)
+                self._request_lease = None
 
     def _run_once(self, payload: dict[str, Any]) -> None:
         options = _options(payload)
@@ -268,6 +297,7 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
         try:
             for _event in session.run_batch(options):
                 pass
+            self._charge_request_scene({"shapes": session.shapes})
             snapshot = self._snapshot_payload(session, include_preview=False)
             del session
         finally:
@@ -301,6 +331,7 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
             if lease is None:
                 options, lease = self._reserve_fit(options, session.width, session.height)
             session.prepare_run()
+            self._charge_request_scene({"shapes": session.shapes})
             self.geometrize_server.activate_session(session_id, session, run_id)
             activated = True
             self.send_response(HTTPStatus.OK)
@@ -332,6 +363,7 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
                 with closing(session.run_reserved_batch(options)) as events:
                     for event in events:
                         self._write_stream_event(event)
+                self._charge_request_scene({"shapes": session.shapes})
                 terminal = self._snapshot_payload(session, session_id)
                 terminal["event"] = "paused" if session.stop_reason == "paused" else "complete"
                 terminal["run_id"] = run_id
@@ -380,7 +412,7 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
             raise _session_busy_error()
         lease: ResourceLease | None = None
         try:
-            lease = self._reserve_work(1, _scene_memory_bytes(len(session.shapes)))
+            lease = self._reserve_work(1, scene_memory_bytes(*inspect_scene({"shapes": session.shapes})))
             snapshot = self._snapshot_payload(session, session_id, include_preview=False)
             snapshot["event"] = "snapshot"
             self._send_json(snapshot)
@@ -472,12 +504,14 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
         if payload.get("result") is not None:
             if payload.get("session_id"):
                 raise APIError("invalid_result", "Choose either a frozen result or a session to export")
+            self._charge_request_scene(payload["result"])
             scene = validate_scene(payload["result"])
         else:
             session = self._session_by_id(_required_text(payload, "session_id"))
             if not session.try_acquire_run():
                 raise _session_busy_error()
             try:
+                self._charge_request_scene({"shapes": session.shapes})
                 scene = _scene_from_snapshot(self._snapshot_payload(session, include_preview=False))
             finally:
                 session.release_run()
@@ -487,7 +521,7 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
     @contextmanager
     def _artifact(self, scene: RenderScene, longest: int) -> Iterator[ExportArtifact]:
         server = self.geometrize_server
-        metadata_memory = _scene_memory_bytes(len(scene.shapes))
+        metadata_memory = scene_memory_bytes(*inspect_scene(scene))
         lease = self._reserve_work(1, metadata_memory)
         try:
             key = (scene.fingerprint(), longest)
@@ -537,6 +571,20 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
         return session
 
     def _read_json(self) -> dict[str, Any]:
+        length = self._content_length()
+        body = self.rfile.read(length)
+        if len(body) != length:
+            raise APIError("invalid_request", "Incomplete request body")
+        self._admit_json_body(body)
+        try:
+            payload = json.loads(body.decode("utf-8"), parse_constant=_reject_json_constant)
+        except (ValueError, UnicodeDecodeError, RecursionError) as exc:
+            raise APIError("invalid_request", "Invalid JSON request body") from exc
+        if not isinstance(payload, dict):
+            raise APIError("invalid_request", "Expected a JSON object")
+        return payload
+
+    def _content_length(self) -> int:
         try:
             length = int(self.headers.get("Content-Length", "0"))
         except ValueError as exc:
@@ -545,16 +593,32 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
             raise APIError("invalid_request", "Missing request body")
         if length > MAX_REQUEST_BYTES:
             raise APIError("request_too_large", "Request body is too large", HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
-        try:
-            body = self.rfile.read(length)
-            if len(body) != length:
-                raise APIError("invalid_request", "Incomplete request body")
-            payload = json.loads(body.decode("utf-8"), parse_constant=_reject_json_constant)
-        except (ValueError, UnicodeDecodeError, RecursionError) as exc:
-            raise APIError("invalid_request", "Invalid JSON request body") from exc
-        if not isinstance(payload, dict):
-            raise APIError("invalid_request", "Expected a JSON object")
-        return payload
+        return length
+
+    def _admit_json_body(self, body: bytes) -> None:
+        if self._request_lease is None:
+            return
+        image_span = IMAGE_LITERAL.search(body) if urlsplit(self.path).path in {"/api/run", "/api/run/stream"} else None
+        self._request_image_bytes = image_span.end(1) - image_span.start(1) if image_span is not None else 0
+        self._resize_request_memory(
+            _request_memory(urlsplit(self.path).path, len(body), self._request_image_bytes, parsed=False)
+        )
+
+    def _charge_request_scene(self, raw: RenderScene | dict[str, Any]) -> None:
+        if self._request_lease is not None:
+            self._resize_request_memory(self._request_body_memory + scene_memory_bytes(*inspect_scene(raw)))
+
+    def _resize_request_memory(self, memory: int) -> None:
+        lease = self._request_lease
+        if lease is None:
+            return
+        budget = self.geometrize_server.work_budget
+        if memory > budget.memory_bytes:
+            raise APIError("memory_limit", "This request exceeds the active memory budget; reduce its size")
+        updated = budget.try_resize(lease, memory)
+        if updated is None:
+            raise _busy_error()
+        self._request_lease = updated
 
     def _send_error(self, error: APIError) -> None:
         try:
@@ -625,8 +689,18 @@ def _scene_from_snapshot(snapshot: dict[str, Any]) -> RenderScene:
     )
 
 
-def _scene_memory_bytes(shape_count: int) -> int:
-    return 1024 * 1024 + shape_count * 3072
+def _request_memory(path: str, body_bytes: int, image_bytes: int, *, parsed: bool) -> int:
+    if path in {"/api/run", "/api/run/stream"}:
+        # Encoded image data is a large string with predictable expansion;
+        # other JSON can contain deeply nested Python containers and needs a
+        # higher allowance before json.loads constructs them.
+        if image_bytes:
+            return max(
+                REQUEST_MEMORY_FLOOR, 4 * image_bytes + JSON_EXPANSION_FACTOR * (body_bytes - image_bytes)
+            )
+        if not parsed:
+            return max(REQUEST_MEMORY_FLOOR, 4 * body_bytes)
+    return max(REQUEST_MEMORY_FLOOR, JSON_EXPANSION_FACTOR * body_bytes)
 
 
 def _reject_json_constant(value: str) -> None:

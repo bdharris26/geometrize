@@ -84,6 +84,7 @@ def test_run_endpoint_rejects_non_object_json(server: GeometrizeServer) -> None:
     assert error.value.code == 400
     payload = json.loads(error.value.read().decode("utf-8"))
     assert payload == {"error": "Expected a JSON object", "code": "invalid_request"}
+    assert server.work_budget.usage() == (0, 0)
 
 
 def test_session_cache_expires_only_after_idle_deadline(server: GeometrizeServer) -> None:
@@ -199,6 +200,7 @@ def test_partial_request_body_times_out_without_acquiring_render_slot() -> None:
         response = _read_socket_response(client)
         assert b"408 Request Timeout" in response
         assert b"Request body timed out" in response
+        assert server.work_budget.usage() == (0, 0)
     finally:
         if slot_acquired:
             server.release_render_slot()
@@ -394,6 +396,54 @@ def test_nonfinite_json_is_a_structured_client_error(server: GeometrizeServer, b
     assert server.work_budget.usage() == (0, 0)
 
 
+def test_request_admission_happens_before_body_read(server: GeometrizeServer, monkeypatch) -> None:
+    from geometrize_py.resources import WorkBudget
+
+    server.work_budget = WorkBudget(1, 32 * 1024)
+    read_started = threading.Event()
+    original = GeometrizeRequestHandler._read_json
+
+    def observed_read(self):
+        read_started.set()
+        return original(self)
+
+    monkeypatch.setattr(GeometrizeRequestHandler, "_read_json", observed_read)
+    with pytest.raises(HTTPError) as error:
+        _post(server, "/api/run", body=b"{}")
+    assert json.load(error.value)["code"] == "memory_limit"
+    assert not read_started.is_set()
+    assert server.work_budget.usage() == (0, 0)
+
+
+def test_json_expansion_is_admitted_before_decode(server: GeometrizeServer) -> None:
+    from geometrize_py.resources import WorkBudget
+
+    server.work_budget = WorkBudget(1, 1024 * 1024)
+    body = b'{"unused":"' + b"a" * 70_000 + b'"}'
+    with pytest.raises(HTTPError) as error:
+        _post(server, "/api/run", body=body)
+    assert json.load(error.value)["code"] == "memory_limit"
+    assert server.work_budget.usage() == (0, 0)
+
+
+def test_base64_image_uses_bounded_string_allowance(server: GeometrizeServer) -> None:
+    from geometrize_py.resources import WorkBudget
+
+    server.work_budget = WorkBudget(1, 1024 * 1024)
+    body = b'{"image":"data:image/png;base64,' + b"a" * 70_000 + b'","options":{}}'
+    with pytest.raises(HTTPError) as error:
+        _post(server, "/api/run", body=body)
+    assert json.load(error.value)["code"] == "invalid_image"
+    assert server.work_budget.usage() == (0, 0)
+
+
+def test_malformed_json_releases_request_memory(server: GeometrizeServer) -> None:
+    with pytest.raises(HTTPError) as error:
+        _post(server, "/api/export", body=b'{"result":[1,2,}')
+    assert json.load(error.value)["code"] == "invalid_request"
+    assert server.work_budget.usage() == (0, 0)
+
+
 def test_invalid_image_is_a_client_error_and_releases_resources(server: GeometrizeServer) -> None:
     with pytest.raises(HTTPError) as error:
         _post(server, "/api/run/stream", {"image": "data:image/png;base64,bm90IGFuIGltYWdl"})
@@ -440,7 +490,7 @@ def test_export_cache_avoids_repeated_rasterization(server: GeometrizeServer, mo
 def test_export_memory_budget_applies_and_recovers(server: GeometrizeServer) -> None:
     from geometrize_py.resources import WorkBudget
 
-    server.work_budget = WorkBudget(2, 3 * 1024 * 1024)
+    server.work_budget = WorkBudget(2, 5 * 1024 * 1024)
     payload = {"result": {"width": 4, "height": 4, "background": [20, 40, 60, 255], "shapes": []}, "export_size": 4096}
     with pytest.raises(HTTPError) as error:
         _post(server, "/api/export", payload)
@@ -448,6 +498,67 @@ def test_export_memory_budget_applies_and_recovers(server: GeometrizeServer) -> 
     assert server.work_budget.usage() == (0, 0)
     payload["export_size"] = 32
     assert _post(server, "/api/export", payload)["export_width"] == 32
+    assert server.work_budget.usage() == (0, 0)
+
+
+def test_frozen_scene_is_budgeted_before_normalization(server: GeometrizeServer, monkeypatch) -> None:
+    from geometrize_py import web
+    from geometrize_py.resources import WorkBudget
+
+    server.work_budget = WorkBudget(2, 1024 * 1024)
+
+    def unexpected_validation(_raw):
+        raise AssertionError("Scene normalization should not run before its memory is admitted")
+
+    monkeypatch.setattr(web, "validate_scene", unexpected_validation)
+    scene = {"width": 4, "height": 4, "background": [0, 0, 0, 255], "shapes": []}
+    with pytest.raises(HTTPError) as error:
+        _post(server, "/api/export", {"result": scene, "export_size": 32})
+    assert json.load(error.value)["code"] == "memory_limit"
+    assert server.work_budget.usage() == (0, 0)
+
+
+def test_total_polyline_point_cap_precedes_normalization(server: GeometrizeServer, monkeypatch) -> None:
+    from geometrize_py import exporting, web
+
+    monkeypatch.setattr(exporting, "PROJECT_MAX_TOTAL_POINTS", 3)
+
+    def unexpected_validation(_raw):
+        raise AssertionError("Point cap should be checked before normalization")
+
+    monkeypatch.setattr(web, "validate_scene", unexpected_validation)
+    scene = {
+        "width": 4,
+        "height": 4,
+        "background": [0, 0, 0, 255],
+        "shapes": [{"type": "polyline", "data": {"points": [[0, 0], [1, 1], [2, 2], [3, 3]]}}],
+    }
+    with pytest.raises(HTTPError) as error:
+        _post(server, "/api/export", {"result": scene, "export_size": 32})
+    assert json.load(error.value)["code"] == "invalid_result"
+    assert server.work_budget.usage() == (0, 0)
+
+
+def test_pause_can_cancel_when_workers_and_memory_are_exhausted(server: GeometrizeServer) -> None:
+    from geometrize_py.resources import WorkBudget
+
+    server.work_budget = WorkBudget(1, 1024 * 1024)
+    fitting_lease = server.work_budget.try_reserve(1, server.work_budget.memory_bytes)
+    assert fitting_lease is not None
+    session = ImageSession(1, 1, (0, 0, 0, 255), SimpleNamespace(attempts=0))
+    server.activate_session("controlled", session, "active-run")
+    try:
+        ack = _post(server, "/api/sessions/controlled/pause", {"run_id": "active-run"})
+        assert ack["event"] == "pause_requested"
+        assert session._cancel_requested.is_set()
+        assert server.work_budget.usage() == (1, 1024 * 1024)
+
+        with pytest.raises(HTTPError) as error:
+            _post(server, "/api/sessions/controlled/pause", {"padding": "x" * 4096})
+        assert error.value.code == HTTPStatus.REQUEST_ENTITY_TOO_LARGE
+    finally:
+        server.finish_session("controlled", session)
+        server.work_budget.release(fitting_lease)
     assert server.work_budget.usage() == (0, 0)
 
 
