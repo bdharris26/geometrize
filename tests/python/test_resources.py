@@ -2,7 +2,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from geometrize_py.resources import WorkBudget
+from geometrize_py.resources import WorkBudget, scene_memory_bytes
 
 
 def test_worker_and_memory_limits_are_independent_and_release_restores_capacity() -> None:
@@ -33,6 +33,39 @@ def test_resize_is_atomic_and_failed_resize_preserves_lease() -> None:
     with pytest.raises(ValueError):
         budget.release(lease)
     budget.release(updated)
+
+
+def test_memory_only_lease_is_available_when_workers_are_full() -> None:
+    budget = WorkBudget(1, 100)
+    fitting = budget.try_reserve(1, 60)
+    assert fitting is not None
+    request = budget.try_reserve(0, 20)
+    assert request is not None
+    assert budget.usage() == (1, 80)
+    enlarged = budget.try_resize(request, 40)
+    assert enlarged is not None
+    assert budget.usage() == (1, 100)
+    assert budget.try_reserve(0, 1) is None
+    with pytest.raises(ValueError):
+        budget.try_resize(enlarged, float("nan"))
+    assert budget.usage() == (1, 100)
+    budget.release(enlarged)
+    budget.release(fitting)
+    assert budget.usage() == (0, 0)
+    for workers, memory in ((-1, 1), (0, 0), (0, -1), (0, float("nan")), (0, 1.5), (0, True)):
+        with pytest.raises(ValueError):
+            budget.try_reserve(workers, memory)
+
+
+def test_scene_memory_estimate_accounts_for_total_vertices() -> None:
+    plain = scene_memory_bytes(100, 0)
+    with_points = scene_memory_bytes(100, 100_000)
+    assert with_points - plain >= 100_000 * 192
+    assert with_points > 12_340_000  # measured validation peak for this geometry
+    with pytest.raises(ValueError):
+        scene_memory_bytes(1, -1)
+    with pytest.raises(ValueError):
+        scene_memory_bytes(1, float("nan"))
 
 
 def test_concurrent_reservations_never_exceed_global_budget() -> None:

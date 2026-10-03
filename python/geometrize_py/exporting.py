@@ -13,8 +13,10 @@ from typing import Any
 from .contracts import (
     MAX_SOURCE_DIMENSION,
     PROJECT_MAX_COORDINATE,
+    PROJECT_MAX_GEOMETRY_FACTOR,
     PROJECT_MAX_POINTS,
     PROJECT_MAX_SHAPES,
+    PROJECT_MAX_TOTAL_POINTS,
     SHAPE_DATA_FIELDS,
     SHAPE_RADIUS_FIELDS,
     SHAPE_TYPES,
@@ -22,6 +24,7 @@ from .contracts import (
 from .errors import APIError
 from .images import image_to_png_bytes
 from .render import export_dimensions, render_shapes_to_image
+from .resources import scene_memory_bytes as scene_memory_bytes
 from .svg import shapes_to_svg
 
 
@@ -42,6 +45,32 @@ class RenderScene:
             allow_nan=False,
         ).encode("utf-8")
         return hashlib.sha256(content).hexdigest()
+
+
+def inspect_scene(raw: RenderScene | dict[str, Any]) -> tuple[int, int]:
+    """Count shapes and polyline vertices before copying or rendering a scene."""
+    if isinstance(raw, RenderScene):
+        shapes = raw.shapes
+    elif isinstance(raw, dict):
+        shapes = raw.get("shapes")
+    else:
+        shapes = None
+    if not isinstance(shapes, list) or len(shapes) > PROJECT_MAX_SHAPES:
+        raise APIError("invalid_result", f"Result shapes must be an array of at most {PROJECT_MAX_SHAPES} items")
+    total_points = 0
+    for index, shape in enumerate(shapes, 1):
+        if not isinstance(shape, dict) or not isinstance(shape.get("type"), str) or shape["type"] not in SHAPE_TYPES:
+            raise APIError("invalid_result", f"Shape {index} has an unsupported type")
+        if shape["type"] != "polyline":
+            continue
+        data = shape.get("data")
+        points = data.get("points") if isinstance(data, dict) else None
+        if not isinstance(points, list) or len(points) > PROJECT_MAX_POINTS:
+            raise APIError("invalid_result", f"Shape {index} has invalid polyline points")
+        total_points += len(points)
+        if total_points > PROJECT_MAX_TOTAL_POINTS:
+            raise APIError("invalid_result", f"Result cannot exceed {PROJECT_MAX_TOTAL_POINTS} polyline points")
+    return len(shapes), total_points
 
 
 @dataclass(frozen=True)
@@ -103,10 +132,9 @@ def validate_scene(raw: Any) -> RenderScene:
     width = _integer(raw.get("width"), 1, MAX_SOURCE_DIMENSION, "result width")
     height = _integer(raw.get("height"), 1, MAX_SOURCE_DIMENSION, "result height")
     background = _color(raw.get("background"), "result background")
-    shapes = raw.get("shapes")
-    if not isinstance(shapes, list) or len(shapes) > PROJECT_MAX_SHAPES:
-        raise APIError("invalid_result", f"Result shapes must be an array of at most {PROJECT_MAX_SHAPES} items")
-    normalized = [_shape(shape, index + 1) for index, shape in enumerate(shapes)]
+    inspect_scene(raw)
+    geometry_limit = PROJECT_MAX_GEOMETRY_FACTOR * max(width, height)
+    normalized = [_shape(shape, index + 1, geometry_limit) for index, shape in enumerate(raw["shapes"])]
     return RenderScene(
         width,
         height,
@@ -117,7 +145,7 @@ def validate_scene(raw: Any) -> RenderScene:
     )
 
 
-def _shape(raw: Any, index: int) -> dict[str, Any]:
+def _shape(raw: Any, index: int, geometry_limit: float) -> dict[str, Any]:
     if not isinstance(raw, dict) or not isinstance(raw.get("type"), str) or raw["type"] not in SHAPE_TYPES:
         raise APIError("invalid_result", f"Shape {index} has an unsupported type")
     name = raw["type"]
@@ -132,9 +160,18 @@ def _shape(raw: Any, index: int) -> dict[str, Any]:
         for point in points:
             if not isinstance(point, (list, tuple)) or len(point) != 2:
                 raise APIError("invalid_result", f"Shape {index} has an invalid polyline point")
-            geometry["points"].append([_number(point[0], "point x"), _number(point[1], "point y")])
+            geometry["points"].append(
+                [_number(point[0], "point x", geometry_limit), _number(point[1], "point y", geometry_limit)]
+            )
     else:
-        geometry = {field: _number(data.get(field), f"shape {index} {field}") for field in SHAPE_DATA_FIELDS[name]}
+        geometry = {
+            field: _number(
+                data.get(field),
+                f"shape {index} {field}",
+                PROJECT_MAX_COORDINATE if field == "angle" else geometry_limit,
+            )
+            for field in SHAPE_DATA_FIELDS[name]
+        }
     for field in SHAPE_RADIUS_FIELDS.get(name, ()):
         if geometry[field] < 0:
             raise APIError("invalid_result", f"Shape {index} {field} cannot be negative")
@@ -161,9 +198,9 @@ def _integer(value: Any, lower: int, upper: int, label: str) -> int:
     return value
 
 
-def _number(value: Any, label: str) -> float:
+def _number(value: Any, label: str, limit: float = PROJECT_MAX_COORDINATE) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise APIError("invalid_result", f"{label} must be a finite number")
-    if abs(value) > PROJECT_MAX_COORDINATE or not math.isfinite(value):
-        raise APIError("invalid_result", f"{label} must be a finite number")
+    if abs(value) > limit or not math.isfinite(value):
+        raise APIError("invalid_result", f"{label} must be a finite number within +/-{limit:g}")
     return float(value)

@@ -23,7 +23,7 @@ class ResourceLease:
 
 class WorkBudget:
     def __init__(self, workers: int, memory_bytes: int) -> None:
-        if workers < 1 or memory_bytes < 1:
+        if not _valid_int(workers, 1) or not _valid_int(memory_bytes, 1):
             raise ValueError("Worker and active memory budgets must be positive")
         self.workers = workers
         self.memory_bytes = memory_bytes
@@ -33,8 +33,8 @@ class WorkBudget:
         self._leases: set[ResourceLease] = set()
 
     def try_reserve(self, workers: int, memory_bytes: int) -> ResourceLease | None:
-        if workers < 1 or memory_bytes < 1:
-            raise ValueError("Resource reservations must be positive")
+        if not _valid_int(workers, 0) or not _valid_int(memory_bytes, 1):
+            raise ValueError("Worker reservations cannot be negative and memory reservations must be positive")
         with self._lock:
             if self._used_workers + workers > self.workers or self._used_memory + memory_bytes > self.memory_bytes:
                 return None
@@ -45,7 +45,7 @@ class WorkBudget:
             return lease
 
     def try_resize(self, lease: ResourceLease, memory_bytes: int) -> ResourceLease | None:
-        if memory_bytes < 1:
+        if not _valid_int(memory_bytes, 1):
             raise ValueError("Resource reservations must be positive")
         with self._lock:
             self._require_lease(lease)
@@ -73,6 +73,10 @@ class WorkBudget:
             return self._used_workers, self._used_memory
 
 
+def _valid_int(value: object, lower: int) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= lower
+
+
 def fitting_memory_bytes(width: int, height: int, workers: int) -> int:
     # Retained bitmaps, worker scratch copies, source conversion and rollback.
     return width * height * (32 + 4 * workers) + 1024 * 1024
@@ -81,3 +85,14 @@ def fitting_memory_bytes(width: int, height: int, workers: int) -> int:
 def export_memory_bytes(width: int, height: int) -> int:
     # RGBA destination/overlay plus conservative encoding and serialization room.
     return width * height * 16 + 1024 * 1024
+
+
+def scene_memory_bytes(shape_count: int, total_points: int = 0) -> int:
+    """Budget normalized scene metadata, including each copied polyline vertex.
+
+    A point is represented by a Python list and two floats. 192 bytes covers
+    those objects plus list/dictionary references and serialization overhead.
+    """
+    if not _valid_int(shape_count, 0) or not _valid_int(total_points, 0):
+        raise ValueError("Shape and point counts cannot be negative")
+    return 1024 * 1024 + shape_count * 3072 + total_points * 192
