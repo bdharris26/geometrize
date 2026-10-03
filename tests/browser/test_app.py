@@ -304,7 +304,16 @@ def test_controls_zoom_and_incomplete_stream(server_url: str) -> None:
         browser.close()
 
 
-def test_incomplete_stream_reconciles_from_idle_snapshot(server_url: str) -> None:
+@pytest.mark.parametrize(
+    ("stop_reason", "expected_state", "expected_status"),
+    [
+        ("paused", "Paused", "Stream interrupted; recovered final result"),
+        ("error", "Render failed", "Render failed; recovered the last confirmed result"),
+    ],
+)
+def test_incomplete_stream_reconciles_from_idle_snapshot(
+    server_url: str, stop_reason: str, expected_state: str, expected_status: str
+) -> None:
     first = {
         "type": "circle", "color": {"r": 0, "g": 0, "b": 0, "a": 255},
         "data": {"x": 2, "y": 2, "r": 1}, "score": 0.7,
@@ -329,13 +338,13 @@ def test_incomplete_stream_reconciles_from_idle_snapshot(server_url: str) -> Non
         "event": "snapshot", "session_id": "recoverable", "width": 8, "height": 8,
         "background": background, "shapes": [first, second], "attempts": 7,
         "revision": 2, "initial_score": 0.9, "score": 0.5,
-        "stop_reason": "paused",
+        "stop_reason": stop_reason,
         "batch_summary": {
             "index": 1, "target": 2, "shapeTypes": ["circle"],
             "candidates": 16, "mutations": 32, "alpha": 128, "seed": 9001,
             "max_threads": 0, "effective_threads": 1,
             "start_shape_count": 0, "start_attempts": 0,
-            "added": 2, "attempts": 7, "state": "Paused", "reason": "paused",
+            "added": 2, "attempts": 7, "state": expected_state, "reason": stop_reason,
         },
     }
     with sync_playwright() as playwright:
@@ -351,7 +360,8 @@ def test_incomplete_stream_reconciles_from_idle_snapshot(server_url: str) -> Non
             status=200, content_type="application/json", body=json.dumps(snapshot),
         ))
         page.get_by_role("button", name="Run", exact=True).click()
-        expect(page.locator("#status")).to_have_text("Stream interrupted; recovered final result")
+        expect(page.locator("#status")).to_have_text(expected_status)
+        expect(page.locator("#telemetry-state")).to_have_text(expected_state)
         expect(page.locator("#telemetry-acceptance")).to_have_text("2 accepted / 7 attempts")
         expect(page.locator("#run-button")).to_have_text("Continue")
         expect(page.locator("#batch-history .batch-chip strong")).to_have_text("+2")

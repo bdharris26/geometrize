@@ -37,7 +37,8 @@ const STOP_LABELS = {
   adequate_fit: "Fit already adequate",
   no_further_improvement: "No further improvement",
   attempt_limit: "Attempt limit reached",
-  paused: "Paused"
+  paused: "Paused",
+  error: "Render failed"
 };
 
 let contract;
@@ -342,7 +343,9 @@ async function recoverSnapshot(version) {
       const snapshot = await postJson(`/api/sessions/${encodeURIComponent(sessionId)}/snapshot`, {});
       if (version !== runVersion) return false;
       acceptSnapshot(snapshot, "snapshot");
-      ui.status.textContent = "Stream interrupted; recovered final result";
+      ui.status.textContent = snapshot.stop_reason === "error"
+        ? "Render failed; recovered the last confirmed result"
+        : "Stream interrupted; recovered final result";
       return true;
     } catch (error) {
       if (error.code === "session_busy" || error.code === "renderer_busy") {
