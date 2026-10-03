@@ -582,7 +582,6 @@ async function downloadResult(type) {
       }
       artifact = await request;
       if (version !== exportVersion || scene !== sceneVersion) {
-        ui.status.textContent = "Export changed; click download again";
         return;
       }
       exportCache.set(cacheKey, artifact);

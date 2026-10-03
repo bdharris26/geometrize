@@ -231,6 +231,35 @@ def test_exports_follow_resolution_without_adding_shapes(server_url: str, tmp_pa
         browser.close()
 
 
+def test_stale_export_completion_does_not_change_new_scene_status(server_url: str) -> None:
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = browser.new_page()
+        page.goto(server_url, wait_until="networkidle")
+        _run_sample(page, shapes=1)
+        page.evaluate("""() => {
+          const realFetch = window.fetch.bind(window);
+          window.fetch = (...args) => {
+            if (args[0] === '/api/export') {
+              return new Promise(resolve => { window.resolveOldExport = resolve; });
+            }
+            return realFetch(...args);
+          };
+        }""")
+        page.locator("#download-png").click()
+        page.wait_for_function("typeof window.resolveOldExport === 'function'")
+        expect(page.locator("#status")).to_have_text("Preparing 256px export")
+
+        page.get_by_role("button", name="Sample", exact=True).click()
+        expect(page.locator("#status")).to_have_text("Ready")
+        page.evaluate("""() => window.resolveOldExport(new Response('{}', {
+          status: 200, headers: { 'Content-Type': 'application/json' }
+        }))""")
+        page.evaluate("() => new Promise(resolve => setTimeout(resolve, 0))")
+        expect(page.locator("#status")).to_have_text("Ready")
+        browser.close()
+
+
 def test_controls_zoom_and_incomplete_stream(server_url: str) -> None:
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
