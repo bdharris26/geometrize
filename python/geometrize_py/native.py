@@ -5,13 +5,17 @@ import platform
 import sys
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
-from threading import Event, RLock
+from math import isfinite
+from numbers import Real
+from threading import Event, Lock, RLock
 from typing import Any
 
 from PIL import Image
 
 from .contracts import (
     DEFAULT_SHAPES,
+    FOCUS_DEFAULTS,
+    FOCUS_LIMITS,
     MAX_IMAGE_SIZE,
     MAX_WORKING_IMAGE_SIZE,
     OPTION_DEFAULTS,
@@ -25,6 +29,7 @@ __all__ = [
     "MAX_IMAGE_SIZE",
     "MAX_WORKING_IMAGE_SIZE",
     "SHAPE_TYPES",
+    "Focus",
     "ImageSession",
     "NativeBackendUnavailable",
     "RunOptions",
@@ -34,6 +39,7 @@ __all__ = [
     "iter_image",
     "native_available",
     "normalize_shape_types",
+    "normalize_focus",
     "require_native",
     "run_image",
 ]
@@ -56,6 +62,42 @@ else:
 
 
 @dataclass(frozen=True)
+class Focus:
+    """Candidate placement in normalized image coordinates; scoring stays global."""
+
+    x: float
+    y: float
+    radius: float = FOCUS_DEFAULTS["radius"]
+    strength: float = FOCUS_DEFAULTS["strength"]
+
+    def __post_init__(self) -> None:
+        for name, (lower, upper) in FOCUS_LIMITS.items():
+            value = getattr(self, name)
+            try:
+                valid = not isinstance(value, bool) and isinstance(value, Real) and isfinite(value)
+            except OverflowError:
+                valid = False
+            if not valid or not lower <= value <= upper:
+                raise ValueError(f"focus.{name} must be a finite number from {lower:g} to {upper:g}")
+            object.__setattr__(self, name, float(value))
+
+    def to_dict(self) -> dict[str, float]:
+        return {name: getattr(self, name) for name in FOCUS_LIMITS}
+
+
+def normalize_focus(value: Any) -> Focus | None:
+    if value is None or isinstance(value, Focus):
+        return value
+    if not isinstance(value, dict):
+        raise ValueError("focus must be an object or null")
+    if set(value) - FOCUS_LIMITS.keys():
+        raise ValueError("focus only accepts x, y, radius, and strength")
+    if "x" not in value or "y" not in value:
+        raise ValueError("focus requires x and y")
+    return Focus(value["x"], value["y"], value.get("radius", Focus.radius), value.get("strength", Focus.strength))
+
+
+@dataclass(frozen=True)
 class RunOptions:
     steps: int = OPTION_DEFAULTS["steps"]
     shape_types: tuple[str, ...] = DEFAULT_SHAPES
@@ -67,12 +109,14 @@ class RunOptions:
     max_size: int = OPTION_DEFAULTS["max_size"]
     export_size: int = OPTION_DEFAULTS["export_size"]
     stagnation_limit: int = OPTION_DEFAULTS["stagnation_limit"]
+    focus: Focus | None = None
 
     def __post_init__(self) -> None:
         shape_types = self.shape_types
         if isinstance(shape_types, str):
             shape_types = tuple(value.strip() for value in shape_types.split(",") if value.strip())
         object.__setattr__(self, "shape_types", normalize_shape_types(shape_types))
+        object.__setattr__(self, "focus", normalize_focus(self.focus))
         for name, (lower, upper) in OPTION_LIMITS.items():
             _validate_int_option(name, getattr(self, name), lower, upper)
 
@@ -91,6 +135,7 @@ class RunOptions:
             max_size=max_size,
             export_size=_clamp_option("export_size", data.get("export_size", data.get("max_size", max_size))),
             stagnation_limit=_clamp_option("stagnation_limit", data.get("stagnation_limit", cls.stagnation_limit)),
+            focus=data.get("focus"),
         )
 
     def to_native_dict(self) -> dict[str, Any]:
@@ -102,6 +147,7 @@ class RunOptions:
             "mutations": self.mutations,
             "seed": self.seed,
             "max_threads": effective_max_threads(self.max_threads),
+            "focus": self.focus.to_dict() if self.focus is not None else None,
         }
 
     @property
@@ -126,6 +172,7 @@ class ImageSession:
         height: int,
         background: tuple[int, int, int, int],
         session: Any,
+        focus: Focus | None = None,
     ) -> None:
         self.width = width
         self.height = height
@@ -134,6 +181,8 @@ class ImageSession:
         self.shapes: list[dict[str, Any]] = []
         self.batch_count = 0
         self._run_lock = RLock()
+        self._focus_lock = Lock()
+        self._focus = normalize_focus(focus)
         self._cancel_requested = Event()
         self.initial_score = float(getattr(session, "initial_score", 1.0))
         self._score = float(getattr(session, "score", self.initial_score))
@@ -148,7 +197,7 @@ class ImageSession:
         width, height = source.size
         background = average_color(source)
         session = backend.RunnerSession(width, height, source.tobytes(), options.to_native_dict())
-        return cls(width, height, background, session)
+        return cls(width, height, background, session, options.focus)
 
     @property
     def attempts(self) -> int:
@@ -160,7 +209,24 @@ class ImageSession:
 
     @property
     def batch_summary(self) -> dict[str, Any] | None:
-        return self._batch_summary.copy() if self._batch_summary is not None else None
+        if self._batch_summary is None:
+            return None
+        summary = self._batch_summary.copy()
+        for name in ("focus", "initial_focus"):
+            if summary[name] is not None:
+                summary[name] = summary[name].copy()
+        return summary
+
+    @property
+    def focus(self) -> Focus | None:
+        with self._focus_lock:
+            return self._focus
+
+    def request_focus(self, focus: Focus | None) -> None:
+        """Change placement for the next attempt without waiting on the batch lock."""
+        normalized = normalize_focus(focus)
+        with self._focus_lock:
+            self._focus = normalized
 
     def try_acquire_run(self) -> bool:
         return self._run_lock.acquire(blocking=False)
@@ -168,10 +234,12 @@ class ImageSession:
     def release_run(self) -> None:
         self._run_lock.release()
 
-    def prepare_run(self) -> None:
+    def prepare_run(self, options: RunOptions | None = None) -> None:
         """Clear a prior cancellation while holding the run reservation."""
         self._cancel_requested.clear()
         self.stop_reason = None
+        if options is not None:
+            self.request_focus(options.focus)
 
     def request_cancel(self) -> None:
         """Ask the active batch to stop after its current native step."""
@@ -179,11 +247,11 @@ class ImageSession:
 
     def run_batch(self, options: RunOptions) -> Iterator[dict[str, Any]]:
         with self._run_lock:
-            self.prepare_run()
+            self.prepare_run(options)
             yield from self._run_batch(options)
 
     def run_reserved_batch(self, options: RunOptions) -> Iterator[dict[str, Any]]:
-        """Run while the caller holds the reservation from try_acquire_run()."""
+        """Run after prepare_run(options), while the caller holds the reservation."""
         yield from self._run_batch(options)
 
     def _run_batch(self, options: RunOptions) -> Iterator[dict[str, Any]]:
@@ -206,6 +274,8 @@ class ImageSession:
             "max_threads": options.actual_max_threads,
             "effective_threads": options.actual_max_threads,
             "stagnation_limit": options.stagnation_limit,
+            "initial_focus": options.focus.to_dict() if options.focus is not None else None,
+            "focus": options.focus.to_dict() if options.focus is not None else None,
             "start_shape_count": accepted_at_start,
             "start_attempts": attempts_at_start,
             "start_score": self.score,
@@ -237,6 +307,10 @@ class ImageSession:
                     reason = "no_further_improvement"
                     break
 
+                # Snapshot the immutable control once between native attempts.
+                # Its separate tiny lock also permits edits while the GIL is released.
+                focus = self.focus
+                native_options["focus"] = focus.to_dict() if focus is not None else None
                 # The C++ call releases the GIL. Cancellation is checked after
                 # it returns so an accepted shape is never lost from history.
                 step = self._session.step(native_options)
@@ -255,6 +329,7 @@ class ImageSession:
                     attempts=batch_attempts,
                     score=self.score,
                     revision=self.revision,
+                    focus=native_options["focus"],
                 )
                 yield {
                     "event": "step",
@@ -268,6 +343,7 @@ class ImageSession:
                     "score": self.score,
                     "initial_score": self.initial_score,
                     "revision": self.revision,
+                    "focus": native_options["focus"],
                 }
         except GeneratorExit:
             reason = "paused"
@@ -350,10 +426,12 @@ def iter_image(image: Image.Image, options: RunOptions | None = None) -> Iterato
         "score": session.score,
         "initial_score": session.initial_score,
         "revision": session.revision,
+        "focus": options.focus.to_dict() if options.focus is not None else None,
     }
 
     yield from session.run_batch(options)
     result = session.result()
+    focus = session.focus
     yield {
         "event": "complete",
         "result": result,
@@ -367,6 +445,7 @@ def iter_image(image: Image.Image, options: RunOptions | None = None) -> Iterato
         "revision": session.revision,
         "stop_reason": session.stop_reason,
         "batch_summary": session.batch_summary,
+        "focus": focus.to_dict() if focus is not None else None,
     }
 
 

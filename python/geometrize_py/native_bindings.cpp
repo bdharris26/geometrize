@@ -1,7 +1,9 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
+#include <cmath>
 #include <map>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -18,6 +20,7 @@
 #include "geometrize/shape/shape.h"
 #include "geometrize/shape/shapetypes.h"
 #include "geometrize/shaperesult.h"
+#include "native_focus.h"
 
 namespace py = pybind11;
 
@@ -98,6 +101,43 @@ geometrize::ImageRunnerOptions runnerOptionsFromDict(const py::dict& options)
     runnerOptions.seed = static_cast<std::uint32_t>(readInt(options, "seed", 9001, 0, 2147483647));
     runnerOptions.maxThreads = static_cast<std::uint32_t>(readInt(options, "max_threads", 0, 0, 128));
     return runnerOptions;
+}
+
+std::optional<geometrize_py::Focus> focusFromDict(const py::dict& options)
+{
+    if(!options.contains("focus") || options["focus"].is_none()) {
+        return std::nullopt;
+    }
+    const auto value{options["focus"]};
+    if(!py::isinstance<py::dict>(value)) {
+        throw std::invalid_argument("focus must be an object or null");
+    }
+    const auto focus{py::cast<py::dict>(value)};
+    for(const auto item : focus) {
+        const auto name{py::cast<std::string>(item.first)};
+        if(name != "x" && name != "y" && name != "radius" && name != "strength") {
+            throw std::invalid_argument("focus only accepts x, y, radius, and strength");
+        }
+    }
+    const auto number = [&focus](const char* name, const double fallback, const double lower, const double upper) {
+        if(!focus.contains(name)) {
+            if(std::string(name) == "x" || std::string(name) == "y") {
+                throw std::invalid_argument("focus requires x and y");
+            }
+            return fallback;
+        }
+        const auto raw{focus[name]};
+        if(py::isinstance<py::bool_>(raw) || !(py::isinstance<py::int_>(raw) || py::isinstance<py::float_>(raw))) {
+            throw std::invalid_argument(std::string("focus.") + name + " must be a finite number");
+        }
+        const double number{py::cast<double>(raw)};
+        if(!std::isfinite(number) || number < lower || number > upper) {
+            throw std::invalid_argument(std::string("focus.") + name + " is outside its finite range");
+        }
+        return number;
+    };
+    return geometrize_py::Focus{number("x", 0.0, 0.0, 1.0), number("y", 0.0, 0.0, 1.0),
+        number("radius", 0.2, 0.01, 1.0), number("strength", 0.75, 0.0, 1.0)};
 }
 
 std::string shapeName(const geometrize::ShapeTypes type)
@@ -188,6 +228,7 @@ public:
         m_target{static_cast<std::uint32_t>(width), static_cast<std::uint32_t>(height), m_pixels},
         m_runner{m_target},
         m_options{runnerOptionsFromDict(options)},
+        m_focus{focusFromDict(options)},
         m_initialScore{geometrize::core::differenceFull(m_target, m_runner.getCurrent())},
         m_score{m_initialScore},
         m_attempts{0}
@@ -196,13 +237,25 @@ public:
     py::dict step(const py::dict& options = py::dict())
     {
         if(!options.empty()) {
-            m_options = runnerOptionsFromDict(options);
+            const auto nextOptions{runnerOptionsFromDict(options)};
+            const auto nextFocus{focusFromDict(options)};
+            m_options = nextOptions;
+            m_focus = nextFocus;
         }
 
         std::vector<geometrize::ShapeResult> stepShapes;
         {
             py::gil_scoped_release release;
-            stepShapes = m_runner.step(m_options);
+            if(m_focus && m_focus->strength > 0.0) {
+                stepShapes = m_runner.step(m_options,
+                    geometrize_py::focusedShapeCreator(m_options.shapeTypes, m_width, m_height, *m_focus));
+            } else if(m_width == 1 || m_height == 1) {
+                stepShapes = m_runner.step(m_options,
+                    geometrize_py::safeShapeCreator(m_options.shapeTypes, m_width, m_height));
+            } else {
+                // Preserve the original factory and RNG path when disabled.
+                stepShapes = m_runner.step(m_options);
+            }
         }
 
         m_attempts++;
@@ -274,6 +327,7 @@ private:
     geometrize::Bitmap m_target;
     geometrize::ImageRunner m_runner;
     geometrize::ImageRunnerOptions m_options;
+    std::optional<geometrize_py::Focus> m_focus;
     double m_initialScore;
     double m_score;
     int m_attempts;
