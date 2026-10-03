@@ -62,16 +62,16 @@
         <div class="field">
           <label for="max-size" title="Longest source dimension used by the optimizer. Lower values run faster and retain smaller resumable sessions.">Working resolution <output id="max-size-out">1024</output></label>
           <div class="range-with-input">
-            <input id="max-size" name="max_size" type="range" min="32" max="2048" step="32" value="1024">
-            <input id="max-size-number" type="number" min="32" max="2048" step="32" value="1024" aria-label="Working resolution value">
+            <input id="max-size" name="max_size" type="range" min="32" max="2048" step="1" value="1024">
+            <input id="max-size-number" type="number" min="32" max="2048" step="1" value="1024" aria-label="Working resolution value">
           </div>
         </div>
 
         <div class="field">
           <label for="export-size" title="Longest dimension for PNG and SVG output. This does not increase optimizer memory use.">Export resolution <output id="export-size-out">1024</output></label>
           <div class="range-with-input">
-            <input id="export-size" name="export_size" type="range" min="32" max="4096" step="32" value="1024">
-            <input id="export-size-number" type="number" min="32" max="4096" step="32" value="1024" aria-label="Export resolution value">
+            <input id="export-size" name="export_size" type="range" min="32" max="4096" step="1" value="1024">
+            <input id="export-size-number" type="number" min="32" max="4096" step="1" value="1024" aria-label="Export resolution value">
           </div>
         </div>
 

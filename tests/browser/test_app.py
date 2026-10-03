@@ -196,6 +196,15 @@ def test_exports_follow_resolution_without_adding_shapes(server_url: str, tmp_pa
         with Image.open(first_path) as image:
             assert image.size[0] == 256
 
+        page.locator("#export-size-number").fill("333")
+        odd_path = tmp_path / "odd-size.png"
+        with page.expect_download() as download_info:
+            page.locator("#download-png").click()
+        download_info.value.save_as(odd_path)
+        with Image.open(odd_path) as image:
+            assert image.size[0] == 333
+        assert page.locator("#telemetry-acceptance").inner_text() == initial_acceptance
+
         page.locator("#export-size-number").fill("512")
         second_path = tmp_path / "second.png"
         with page.expect_download() as download_info:
