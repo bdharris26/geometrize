@@ -24,7 +24,6 @@ from .contracts import (
 from .errors import APIError
 from .images import image_to_png_bytes
 from .render import export_dimensions, render_shapes_to_image
-from .resources import scene_memory_bytes as scene_memory_bytes
 from .svg import shapes_to_svg
 
 

@@ -175,7 +175,3 @@ def _validate_distinct_paths(args: argparse.Namespace) -> None:
         if previous is not None:
             raise ValueError(f"{label} path must differ from the {previous} path")
         seen[key] = label
-
-
-def entrypoint() -> int:
-    return main()

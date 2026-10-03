@@ -6,6 +6,7 @@ the UI so validators, controls, and saved projects use one contract.
 
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import Any
 
 SHAPE_TYPES = {
@@ -107,7 +108,7 @@ def app_contract() -> dict[str, Any]:
             }
             for name, type_id in SHAPE_TYPES.items()
         ],
-        "defaults": OPTION_DEFAULTS.copy(),
+        "defaults": deepcopy(OPTION_DEFAULTS),
         "limits": {name: {"min": lower, "max": upper} for name, (lower, upper) in OPTION_LIMITS.items()},
         "images": {
             "mime_types": list(RASTER_MIME_TYPES),
@@ -126,5 +127,5 @@ def app_contract() -> dict[str, Any]:
             "max_total_points": PROJECT_MAX_TOTAL_POINTS,
             "max_geometry_factor": PROJECT_MAX_GEOMETRY_FACTOR,
         },
-        "presets": PRESETS,
+        "presets": deepcopy(PRESETS),
     }

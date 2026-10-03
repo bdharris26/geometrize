@@ -79,13 +79,10 @@ class RunOptions:
     @classmethod
     def from_mapping(cls, data: dict[str, Any] | None) -> RunOptions:
         data = data or {}
-        shape_types = data.get("shape_types", DEFAULT_SHAPES)
-        if isinstance(shape_types, str):
-            shape_types = tuple(s.strip() for s in shape_types.split(",") if s.strip())
         max_size = _clamp_option("max_size", data.get("max_size", cls.max_size))
         return cls(
             steps=_clamp_option("steps", data.get("steps", cls.steps)),
-            shape_types=normalize_shape_types(shape_types),
+            shape_types=data.get("shape_types", DEFAULT_SHAPES),
             alpha=_clamp_option("alpha", data.get("alpha", cls.alpha)),
             shape_count=_clamp_option("shape_count", data.get("shape_count", cls.shape_count)),
             mutations=_clamp_option("mutations", data.get("mutations", cls.mutations)),
@@ -389,13 +386,9 @@ def normalize_shape_types(values: Iterable[str]) -> tuple[str, ...]:
     return tuple(normalized)
 
 
-def _clamp_int(value: Any, lower: int, upper: int) -> int:
-    number = int(value)
-    return max(lower, min(upper, number))
-
-
 def _clamp_option(name: str, value: Any) -> int:
-    return _clamp_int(value, *OPTION_LIMITS[name])
+    lower, upper = OPTION_LIMITS[name]
+    return max(lower, min(upper, int(value)))
 
 
 def effective_max_threads(requested: int) -> int:
