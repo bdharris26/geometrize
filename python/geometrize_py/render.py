@@ -4,7 +4,10 @@ Each shape is rasterized at export resolution on its own transparent layer and
 alpha-composited in sequence. Strokes are at least one output pixel wide;
 circles use the smaller axis scale to stay circular. Rotated ellipses and
 quadratic curves are sampled as 48-sided polygons and 32 line segments. SVG
-and browser Canvas use continuous paths, so antialiased edge coverage differs.
+and browser Canvas use continuous paths, so both antialiased edge coverage and
+curve sampling can differ. Sampling error grows with export scale; it is not
+limited to a fixed antialiasing band. Degenerate shapes can also cover a Pillow
+pixel even when their continuous zero-area path is invisible.
 The native scorer truncates coordinates to integer scanlines, uses 20 vertices
 for rotated ellipses and 20 segments for quadratic curves, and blends with
 integer arithmetic. Its fitting bitmap can therefore differ in actual shape

@@ -39,8 +39,9 @@ improvement stalls, or its attempt limit is reached.
 PNG and SVG exports are generated on demand from the current result. Changing
 export size does not add shapes or rerun fitting. Working resolution and display
 zoom are independent of export size, which is capped at 4096px. PNG rendering
-preserves Pillow's rasterization; SVG and the live canvas use continuous geometry
-and antialiasing, so edge pixels can differ. The fitting engine uses its own
+preserves Pillow's rasterization and curve sampling; SVG and the live canvas use
+continuous paths and antialiasing, so curved boundaries can differ more at larger
+export sizes. The fitting engine uses its own
 scanline and blending rules for the error score. Project JSON restores the
 source, result, settings, and history, and allows exporting the saved result.
 Continuing after reopening a project starts a new native fit.
