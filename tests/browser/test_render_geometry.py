@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
-from playwright.sync_api import sync_playwright
+from pathlib import Path
+
+from playwright.sync_api import Page, sync_playwright
 
 from geometrize_py.render import render_shapes_to_image
 from geometrize_py.svg import shapes_to_svg
 
 SOURCE_SIZE = (60, 60)
 OUTPUT_SIZE = (120, 80)  # Deliberately nonuniform, to expose viewBox errors.
+PREVIEW_SOURCE = (Path(__file__).resolve().parents[2] / "python/geometrize_py/static/preview.js").read_text(
+    encoding="utf-8"
+)
 SHAPES = {
     "circle": {"x": 26.375, "y": 24.125, "r": 10.75},
     "ellipse": {"x": 26.375, "y": 24.125, "rx": 17.25, "ry": 8.875},
@@ -26,30 +31,19 @@ def test_all_nine_svg_primitives_follow_png_geometry_away_from_antialiased_edges
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
         page = browser.new_page()
+        page.evaluate(
+            """async (source) => {
+              const url = URL.createObjectURL(new Blob([source], { type: 'text/javascript' }));
+              try { window.PreviewForTest = (await import(url)).Preview; }
+              finally { URL.revokeObjectURL(url); }
+            }""",
+            PREVIEW_SOURCE,
+        )
         for shape_type, data in SHAPES.items():
             shape = {"type": shape_type, "data": data, "color": {"r": 0, "g": 0, "b": 0, "a": 255}}
             png = render_shapes_to_image([shape], *SOURCE_SIZE, (255, 255, 255, 255), *OUTPUT_SIZE)
             svg = shapes_to_svg([shape], *SOURCE_SIZE, (255, 255, 255, 255), *OUTPUT_SIZE)
-            svg_red = page.evaluate(
-                """async ({ svg, width, height }) => {
-                  const image = new Image();
-                  const url = URL.createObjectURL(new Blob([svg], { type: 'image/svg+xml' }));
-                  try {
-                    image.src = url;
-                    await image.decode();
-                    const canvas = document.createElement('canvas');
-                    canvas.width = width;
-                    canvas.height = height;
-                    const context = canvas.getContext('2d');
-                    context.drawImage(image, 0, 0);
-                    const pixels = context.getImageData(0, 0, width, height).data;
-                    return Array.from({ length: width * height }, (_, index) => pixels[index * 4]);
-                  } finally {
-                    URL.revokeObjectURL(url);
-                  }
-                }""",
-                {"svg": svg, "width": OUTPUT_SIZE[0], "height": OUTPUT_SIZE[1]},
-            )
+            svg_red = _svg_red(page, svg, OUTPUT_SIZE)
             png_red = png.getchannel("R").tobytes()
             png_mask = _mask(png_red)
             svg_mask = _mask(svg_red)
@@ -57,7 +51,73 @@ def test_all_nine_svg_primitives_follow_png_geometry_away_from_antialiased_edges
             assert _within_edge_band(png_mask, svg_mask, 2), shape_type
             assert _within_edge_band(svg_mask, png_mask, 2), shape_type
             assert _bbox_distance(png_mask, svg_mask) <= 2, shape_type
+
+            # The live preview uses continuous Canvas paths at source size.
+            # Compare it with the same-size SVG before the export-scale rules.
+            source_svg = shapes_to_svg([shape], *SOURCE_SIZE, (255, 255, 255, 255))
+            canvas_mask = _mask(_canvas_red(page, shape, SOURCE_SIZE))
+            source_svg_mask = _mask(_svg_red(page, source_svg, SOURCE_SIZE))
+            assert canvas_mask and source_svg_mask, shape_type
+            assert _within_edge_band(canvas_mask, source_svg_mask, 2), shape_type
+            assert _within_edge_band(source_svg_mask, canvas_mask, 2), shape_type
+            assert _bbox_distance(canvas_mask, source_svg_mask) <= 2, shape_type
         browser.close()
+
+
+def _svg_red(page: Page, svg: str, size: tuple[int, int]) -> list[int]:
+    return page.evaluate(
+        """async ({ svg, width, height }) => {
+          const image = new Image();
+          const url = URL.createObjectURL(new Blob([svg], { type: 'image/svg+xml' }));
+          try {
+            image.src = url;
+            await image.decode();
+            const canvas = document.createElement('canvas');
+            canvas.width = width;
+            canvas.height = height;
+            const context = canvas.getContext('2d');
+            context.drawImage(image, 0, 0);
+            const pixels = context.getImageData(0, 0, width, height).data;
+            return Array.from({ length: width * height }, (_, index) => pixels[index * 4]);
+          } finally {
+            URL.revokeObjectURL(url);
+          }
+        }""",
+        {"svg": svg, "width": size[0], "height": size[1]},
+    )
+
+
+def _canvas_red(page: Page, shape: dict, size: tuple[int, int]) -> list[int]:
+    return page.evaluate(
+        """({ shape, width, height }) => {
+          const sourceStage = document.createElement('div');
+          const resultStage = document.createElement('div');
+          for (const stage of [sourceStage, resultStage]) {
+            stage.style.width = '200px';
+            stage.style.height = '200px';
+            document.body.append(stage);
+          }
+          const sourceImage = document.createElement('img');
+          const resultImage = document.createElement('img');
+          const resultCanvas = document.createElement('canvas');
+          const zoomOutput = document.createElement('span');
+          sourceStage.append(sourceImage);
+          resultStage.append(resultImage, resultCanvas);
+          try {
+            const preview = new window.PreviewForTest({
+              sourceStage, resultStage, sourceImage, resultImage, resultCanvas, zoomOutput,
+            });
+            preview.beginResult(width, height, [255, 255, 255, 255]);
+            preview.draw(shape);
+            const pixels = resultCanvas.getContext('2d').getImageData(0, 0, width, height).data;
+            return Array.from({ length: width * height }, (_, index) => pixels[index * 4]);
+          } finally {
+            sourceStage.remove();
+            resultStage.remove();
+          }
+        }""",
+        {"shape": shape, "width": size[0], "height": size[1]},
+    )
 
 
 def _mask(red: bytes | list[int]) -> set[tuple[int, int]]:
