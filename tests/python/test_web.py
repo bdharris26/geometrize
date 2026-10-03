@@ -19,7 +19,7 @@ from PIL import Image, ImageDraw
 
 from geometrize_py.images import image_to_data_url
 from geometrize_py.native import ImageSession, native_available
-from geometrize_py.web import GeometrizeRequestHandler, GeometrizeServer, _estimate_session_bytes
+from geometrize_py.web import GeometrizeRequestHandler, GeometrizeServer, _estimate_session_bytes, _safe_static_path
 
 
 class _ObservedServer(GeometrizeServer):
@@ -85,10 +85,22 @@ def test_index_supports_sample_without_required_file_input(server: GeometrizeSer
     assert 'id="telemetry-acceptance"' in html
 
 
-def test_static_route_rejects_path_traversal(server: GeometrizeServer) -> None:
+@pytest.mark.parametrize("path", ["%2e%2e/web.py", "..%5cweb.py", "..%255cweb.py", "C:app.js"])
+def test_static_route_rejects_path_traversal(server: GeometrizeServer, path: str) -> None:
     with pytest.raises(HTTPError) as error:
-        urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/static/%2e%2e/web.py", timeout=5)
+        urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/static/{path}", timeout=5)
     assert error.value.code == 404
+
+
+@pytest.mark.parametrize("name", ["nested\\app.js", "C:app.js", "C:/app.js", "C:\\app.js"])
+def test_static_paths_reject_windows_syntax_on_every_platform(name: str) -> None:
+    assert _safe_static_path(name) is None
+
+
+def test_static_route_serves_browser_module(server: GeometrizeServer) -> None:
+    with urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/static/preview.js", timeout=5) as response:
+        assert response.headers.get_content_type() in {"text/javascript", "application/javascript"}
+        assert "export " in response.read().decode("utf-8")
 
 
 def test_run_endpoint_rejects_non_object_json(server: GeometrizeServer) -> None:

@@ -718,7 +718,12 @@ def _session_busy_error() -> APIError:
 
 
 def _safe_static_path(name: str) -> PurePosixPath | None:
-    path = PurePosixPath(unquote(name))
+    name = unquote(name)
+    # Resource joins use the host filesystem, where Windows interprets these
+    # characters as separators or drive prefixes rather than filename text.
+    if "\\" in name or ":" in name:
+        return None
+    path = PurePosixPath(name)
     if path.is_absolute() or not path.parts or any(part in {"", ".", ".."} for part in path.parts):
         return None
     return path
