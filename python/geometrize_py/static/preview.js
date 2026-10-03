@@ -182,9 +182,9 @@ export class Preview {
   }
 
   currentPreview() {
+    if (!this.resultCanvas.hidden) return this.resultCanvas.toDataURL("image/png");
     const image = this.resultImage.getAttribute("src") || "";
-    return image.startsWith("data:image/") ? image :
-      (this.resultCanvas.hidden ? "" : this.resultCanvas.toDataURL("image/png"));
+    return image.startsWith("data:image/") ? image : "";
   }
 
   context() {

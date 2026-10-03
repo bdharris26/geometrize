@@ -460,7 +460,7 @@ def test_failed_recovery_saves_only_the_last_confirmed_scene(server_url: str, tm
         browser.close()
 
 
-def test_preview_only_project_survives_save_and_reopen(server_url: str, tmp_path: Path) -> None:
+def test_preview_only_project_survives_save_reopen_and_new_render(server_url: str, tmp_path: Path) -> None:
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
         page = browser.new_page()
@@ -500,6 +500,22 @@ def test_preview_only_project_survives_save_and_reopen(server_url: str, tmp_path
         expect(page.locator("#status")).to_have_text("Project loaded — Run starts a new render")
         expect(page.locator("#result-preview")).to_be_visible()
         assert page.locator("#result-preview").get_attribute("src") == preview_only["result"]["preview_data_url"]
+
+        page.locator("#steps-number").fill("1")
+        page.get_by_role("button", name="Run", exact=True).click()
+        page.get_by_role("button", name="Continue", exact=True).wait_for(timeout=120_000)
+        expect(page.locator("#result-preview")).to_be_hidden()
+        expect(page.locator("#result-canvas")).to_be_visible()
+        rendered_preview = page.locator("#result-canvas").evaluate("canvas => canvas.toDataURL()")
+        assert rendered_preview != preview_only["result"]["preview_data_url"]
+
+        rendered_path = tmp_path / "new-render.geometrize-project.json"
+        with page.expect_download() as download_info:
+            page.get_by_role("button", name="Save project", exact=True).click()
+        download_info.value.save_as(rendered_path)
+        rendered = json.loads(rendered_path.read_text(encoding="utf-8"))
+        assert len(rendered["result"]["shapes"]) == 1
+        assert rendered["result"]["preview_data_url"] == rendered_preview
         browser.close()
 
 
