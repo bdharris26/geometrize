@@ -17,11 +17,16 @@ current so the next agent can find the important edges quickly.
 ## First Places To Inspect
 
 - UI server and API: `python/geometrize_py/web.py`.
+- Shared limits, shapes, and presets: `python/geometrize_py/contracts.py`;
+  the UI loads these from `/api/config`.
+- Browser modules: `static/app.js` coordinates `preview.js`, `stream.js`,
+  `telemetry.js`, and `project.js` under `python/geometrize_py/`.
 - CLI entrypoints: `python/geometrize_py/cli.py`.
 - Native bridge contract: `python/geometrize_py/native.py` and
   `python/geometrize_py/native_bindings.cpp`.
-- SVG export: `python/geometrize_py/svg.py`.
-- Tests: `tests/python/`.
+- Exports and resource budgets: `exporting.py`, `render.py`, `svg.py`, and
+  `resources.py` under `python/geometrize_py/`.
+- Tests: `tests/python/` and `tests/browser/`.
 
 ## Build And Verification
 
@@ -44,5 +49,8 @@ current so the next agent can find the important edges quickly.
   weight.
 - If browser behavior changes, verify with the local server and Playwright or
   the in-app browser.
+- Streams require a terminal snapshot; cooperative Pause uses a server-issued
+  run token. Keep exports independent of native fitting and preserve PNG pixels
+  when optimizing rasterization.
 - Keep new docs concise. The point of this port is a small native-feeling
   Python project, not a migration archive.

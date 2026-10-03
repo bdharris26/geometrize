@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import io
 import json
 import socket
 import threading
@@ -11,7 +13,7 @@ from typing import cast
 from urllib.error import HTTPError
 
 import pytest
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from geometrize_py.images import image_to_data_url
 from geometrize_py.native import ImageSession, native_available
@@ -50,12 +52,12 @@ def test_index_supports_sample_without_required_file_input(server: GeometrizeSer
     assert "Working resolution" in html
     assert "Export resolution" in html
     assert 'id="seed" name="seed" type="number" min="0" max="2147483647" value="9001"' in html
-    assert 'id="max-size" name="max_size" type="range" min="64" max="2048" step="64" value="1024"' in html
-    assert 'id="export-size" name="export_size" type="range" min="64" max="4096" step="64" value="1024"' in html
+    assert 'id="max-size" name="max_size" type="range" min="32" max="2048" step="1" value="1024"' in html
+    assert 'id="export-size" name="export_size" type="range" min="32" max="4096" step="1" value="1024"' in html
     assert 'id="load-project-button"' in html
     assert 'id="save-project-button"' in html
-    assert 'id="max-size-number" type="number" min="64" max="2048" step="64" value="1024"' in html
-    assert 'id="export-size-number" type="number" min="64" max="4096" step="64" value="1024"' in html
+    assert 'id="max-size-number" type="number" min="32" max="2048" step="1" value="1024"' in html
+    assert 'id="export-size-number" type="number" min="32" max="4096" step="1" value="1024"' in html
     assert 'id="pause-button"' in html
     assert 'class="telemetry-console"' in html
     assert 'id="result-canvas"' in html
@@ -81,7 +83,7 @@ def test_run_endpoint_rejects_non_object_json(server: GeometrizeServer) -> None:
         urllib.request.urlopen(request, timeout=5)
     assert error.value.code == 400
     payload = json.loads(error.value.read().decode("utf-8"))
-    assert payload == {"error": "Expected a JSON object"}
+    assert payload == {"error": "Expected a JSON object", "code": "invalid_request"}
 
 
 def test_session_cache_expires_only_after_idle_deadline(server: GeometrizeServer) -> None:
@@ -228,7 +230,8 @@ def test_stream_rejects_concurrent_use_of_same_session(server: GeometrizeServer)
             urllib.request.urlopen(request, timeout=5)
         assert error.value.code == HTTPStatus.CONFLICT
         assert json.loads(error.value.read().decode("utf-8")) == {
-            "error": "This render session is already active."
+            "error": "This render session is already active.",
+            "code": "session_busy",
         }
     finally:
         session.release_run()
@@ -240,6 +243,7 @@ def test_stream_rejects_concurrent_use_of_same_session(server: GeometrizeServer)
 @pytest.mark.skipif(not native_available(), reason="native backend is not built")
 def test_run_endpoint_returns_rendered_image(server: GeometrizeServer) -> None:
     image = Image.new("RGBA", (6, 6), (50, 100, 180, 255))
+    ImageDraw.Draw(image).rectangle((3, 0, 5, 5), fill=(230, 180, 50, 255))
     body = json.dumps(
         {
             "image": image_to_data_url(image),
@@ -277,6 +281,7 @@ def test_run_endpoint_returns_rendered_image(server: GeometrizeServer) -> None:
 @pytest.mark.skipif(not native_available(), reason="native backend is not built")
 def test_stream_endpoint_returns_progress_events(server: GeometrizeServer) -> None:
     image = Image.new("RGBA", (6, 6), (80, 120, 40, 255))
+    ImageDraw.Draw(image).rectangle((3, 0, 5, 5), fill=(230, 180, 50, 255))
     events = _post_stream(
         server,
         {
@@ -298,7 +303,9 @@ def test_stream_endpoint_returns_progress_events(server: GeometrizeServer) -> No
     assert any(event["event"] == "step" for event in events)
     assert events[0]["width"] == 6
     assert events[-1]["attempts"] >= 2
-    assert events[-1]["export_width"] == 64
+    assert events[-1]["stop_reason"] == "target_reached"
+    assert events[-1]["batch_summary"]["added"] == 2
+    assert "svg" not in events[-1]  # Stream completion does not generate exports.
     assert events[-1]["preview"].startswith("data:image/png;base64,")
 
 
@@ -367,3 +374,177 @@ class _FakeClock:
 
 def _fake_session(width: int, height: int) -> ImageSession:
     return cast(ImageSession, SimpleNamespace(width=width, height=height, shapes=[]))
+
+
+def test_config_exposes_shared_contract_and_resource_budget(server: GeometrizeServer) -> None:
+    with urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/api/config") as response:
+        contract = json.load(response)
+    assert len(contract["shapes"]) == 9
+    assert contract["limits"]["export_size"] == {"min": 32, "max": 4096}
+    assert "image/tiff" not in contract["images"]["mime_types"]
+    assert contract["resources"]["worker_budget"] == server.work_budget.workers
+
+
+@pytest.mark.parametrize("body", [b'{"options":{"steps":Infinity}}', b'{"options":{"steps":NaN}}'])
+def test_nonfinite_json_is_a_structured_client_error(server: GeometrizeServer, body: bytes) -> None:
+    with pytest.raises(HTTPError) as error:
+        _post(server, "/api/run/stream", body=body)
+    assert error.value.code == 400
+    assert json.load(error.value)["code"] == "invalid_request"
+    assert server.work_budget.usage() == (0, 0)
+
+
+def test_invalid_image_is_a_client_error_and_releases_resources(server: GeometrizeServer) -> None:
+    with pytest.raises(HTTPError) as error:
+        _post(server, "/api/run/stream", {"image": "data:image/png;base64,bm90IGFuIGltYWdl"})
+    assert error.value.code == 400
+    assert json.load(error.value)["code"] == "invalid_image"
+    assert server.work_budget.usage() == (0, 0)
+
+
+def test_frozen_result_exports_at_new_size_without_fitting(server: GeometrizeServer, monkeypatch) -> None:
+    def unexpected_fit(*args, **kwargs):
+        raise AssertionError("Export must not create a native fitting session")
+
+    monkeypatch.setattr(ImageSession, "from_image", unexpected_fit)
+    scene = {"width": 12, "height": 8, "background": [30, 50, 70, 255], "shapes": []}
+    first = _post(server, "/api/export", {"result": scene, "export_size": 64})
+    second = _post(server, "/api/export", {"result": scene, "export_size": 128})
+    assert (first["export_width"], first["export_height"]) == (64, 43)
+    assert (second["export_width"], second["export_height"]) == (128, 85)
+    assert _png_size(second["preview"]) == (128, 85)
+    assert not server.sessions
+    assert server.work_budget.usage() == (0, 0)
+
+
+def test_export_cache_avoids_repeated_rasterization(server: GeometrizeServer, monkeypatch) -> None:
+    from geometrize_py import web
+
+    original = web.build_export
+    calls = []
+
+    def counted(scene, longest):
+        calls.append(longest)
+        return original(scene, longest)
+
+    monkeypatch.setattr(web, "build_export", counted)
+    payload = {"result": {"width": 4, "height": 4, "background": [20, 40, 60, 255], "shapes": []}, "export_size": 64}
+    first = _post(server, "/api/export", payload)
+    again = _post(server, "/api/export", payload)
+    payload["result"]["background"] = [60, 40, 20, 255]
+    changed = _post(server, "/api/export", payload)
+    assert first["preview"] == again["preview"] != changed["preview"]
+    assert calls == [64, 64]
+
+
+def test_export_memory_budget_applies_and_recovers(server: GeometrizeServer) -> None:
+    from geometrize_py.resources import WorkBudget
+
+    server.work_budget = WorkBudget(2, 3 * 1024 * 1024)
+    payload = {"result": {"width": 4, "height": 4, "background": [20, 40, 60, 255], "shapes": []}, "export_size": 4096}
+    with pytest.raises(HTTPError) as error:
+        _post(server, "/api/export", payload)
+    assert json.load(error.value)["code"] == "memory_limit"
+    assert server.work_budget.usage() == (0, 0)
+    payload["export_size"] = 32
+    assert _post(server, "/api/export", payload)["export_width"] == 32
+    assert server.work_budget.usage() == (0, 0)
+
+
+def test_active_session_is_pinned_until_finish(server: GeometrizeServer) -> None:
+    clock = _FakeClock()
+    server._clock = clock
+    server.session_idle_seconds = 1
+    server.max_sessions = 1
+    active = _fake_session(16, 16)
+    server.activate_session("active", active, "current-run")
+    clock.advance(2)
+    server.service_actions()
+    server.store_session("idle", _fake_session(16, 16))
+    assert server.get_session("active") is active
+    assert server.get_session("idle") is None
+    server.finish_session("active", active)
+    clock.advance(2)
+    server.service_actions()
+    assert server.get_session("active") is None
+
+
+@pytest.mark.skipif(not native_available(), reason="native backend is not built")
+def test_pause_waits_for_current_shape_and_reconciles_terminal_snapshot(server: GeometrizeServer) -> None:
+    entered = threading.Event()
+    finish_step = threading.Event()
+
+    class ControlledNative:
+        initial_score = 0.5
+        score = 0.5
+        attempts = 0
+
+        def step(self, options):
+            entered.set()
+            assert finish_step.wait(5)
+            self.attempts += 1
+            self.score = 0.25
+            return {
+                "attempt": self.attempts,
+                "shapes": [
+                    {
+                        "type": "rectangle",
+                        "score": self.score,
+                        "color": {"r": 20, "g": 40, "b": 60, "a": 255},
+                        "data": {"x1": 0, "y1": 0, "x2": 4, "y2": 4},
+                    }
+                ],
+            }
+
+        def current_rgba(self):
+            return bytes((20, 40, 60, 255)) * 64
+
+    session = ImageSession(8, 8, (20, 40, 60, 255), ControlledNative())
+    server.store_session("controlled", session)
+    body = json.dumps({"session_id": "controlled", "run_id": "ignored-client-id", "options": {"steps": 3}}).encode()
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{server.server_port}/api/run/stream",
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=5) as response:
+            start = json.loads(response.readline())
+            assert start["run_id"] != "ignored-client-id"
+            assert entered.wait(5)
+            with pytest.raises(HTTPError) as error:
+                _post(server, "/api/sessions/controlled/pause", {"run_id": "old-run"})
+            assert json.load(error.value)["code"] == "stale_run"
+            ack = _post(server, "/api/sessions/controlled/pause", {"run_id": start["run_id"]})
+            assert ack["event"] == "pause_requested"
+            finish_step.set()
+            events = [json.loads(line) for line in response]
+        terminal = events[-1]
+        assert terminal["event"] == "paused"
+        assert terminal["stop_reason"] == "paused"
+        assert terminal["attempts"] == terminal["shape_count"] == 1
+        assert terminal["batch_summary"]["added"] == 1
+        assert len(terminal["shapes"]) == 1
+        assert server.work_budget.usage() == (0, 0)
+        snapshot = _post(server, "/api/sessions/controlled/snapshot", {})
+        assert snapshot["shape_count"] == 1
+        assert "preview" not in snapshot
+    finally:
+        finish_step.set()
+
+
+def _post(server: GeometrizeServer, path: str, payload: dict | None = None, *, body: bytes | None = None) -> dict:
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{server.server_port}{path}",
+        data=body if body is not None else json.dumps(payload or {}).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=5) as response:
+        return json.load(response)
+
+
+def _png_size(data_url: str) -> tuple[int, int]:
+    with Image.open(io.BytesIO(base64.b64decode(data_url.split(",", 1)[1]))) as image:
+        return image.size

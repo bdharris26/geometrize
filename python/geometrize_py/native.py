@@ -207,6 +207,7 @@ class ImageSession:
             "alpha": options.alpha,
             "seed": options.seed,
             "max_threads": options.actual_max_threads,
+            "effective_threads": options.actual_max_threads,
             "stagnation_limit": options.stagnation_limit,
             "start_shape_count": accepted_at_start,
             "start_attempts": attempts_at_start,

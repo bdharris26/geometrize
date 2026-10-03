@@ -79,6 +79,8 @@ PROJECT_VERSION = 1
 PROJECT_MAX_BYTES = MAX_REQUEST_BYTES
 PROJECT_MAX_SHAPES = 100000
 PROJECT_MAX_BATCHES = 10000
+PROJECT_MAX_COORDINATE = 1e9
+PROJECT_MAX_POINTS = 10000
 RASTER_MIME_TYPES = ("image/png", "image/jpeg", "image/webp", "image/bmp", "image/gif")
 RASTER_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif")
 
@@ -117,6 +119,8 @@ def app_contract() -> dict[str, Any]:
             "max_bytes": PROJECT_MAX_BYTES,
             "max_shapes": PROJECT_MAX_SHAPES,
             "max_batches": PROJECT_MAX_BATCHES,
+            "max_coordinate": PROJECT_MAX_COORDINATE,
+            "max_points": PROJECT_MAX_POINTS,
         },
         "presets": PRESETS,
     }

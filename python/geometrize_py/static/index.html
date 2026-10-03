@@ -87,7 +87,7 @@
               <label title="Random refinements tried for each candidate primitive.">Mutations per candidate <input id="mutations" name="mutations" type="number" min="1" max="2048" value="128"></label>
             </div>
             <div class="field two">
-              <label title="0 uses the server's available worker budget.">Worker limit <input id="max-threads" name="max_threads" type="number" min="0" max="128" value="0"></label>
+              <label title="0 uses the server's default share of its worker budget; an explicit limit is capped by the server budget.">Worker limit <input id="max-threads" name="max_threads" type="number" min="0" max="128" value="0"></label>
               <label title="Stop after this many unsuccessful attempts; 0 disables this limit.">Stagnation limit <input id="stagnation-limit" name="stagnation_limit" type="number" min="0" max="4096" value="128"></label>
             </div>
           </div>
@@ -133,7 +133,7 @@
         <div class="run-strip">
           <span id="telemetry-state">Idle</span>
           <span id="telemetry-acceptance" title="Attempts are optimizer steps. Some attempts can test candidates without accepting a new shape.">0 accepted / 0 attempts</span>
-          <span id="telemetry-improvement">Score --</span>
+          <span id="telemetry-improvement" title="Error is measured by the fitting engine at working resolution. PNG and SVG use different drawing rules, so their pixels can differ.">Error -- · lower is better</span>
           <span id="telemetry-duration">--</span>
         </div>
         <div id="batch-history" class="batch-history" aria-label="Completed shape batches"></div>

@@ -24,15 +24,26 @@ py -3 -m venv .venv
 .\.venv\Scripts\python.exe -m geometrize_py serve --host 127.0.0.1 --port 7860
 ```
 
-Open `http://127.0.0.1:7860`, choose an image, tune the shape settings, and add
-a batch of primitives. The UI draws accepted shapes into a live preview, can
-pause or continue the same evolving result with different shape settings, charts
-the convergence and score impact, and exports PNG, SVG, and JSON shape data.
-Working resolution is kept separate from export resolution so sharper output
-does not require a much larger native optimizer session. Project JSON files can
-restore the source, result, settings, and run history after restarting the app.
-Export resolution is capped at 4096px to keep PNG/SVG generation within a
-predictable memory budget.
+Open `http://127.0.0.1:7860`, choose a PNG, JPEG, WebP, BMP, or GIF, and choose
+Quick sketch, Balanced, or Fine detail. Set the number of shapes to add, then
+start a render. Advanced controls expose all nine primitives, seed, candidates,
+mutations, and a per-batch CPU limit. Changes apply to the next batch; New render
+clears the result so Run starts a fresh fit with the current settings.
+
+The source and live result share zoom and pan controls. Pause finishes the
+current fitting step and confirms the final counts before Continue becomes
+available. The error chart shows the initial baseline and recent improvements;
+lower error is better. A batch also stops when the source is already matched,
+improvement stalls, or its attempt limit is reached.
+
+PNG and SVG exports are generated on demand from the current result. Changing
+export size does not add shapes or rerun fitting. Working resolution and display
+zoom are independent of export size, which is capped at 4096px. PNG rendering
+preserves Pillow's rasterization; SVG and the live canvas use continuous geometry
+and antialiasing, so edge pixels can differ. The fitting engine uses its own
+scanline and blending rules for the error score. Project JSON restores the
+source, result, settings, and history, and allows exporting the saved result.
+Continuing after reopening a project starts a new native fit.
 
 ## Command Line
 
@@ -46,7 +57,12 @@ predictable memory budget.
 ```
 
 Use `.\.venv\Scripts\python.exe -m geometrize_py doctor` to confirm that the
-native backend can be imported.
+native backend can be imported, or add `--json` for structured diagnostics.
+`serve --workers 8 --active-memory-mb 512` sets the shared CPU and estimated
+active-memory budgets for fitting and exports. Reservations are fixed for each
+batch; requests beyond available capacity return a retryable busy response.
+Session and encoded-export caches have separate bounds. The active-memory budget
+is a conservative admission estimate, not an operating-system memory limit.
 
 ## Project Layout
 
@@ -57,8 +73,8 @@ native backend can be imported.
 - `lib/geometrize/` is the upstream core engine submodule.
 - `tests/python/` covers the native wrapper, CLI, rendering, exports, and HTTP
   API.
-- `tests/browser/` exercises the real Sample, Continue, download, and project
-  round-trip workflow in Chromium.
+- `tests/browser/` exercises pause/continue, current-size downloads, project
+  round trips, stream recovery, and geometry comparisons in Chromium.
 - `screenshots/` keeps example inputs and historical output samples.
 
 ## Development
