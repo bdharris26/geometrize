@@ -10,6 +10,7 @@ import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from http import HTTPStatus
+from http.client import HTTPResponse
 from types import SimpleNamespace
 from typing import cast
 from urllib.error import HTTPError
@@ -17,6 +18,7 @@ from urllib.error import HTTPError
 import pytest
 from PIL import Image, ImageDraw
 
+from geometrize_py.contracts import MAX_REQUEST_BYTES
 from geometrize_py.images import image_to_data_url
 from geometrize_py.native import Focus, ImageSession, native_available
 from geometrize_py.web import GeometrizeRequestHandler, GeometrizeServer, _estimate_session_bytes, _safe_static_path
@@ -439,6 +441,190 @@ def test_request_admission_happens_before_body_read(server: GeometrizeServer, mo
     assert json.load(error.value)["code"] == "memory_limit"
     assert not read_started.is_set()
     assert server.work_budget.usage() == (0, 0)
+
+
+@pytest.fixture
+def rejection_probe() -> Iterator[SimpleNamespace]:
+    from geometrize_py.resources import WorkBudget
+
+    probe = SimpleNamespace(
+        response_sent=threading.Event(),
+        finish_response=threading.Event(),
+        connection_closed=threading.Event(),
+        parsed_body=threading.Event(),
+        read_sizes=[],
+        bytes_read=0,
+        read_before_response=False,
+        eof=False,
+        timed_out=False,
+    )
+
+    class ObservedInput:
+        def __init__(self, source):
+            self.source = source
+
+        def read1(self, size):
+            probe.read_before_response |= not probe.response_sent.is_set()
+            probe.read_sizes.append(size)
+            try:
+                chunk = self.source.read1(size)
+            except TimeoutError:
+                probe.timed_out = True
+                raise
+            probe.bytes_read += len(chunk)
+            probe.eof |= not chunk
+            return chunk
+
+        def __getattr__(self, name):
+            return getattr(self.source, name)
+
+    class DelayedCloseServer(GeometrizeServer):
+        def shutdown_request(self, request):
+            try:
+                super().shutdown_request(request)
+            finally:
+                probe.connection_closed.set()
+
+    class DelayedCloseHandler(GeometrizeRequestHandler):
+        def setup(self):
+            super().setup()
+            self.rfile = ObservedInput(self.rfile)
+
+        def _send_json(self, payload, status=HTTPStatus.OK, **kwargs):
+            super()._send_json(payload, status, **kwargs)
+            probe.response_sent.set()
+            assert probe.finish_response.wait(5)
+
+        def _read_json(self):
+            probe.parsed_body.set()
+            return super()._read_json()
+
+    server = DelayedCloseServer(("127.0.0.1", 0), DelayedCloseHandler)
+    server.work_budget = WorkBudget(1, 32 * 1024)
+    probe.server = server
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
+    thread.start()
+    try:
+        yield probe
+        assert not probe.parsed_body.is_set()
+        assert not probe.read_before_response
+        assert all(0 < size <= 4 * 1024 for size in probe.read_sizes)
+        assert server.work_budget.usage() == (0, 0)
+    finally:
+        probe.finish_response.set()
+        server.shutdown()
+        server.server_close()
+        thread.join(5)
+
+
+def _send_rejected_headers(client: socket.socket, length: int | str, body: bytes = b"") -> None:
+    headers = (
+        "POST /api/run HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n"
+        f"Content-Length: {length}\r\nConnection: close\r\n\r\n"
+    )
+    client.sendall(headers.encode("ascii") + body)
+
+
+def _assert_rejection_response(
+    client: socket.socket, status: HTTPStatus = HTTPStatus.BAD_REQUEST, code: str = "memory_limit"
+) -> None:
+    with HTTPResponse(client) as response:
+        response.begin()
+        assert response.status == status
+        assert response.getheader("Connection") == "close"
+        assert json.load(response)["code"] == code
+
+
+@pytest.mark.parametrize("delivery", ["already_sent", "late", "eof"])
+def test_early_rejection_delivers_response_after_close(rejection_probe, delivery: str) -> None:
+    probe = rejection_probe
+    with socket.create_connection(probe.server.server_address, timeout=5) as client:
+        _send_rejected_headers(client, 2, b"{}" if delivery == "already_sent" else b"")
+        assert probe.response_sent.wait(5)
+        if delivery == "late":
+            client.sendall(b"{}")
+        elif delivery == "eof":
+            client.shutdown(socket.SHUT_WR)
+        probe.finish_response.set()
+        assert probe.connection_closed.wait(5)
+        _assert_rejection_response(client)
+        assert probe.bytes_read == (0 if delivery == "eof" else 2)
+        assert probe.eof == (delivery == "eof")
+
+
+@pytest.mark.parametrize("delivery", ["silent", "slow"])
+def test_early_rejection_cleanup_has_an_absolute_deadline(rejection_probe, delivery: str) -> None:
+    probe = rejection_probe
+    if delivery == "silent":
+        probe.server.request_timeout_seconds = 0.1
+    stopped = threading.Event()
+    with socket.create_connection(probe.server.server_address, timeout=5) as client:
+        _send_rejected_headers(client, 64 * 1024)
+        assert probe.response_sent.wait(5)
+        # The complete error arrives even when no request body has arrived yet.
+        _assert_rejection_response(client)
+
+        def trickle_body():
+            while not stopped.is_set():
+                try:
+                    client.sendall(b"x")
+                except OSError:
+                    return  # A closed server connection ends this test sender.
+                stopped.wait(0.02)
+
+        sender = threading.Thread(target=trickle_body, daemon=True)
+        try:
+            if delivery == "slow":
+                sender.start()
+            probe.finish_response.set()
+            assert probe.connection_closed.wait(1), "Body trickling must not extend the close deadline"
+            if delivery == "slow":
+                assert probe.bytes_read > 1
+            else:
+                assert probe.bytes_read == 0
+                assert probe.timed_out
+        finally:
+            stopped.set()
+            if sender.ident is not None:
+                sender.join(5)
+
+
+def test_early_rejection_cleanup_stops_at_byte_limit(rejection_probe, monkeypatch) -> None:
+    from geometrize_py import web
+
+    probe = rejection_probe
+    monkeypatch.setattr(web, "REJECTED_BODY_DRAIN_SECONDS", 3.0)
+    with socket.create_connection(probe.server.server_address, timeout=5) as client:
+        _send_rejected_headers(client, 64 * 1024 + 1, b"x" * (64 * 1024))
+        assert probe.response_sent.wait(5)
+        probe.finish_response.set()
+        assert probe.connection_closed.wait(1), "Cleanup must stop without awaiting the remaining byte"
+        _assert_rejection_response(client)
+        assert probe.bytes_read == 64 * 1024
+
+
+@pytest.mark.parametrize("body", [b"", b"ignored"])
+@pytest.mark.parametrize(
+    ("length", "status", "code"),
+    [
+        ("invalid", HTTPStatus.BAD_REQUEST, "invalid_request"),
+        ("-1", HTTPStatus.BAD_REQUEST, "invalid_request"),
+        (str(MAX_REQUEST_BYTES + 1), HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "request_too_large"),
+    ],
+)
+def test_early_rejection_with_untrusted_length_has_bounded_cleanup(
+    rejection_probe, length: str, status: HTTPStatus, code: str, body: bytes
+) -> None:
+    probe = rejection_probe
+    probe.server.request_timeout_seconds = 0.1
+    with socket.create_connection(probe.server.server_address, timeout=5) as client:
+        _send_rejected_headers(client, length, body)
+        assert probe.response_sent.wait(5)
+        probe.finish_response.set()
+        assert probe.connection_closed.wait(1)
+        _assert_rejection_response(client, status, code)
+        assert probe.bytes_read == len(body)
+        assert probe.timed_out
 
 
 def test_json_expansion_is_admitted_before_decode(server: GeometrizeServer) -> None:

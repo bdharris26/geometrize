@@ -5,6 +5,7 @@ import json
 import logging
 import mimetypes
 import re
+import socket
 import threading
 import time
 import uuid
@@ -44,6 +45,9 @@ DEFAULT_SESSION_MEMORY_BYTES = 512 * 1024 * 1024
 MAX_SESSION_ACTION_BYTES = 16 * 1024
 MAX_PAUSE_BODY_BYTES = 4 * 1024
 MAX_FOCUS_BODY_BYTES = 4 * 1024
+REJECTED_BODY_DRAIN_BYTES = 64 * 1024
+REJECTED_BODY_DRAIN_CHUNK_BYTES = 4 * 1024
+REJECTED_BODY_DRAIN_SECONDS = 0.25
 REQUEST_MEMORY_FLOOR = 64 * 1024
 JSON_EXPANSION_FACTOR = 32
 ESTIMATED_BYTES_PER_PIXEL = 16
@@ -229,6 +233,8 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
         self._request_image_bytes = 0
         self._request_body_memory = 0
         has_slot = False
+        length: int | None = None
+        body_read_started = False
         try:
             try:
                 length = self._content_length()
@@ -247,6 +253,7 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
                         )
                 else:
                     self._request_lease = self._reserve_work(0, _request_memory(path, length, 0, parsed=False))
+                body_read_started = True
                 payload = self._read_json()
                 if self._request_lease is not None:
                     self._request_body_memory = _request_memory(path, length, self._request_image_bytes, parsed=True)
@@ -256,7 +263,11 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
                 self._send_error(APIError("request_timeout", "Request body timed out", HTTPStatus.REQUEST_TIMEOUT))
                 return
             except (APIError, ValueError) as exc:
-                self._send_error(exc if isinstance(exc, APIError) else APIError("invalid_request", str(exc)))
+                error = exc if isinstance(exc, APIError) else APIError("invalid_request", str(exc))
+                if body_read_started:
+                    self._send_error(error)
+                else:
+                    self._reject_before_body(error, length)
                 return
             except ConnectionError:
                 return
@@ -646,11 +657,48 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
         except (ConnectionError, TimeoutError):
             pass
 
-    def _send_json(self, payload: dict[str, Any], status: HTTPStatus = HTTPStatus.OK) -> None:
+    def _reject_before_body(self, error: APIError, unread_length: int | None) -> None:
+        """Reply before discarding bounded raw input for a graceful TCP close."""
+        self.close_connection = True
+        try:
+            self._send_json(error.payload(), error.status, close=True)
+            self.wfile.flush()
+            self.connection.shutdown(socket.SHUT_WR)
+            # Immediate close with unread/arriving bytes can reset TCP and erase
+            # the response on Windows. This is teardown, never JSON admission:
+            # no body is retained, decoded, or passed to an application action.
+            # Invalid/oversized Content-Length has no trusted body length, so
+            # the same byte cap and deadline bound its fallback cleanup.
+            remaining = REJECTED_BODY_DRAIN_BYTES
+            if unread_length is not None:
+                remaining = min(unread_length, remaining)
+            deadline = time.monotonic() + min(
+                REJECTED_BODY_DRAIN_SECONDS, self.geometrize_server.request_timeout_seconds
+            )
+            read = getattr(self.rfile, "read1", self.rfile.read)
+            while remaining > 0:
+                timeout = deadline - time.monotonic()
+                if timeout <= 0:
+                    break
+                self.connection.settimeout(timeout)
+                chunk = read(min(remaining, REJECTED_BODY_DRAIN_CHUNK_BYTES))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+        except OSError:
+            # Peer disconnect or the drain deadline ends cleanup; the handler
+            # still closes the connection and releases any request lease.
+            pass
+
+    def _send_json(
+        self, payload: dict[str, Any], status: HTTPStatus = HTTPStatus.OK, *, close: bool = False
+    ) -> None:
         body = json.dumps(payload, allow_nan=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        if close:
+            self.send_header("Connection", "close")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         self.wfile.write(body)
