@@ -460,6 +460,104 @@ def test_failed_recovery_saves_only_the_last_confirmed_scene(server_url: str, tm
         browser.close()
 
 
+def test_preview_only_project_survives_save_and_reopen(server_url: str, tmp_path: Path) -> None:
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = browser.new_page()
+        page.goto(server_url, wait_until="networkidle")
+        _run_sample(page, shapes=2)
+        source_path = tmp_path / "complete.geometrize-project.json"
+        with page.expect_download() as download_info:
+            page.get_by_role("button", name="Save project", exact=True).click()
+        download_info.value.save_as(source_path)
+        preview_only = json.loads(source_path.read_text(encoding="utf-8"))
+        preview_only["result"]["background"] = None
+        preview_only_path = tmp_path / "preview-only.geometrize-project.json"
+        preview_only_path.write_text(json.dumps(preview_only), encoding="utf-8")
+
+        page.reload(wait_until="networkidle")
+        page.locator("#project-input").set_input_files(preview_only_path)
+        expect(page.locator("#status")).to_have_text("Project loaded — Run starts a new render")
+        expect(page.locator("#result-preview")).to_be_visible()
+        expect(page.locator("#download-png")).to_have_attribute("aria-disabled", "true")
+        assert page.locator("#result-preview").get_attribute("src") == preview_only["result"]["preview_data_url"]
+
+        saved_path = tmp_path / "preview-only-resaved.geometrize-project.json"
+        with page.expect_download() as download_info:
+            page.get_by_role("button", name="Save project", exact=True).click()
+        download_info.value.save_as(saved_path)
+        saved = json.loads(saved_path.read_text(encoding="utf-8"))
+        for key in ("preview_data_url", "width", "height", "render_width", "render_height"):
+            assert saved["result"][key] == preview_only["result"][key]
+        assert [shape["data"] for shape in saved["result"]["shapes"]] == [
+            shape["data"] for shape in preview_only["result"]["shapes"]
+        ]
+        assert saved["result"]["background"] is None
+        assert saved["telemetry"] == preview_only["telemetry"]
+
+        page.reload(wait_until="networkidle")
+        page.locator("#project-input").set_input_files(saved_path)
+        expect(page.locator("#status")).to_have_text("Project loaded — Run starts a new render")
+        expect(page.locator("#result-preview")).to_be_visible()
+        assert page.locator("#result-preview").get_attribute("src") == preview_only["result"]["preview_data_url"]
+        browser.close()
+
+
+def test_project_geometry_uses_shared_scene_limits(server_url: str) -> None:
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = browser.new_page()
+        page.goto(server_url, wait_until="networkidle")
+        page.get_by_role("button", name="Sample", exact=True).click()
+        contract = page.request.get(f"{server_url}/api/config").json()
+        source = page.locator("#source-preview").get_attribute("src")
+        assert source
+        scene = {
+            "width": 8, "height": 8,
+            "background": {"r": 255, "g": 255, "b": 255, "a": 255},
+            "shapes": [{
+                "type": "circle", "color": {"r": 0, "g": 0, "b": 0, "a": 255},
+                "data": {"x": 128, "y": 0, "r": 1}, "score": 0.5,
+            }],
+        }
+        project = {
+            "format": contract["project"]["format"], "version": contract["project"]["version"],
+            "source": {"name": "Sample", "data_url": source},
+            "options": contract["defaults"],
+            "result": {**scene, "render_width": 8, "render_height": 8, "preview_data_url": None},
+            "telemetry": {"attempts": 1, "duration_ms": 0, "initial_score": 0.9, "batches": []},
+        }
+
+        def client_error() -> str | None:
+            return page.evaluate("""async ({project, contract}) => {
+              const {validateProject} = await import('/static/project.js');
+              try { validateProject(project, contract); return null; }
+              catch (error) { return error.message; }
+            }""", {"project": project, "contract": contract})
+
+        assert client_error() is None
+        assert page.request.post(f"{server_url}/api/export", data={"result": scene, "export_size": 64}).ok
+        project["result"]["shapes"][0]["data"]["x"] = 129
+        scene["shapes"][0]["data"]["x"] = 129
+        assert "shape 1 x must be a finite number" in (client_error() or "")
+        assert page.request.post(f"{server_url}/api/export", data={"result": scene, "export_size": 64}).status == 400
+
+        project["result"]["shapes"] = [
+            {"type": "polyline", "color": {"r": 0, "g": 0, "b": 0, "a": 255},
+             "data": {"points": [[0, 0], [1, 1]]}},
+            {"type": "polyline", "color": {"r": 0, "g": 0, "b": 0, "a": 255},
+             "data": {"points": [[1, 1], [2, 2]]}},
+        ]
+        narrow_contract = json.loads(json.dumps(contract))
+        narrow_contract["project"]["max_total_points"] = 3
+        assert "cannot exceed 3 polyline points" in (page.evaluate("""async ({project, contract}) => {
+          const {validateProject} = await import('/static/project.js');
+          try { validateProject(project, contract); return null; }
+          catch (error) { return error.message; }
+        }""", {"project": project, "contract": narrow_contract}) or "")
+        browser.close()
+
+
 def _run_sample(page: Page, shapes: int) -> None:
     expect(page.locator("#native-state")).to_have_text("Core ready")
     page.get_by_role("button", name="Sample", exact=True).click()

@@ -19,9 +19,9 @@ function optionalDimension(value, label, contract) {
     integer(value, 1, contract.images.max_dimension, label);
 }
 
-function finite(value, label, contract) {
+function finite(value, label, contract, limit = contract.project.max_coordinate) {
   if (typeof value !== "number" || !Number.isFinite(value) ||
-      Math.abs(value) > contract.project.max_coordinate) {
+      Math.abs(value) > limit) {
     throw new Error(`Project ${label} must be a finite number`);
   }
   return value;
@@ -86,7 +86,7 @@ export function readFileAsDataUrl(file) {
   });
 }
 
-function shape(raw, index, contract) {
+function shape(raw, index, contract, geometryLimit) {
   const item = object(raw, `shape ${index + 1}`);
   const definition = contract.shapes.find((entry) => entry.type === item.type);
   if (!definition) throw new Error(`Shape ${index + 1} has an unsupported type`);
@@ -101,13 +101,14 @@ function shape(raw, index, contract) {
         throw new Error(`Shape ${index + 1} has an invalid polyline point`);
       }
       return [
-        finite(point[0], `shape ${index + 1} point x`, contract),
-        finite(point[1], `shape ${index + 1} point y`, contract)
+        finite(point[0], `shape ${index + 1} point x`, contract, geometryLimit),
+        finite(point[1], `shape ${index + 1} point y`, contract, geometryLimit)
       ];
     });
   } else {
     definition.data_fields.forEach((field) => {
-      data[field] = finite(input[field], `shape ${index + 1} ${field}`, contract);
+      data[field] = finite(input[field], `shape ${index + 1} ${field}`, contract,
+        field === "angle" ? contract.project.max_coordinate : geometryLimit);
     });
   }
   definition.radius_fields.forEach((field) => {
@@ -177,6 +178,24 @@ export function validateProject(raw, contract) {
   if (!Array.isArray(result.shapes) || result.shapes.length > contract.project.max_shapes) {
     throw new Error(`A project can contain at most ${contract.project.max_shapes} shapes`);
   }
+  let totalPoints = 0;
+  result.shapes.forEach((item, index) => {
+    if (item?.type !== "polyline") return;
+    const points = item.data?.points;
+    if (!Array.isArray(points) || points.length > contract.project.max_points) {
+      throw new Error(`Shape ${index + 1} has invalid polyline points`);
+    }
+    totalPoints += points.length;
+    if (totalPoints > contract.project.max_total_points) {
+      throw new Error(`Project cannot exceed ${contract.project.max_total_points} polyline points`);
+    }
+  });
+  const width = optionalDimension(result.width, "result width", contract);
+  const height = optionalDimension(result.height, "result height", contract);
+  const renderWidth = optionalDimension(result.render_width, "render width", contract);
+  const renderHeight = optionalDimension(result.render_height, "render height", contract);
+  const longest = Math.max(renderWidth || width, renderHeight || height);
+  const geometryLimit = longest ? contract.project.max_geometry_factor * longest : contract.project.max_coordinate;
   return {
     source: {
       name: typeof source.name === "string" && source.name.length <= 512 && source.name ? source.name : "Source image",
@@ -187,12 +206,12 @@ export function validateProject(raw, contract) {
     options: options(project.options, contract),
     result: {
       preview_data_url: result.preview_data_url == null ? "" : rasterDataUrl(result.preview_data_url, "result preview", contract),
-      width: optionalDimension(result.width, "result width", contract),
-      height: optionalDimension(result.height, "result height", contract),
-      render_width: optionalDimension(result.render_width, "render width", contract),
-      render_height: optionalDimension(result.render_height, "render height", contract),
+      width,
+      height,
+      render_width: renderWidth,
+      render_height: renderHeight,
       background: result.background == null ? null : color(result.background, "result background"),
-      shapes: result.shapes.map((item, index) => shape(item, index, contract))
+      shapes: result.shapes.map((item, index) => shape(item, index, contract, geometryLimit))
     },
     telemetry: {
       attempts: integer(telemetry.attempts, 0, Number.MAX_SAFE_INTEGER, "telemetry attempts"),

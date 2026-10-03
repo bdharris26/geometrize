@@ -50,6 +50,7 @@ let sessionId = "";
 let phase = "idle";
 let stableResult = null;
 let workingResult = null;
+let loadedPreviewOnlyResult = null;
 let sceneVersion = 0;
 let contentVersion = 0;
 let exportVersion = 0;
@@ -182,6 +183,7 @@ function clearResult() {
   activeRunId = "";
   stableResult = null;
   workingResult = null;
+  loadedPreviewOnlyResult = null;
   lastDurationMs = 0;
   exportCache.clear();
   pendingExports.clear();
@@ -319,6 +321,7 @@ function acceptSnapshot(event, eventName) {
     revision: event.revision || 0
   };
   workingResult = null;
+  loadedPreviewOnlyResult = null;
   sceneVersion += 1;
   exportVersion += 1;
   lastDurationMs = Math.max(0, performance.now() - runStartedAt);
@@ -482,6 +485,7 @@ async function pauseRun() {
 
 function createProject() {
   const result = stableResult;
+  const previewOnly = result ? null : loadedPreviewOnlyResult;
   return {
     format: contract.project.format,
     version: contract.project.version,
@@ -492,13 +496,17 @@ function createProject() {
     },
     options: currentOptions(),
     result: {
-      preview_data_url: result ? preview.currentPreview() || null : null,
-      width: result?.width || null, height: result?.height || null,
-      render_width: result?.width || null, render_height: result?.height || null,
-      background: result?.background || null, shapes: result?.shapes || []
+      preview_data_url: previewOnly?.preview_data_url || (result ? preview.currentPreview() || null : null),
+      width: result?.width || previewOnly?.width || null,
+      height: result?.height || previewOnly?.height || null,
+      render_width: result?.width || previewOnly?.render_width || null,
+      render_height: result?.height || previewOnly?.render_height || null,
+      background: result?.background || previewOnly?.background || null,
+      shapes: result?.shapes || previewOnly?.shapes || []
     },
     telemetry: {
-      attempts: result?.attempts || 0, duration_ms: Math.round(lastDurationMs),
+      attempts: result?.attempts ?? (previewOnly ? telemetry.attempts : 0),
+      duration_ms: Math.round(lastDurationMs),
       initial_score: telemetry.initialScore, batches: telemetry.batches
     }
   };
@@ -538,9 +546,12 @@ function applyProject(project) {
     preview.rebuild(width, height, result.background, result.shapes);
     ui.resultMeta.textContent = `${width} x ${height}`;
     sceneVersion += 1;
-  } else if (width && height && result.preview_data_url) {
-    preview.showImage(result.preview_data_url, width, height);
-    ui.resultMeta.textContent = `${width} x ${height}`;
+  } else {
+    loadedPreviewOnlyResult = result;
+    if (width && height && result.preview_data_url) {
+      preview.showImage(result.preview_data_url, width, height);
+      ui.resultMeta.textContent = `${width} x ${height}`;
+    }
   }
   telemetry.replace(result.shapes, project.telemetry.attempts, project.telemetry.initial_score);
   telemetry.batches = project.telemetry.batches;
