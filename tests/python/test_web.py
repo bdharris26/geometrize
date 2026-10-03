@@ -18,7 +18,7 @@ import pytest
 from PIL import Image, ImageDraw
 
 from geometrize_py.images import image_to_data_url
-from geometrize_py.native import ImageSession, native_available
+from geometrize_py.native import Focus, ImageSession, native_available
 from geometrize_py.web import GeometrizeRequestHandler, GeometrizeServer, _estimate_session_bytes, _safe_static_path
 
 
@@ -586,6 +586,169 @@ def test_pause_can_cancel_when_workers_and_memory_are_exhausted(server: Geometri
         server.finish_session("controlled", session)
         server.work_budget.release(fitting_lease)
     assert server.work_budget.usage() == (0, 0)
+
+
+def test_focus_control_remains_available_at_exhausted_capacity(server: GeometrizeServer) -> None:
+    from geometrize_py.resources import WorkBudget
+
+    server.work_budget = WorkBudget(1, 1024 * 1024)
+    fitting_lease = server.work_budget.try_reserve(1, server.work_budget.memory_bytes)
+    assert fitting_lease is not None
+    assert server.try_acquire_render_slot()
+    assert server.try_acquire_render_slot()
+    session = ImageSession(1, 1, (0, 0, 0, 255), SimpleNamespace(attempts=0))
+    assert session.try_acquire_run()
+    server.activate_session("controlled", session, "active-run")
+    try:
+        ack = _post(server, "/api/sessions/controlled/focus", {"run_id": "active-run", "focus": {"x": 0, "y": 1}})
+        expected = Focus(0, 1).to_dict()
+        assert ack == {"focus": expected, "applies": "next_attempt"}
+        assert session.focus.to_dict() == expected
+        assert session.attempts == session.revision == len(session.shapes) == 0
+        assert not session._cancel_requested.is_set()
+        assert server.work_budget.usage() == (1, 1024 * 1024)
+
+        ack = _post(server, "/api/sessions/controlled/focus", {"run_id": "active-run", "focus": None})
+        assert ack == {"focus": None, "applies": "next_attempt"}
+        assert session.focus is None
+        with pytest.raises(HTTPError) as error:
+            _post(server, "/api/sessions/controlled/focus", {"run_id": "active-run", "focus": None,
+                                                           "padding": "x" * 4096})
+        assert error.value.code == HTTPStatus.REQUEST_ENTITY_TOO_LARGE
+    finally:
+        session.release_run()
+        server.finish_session("controlled", session)
+        server.work_budget.release(fitting_lease)
+        server.release_render_slot()
+        server.release_render_slot()
+    assert server.work_budget.usage() == (0, 0)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [{"run_id": "active-run"}, {"run_id": "active-run", "focus": None, "shapes": []},
+     {"run_id": "active-run", "focus": False}, {"run_id": "active-run", "focus": []},
+     {"run_id": "active-run", "focus": {"x": True, "y": 0}},
+     {"run_id": "active-run", "focus": {"x": 0, "y": 0, "radius": 0}},
+     {"run_id": "active-run", "focus": {"x": 0, "y": 0, "strength": "0.75"}}],
+)
+def test_focus_control_rejects_invalid_small_messages(server: GeometrizeServer, payload: dict) -> None:
+    session = ImageSession(1, 1, (0, 0, 0, 255), SimpleNamespace(attempts=0))
+    server.activate_session("controlled", session, "active-run")
+    with pytest.raises(HTTPError) as error:
+        _post(server, "/api/sessions/controlled/focus", payload)
+    assert error.value.code == HTTPStatus.BAD_REQUEST
+    assert json.load(error.value)["code"] in {"invalid_request", "invalid_options"}
+    assert session.focus is None
+    assert server.work_budget.usage() == (0, 0)
+
+
+def test_focus_control_rejects_old_and_finished_run_tokens(server: GeometrizeServer) -> None:
+    session = ImageSession(1, 1, (0, 0, 0, 255), SimpleNamespace(attempts=0))
+    server.activate_session("controlled", session, "active-run")
+    for token in ("old-run", "future-run"):
+        with pytest.raises(HTTPError) as error:
+            _post(server, "/api/sessions/controlled/focus", {"run_id": token, "focus": {"x": 1, "y": 1}})
+        assert error.value.code == HTTPStatus.CONFLICT
+        assert json.load(error.value)["code"] == "stale_run"
+    server.finish_session("controlled", session)
+    with pytest.raises(HTTPError) as error:
+        _post(server, "/api/sessions/controlled/focus", {"run_id": "active-run", "focus": {"x": 1, "y": 1}})
+    assert json.load(error.value)["code"] == "stale_run"
+    assert session.focus is None
+    assert session.attempts == session.revision == 0
+
+
+@pytest.mark.skipif(not native_available(), reason="native backend is not built")
+def test_live_focus_updates_take_effect_between_stream_attempts(server: GeometrizeServer) -> None:
+    entered = [threading.Event(), threading.Event()]
+    release = [threading.Event(), threading.Event()]
+    seen_focus = []
+
+    class ControlledNative:
+        initial_score = 0.5
+        score = 0.5
+        attempts = 0
+
+        def step(self, options):
+            seen_focus.append(options["focus"])
+            if self.attempts < 2:
+                entered[self.attempts].set()
+                assert release[self.attempts].wait(5)
+            self.attempts += 1
+            self.score *= 0.9
+            return {
+                "attempt": self.attempts,
+                "shapes": [{"type": "rectangle", "score": self.score,
+                            "color": {"r": 20, "g": 40, "b": 60, "a": 255},
+                            "data": {"x1": 0, "y1": 0, "x2": 4, "y2": 4}}],
+            }
+
+        def current_rgba(self):
+            return bytes((20, 40, 60, 255)) * 64
+
+    session = ImageSession(8, 8, (20, 40, 60, 255), ControlledNative())
+    server.store_session("controlled", session)
+    initial = Focus(0.25, 0.5).to_dict()
+    moved = Focus(0.8, 0.2, strength=1).to_dict()
+    body = json.dumps({"session_id": "controlled", "options": {"steps": 3, "focus": initial}}).encode()
+    try:
+        with _tracked_post(server) as request_id:
+            request = urllib.request.Request(
+                f"http://127.0.0.1:{server.server_port}/api/run/stream", data=body,
+                headers={"Content-Type": "application/json", "X-Test-Request-ID": request_id}, method="POST",
+            )
+            with urllib.request.urlopen(request, timeout=5) as response:
+                start = json.loads(response.readline())
+                assert start["focus"] == initial
+                assert entered[0].wait(5)
+                ack = _post(server, "/api/sessions/controlled/focus", {"run_id": start["run_id"], "focus": moved})
+                assert ack == {"focus": moved, "applies": "next_attempt"}
+                assert session.attempts == session.revision == 0
+                release[0].set()
+                assert entered[1].wait(5)
+                assert session.attempts == session.revision == 1
+                ack = _post(server, "/api/sessions/controlled/focus", {"run_id": start["run_id"], "focus": None})
+                assert ack == {"focus": None, "applies": "next_attempt"}
+                release[1].set()
+                events = [json.loads(line) for line in response]
+        terminal = events[-1]
+        assert terminal["event"] == "complete"
+        assert terminal["focus"] is None
+        assert terminal["attempts"] == terminal["shape_count"] == terminal["revision"] == 3
+        assert terminal["batch_summary"]["initial_focus"] == initial
+        assert terminal["batch_summary"]["focus"] is None
+        assert seen_focus == [initial, moved, None]
+        assert [event["focus"] for event in events if event["event"] == "step"] == seen_focus
+        assert server.work_budget.usage() == (0, 0)
+        snapshot = _post(server, "/api/sessions/controlled/snapshot", {})
+        assert snapshot["focus"] is None
+        assert snapshot["shape_count"] == snapshot["attempts"] == 3
+
+        # A queued paint stroke is an ordinary one-accepted-shape continuation
+        # with its own captured focus, rather than retargeting the prior stroke.
+        stroke = _post_stream(server, {"session_id": "controlled", "options": {"steps": 1, "focus": moved}})
+        assert stroke[0]["focus"] == stroke[-1]["focus"] == moved
+        assert stroke[-1]["batch_summary"]["added"] == 1
+        assert stroke[-1]["shape_count"] == stroke[-1]["attempts"] == 4
+    finally:
+        for event in release:
+            event.set()
+
+
+@pytest.mark.skipif(not native_available(), reason="native backend is not built")
+def test_first_paint_stroke_can_create_focused_session(server: GeometrizeServer) -> None:
+    image = Image.new("RGBA", (48, 32), (20, 40, 60, 255))
+    ImageDraw.Draw(image).rectangle((24, 0, 47, 31), fill=(230, 180, 80, 255))
+    focus = Focus(0.8, 0.5, radius=0.1, strength=1).to_dict()
+    events = _post_stream(server, {"image": image_to_data_url(image), "options": {
+        "steps": 1, "shape_types": ["circle"], "shape_count": 8, "mutations": 16, "focus": focus,
+    }})
+    assert events[0]["continued"] is False
+    assert events[0]["focus"] == events[-1]["focus"] == focus
+    assert events[-1]["batch_summary"]["initial_focus"] == focus
+    assert events[-1]["batch_summary"]["added"] == events[-1]["shape_count"] == 1
+    assert events[-1]["stop_reason"] == "target_reached"
 
 
 def test_active_session_is_pinned_until_finish(server: GeometrizeServer) -> None:

@@ -24,7 +24,7 @@ from .contracts import MAX_REQUEST_BYTES, OPTION_LIMITS, app_contract
 from .errors import APIError
 from .exporting import ExportArtifact, ExportCache, RenderScene, build_export, inspect_scene, validate_scene
 from .images import image_bytes_size, image_data_url_bytes, image_to_data_url, open_image_bytes
-from .native import ImageSession, NativeBackendUnavailable, RunOptions, native_available
+from .native import ImageSession, NativeBackendUnavailable, RunOptions, native_available, normalize_focus
 from .render import export_dimensions
 from .resources import (
     DEFAULT_ACTIVE_MEMORY_BYTES,
@@ -43,13 +43,14 @@ DEFAULT_SESSION_IDLE_SECONDS = 30 * 60
 DEFAULT_SESSION_MEMORY_BYTES = 512 * 1024 * 1024
 MAX_SESSION_ACTION_BYTES = 16 * 1024
 MAX_PAUSE_BODY_BYTES = 4 * 1024
+MAX_FOCUS_BODY_BYTES = 4 * 1024
 REQUEST_MEMORY_FLOOR = 64 * 1024
 JSON_EXPANSION_FACTOR = 32
 ESTIMATED_BYTES_PER_PIXEL = 16
 ESTIMATED_BYTES_PER_SHAPE = 512
 ESTIMATED_SESSION_OVERHEAD_BYTES = 64 * 1024
 LOGGER = logging.getLogger(__name__)
-SESSION_ACTION = re.compile(r"^/api/sessions/([a-zA-Z0-9_-]+)/(pause|snapshot)$")
+SESSION_ACTION = re.compile(r"^/api/sessions/([a-zA-Z0-9_-]+)/(pause|focus|snapshot)$")
 IMAGE_LITERAL = re.compile(rb'"image"\s*:\s*"(data:image/[^"\\]{0,128};base64,[A-Za-z0-9+/=]*)"')
 
 
@@ -235,12 +236,14 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
                     raise APIError(
                         "request_too_large", "Session request body is too large", HTTPStatus.REQUEST_ENTITY_TOO_LARGE
                     )
-                # A pause is a tiny control message that must remain available
+                # Pause and focus are tiny control messages that remain available
                 # even when fitting has consumed the full CPU and memory budget.
-                if action is not None and action.group(2) == "pause":
-                    if length > MAX_PAUSE_BODY_BYTES:
+                if action is not None and action.group(2) in {"pause", "focus"}:
+                    control_limit = MAX_PAUSE_BODY_BYTES if action.group(2) == "pause" else MAX_FOCUS_BODY_BYTES
+                    if length > control_limit:
                         raise APIError(
-                            "request_too_large", "Pause request body is too large", HTTPStatus.REQUEST_ENTITY_TOO_LARGE
+                            "request_too_large", "Control request body is too large",
+                            HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
                         )
                 else:
                     self._request_lease = self._reserve_work(0, _request_memory(path, length, 0, parsed=False))
@@ -330,7 +333,7 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
                 raise _session_busy_error()
             if lease is None:
                 options, lease = self._reserve_fit(options, session.width, session.height)
-            session.prepare_run()
+            session.prepare_run(options)
             self._charge_request_scene({"shapes": session.shapes})
             self.geometrize_server.activate_session(session_id, session, run_id)
             activated = True
@@ -358,6 +361,7 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
                         "initial_score": session.initial_score,
                         "revision": session.revision,
                         "effective_threads": options.max_threads,
+                        "focus": options.focus.to_dict() if options.focus is not None else None,
                     }
                 )
                 with closing(session.run_reserved_batch(options)) as events:
@@ -392,6 +396,20 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
 
     def _session_action(self, session_id: str, action: str, payload: dict[str, Any]) -> None:
         session = self._session_by_id(session_id)
+        if action == "focus":
+            if set(payload) != {"run_id", "focus"}:
+                raise APIError("invalid_request", "Focus control requires only run_id and focus")
+            run_id = _required_text(payload, "run_id")
+            try:
+                focus = normalize_focus(payload["focus"])
+            except (ValueError, TypeError, OverflowError) as exc:
+                raise APIError("invalid_options", str(exc)) from exc
+            with self.geometrize_server.sessions_lock:
+                if self.geometrize_server.active_runs.get(session_id) != run_id:
+                    raise APIError("stale_run", "That run has already ended.", HTTPStatus.CONFLICT)
+                session.request_focus(focus)
+            self._send_json({"focus": focus.to_dict() if focus is not None else None, "applies": "next_attempt"})
+            return
         if action == "pause":
             with self.geometrize_server.sessions_lock:
                 active_run = self.geometrize_server.active_runs.get(session_id)
@@ -476,6 +494,7 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
         *,
         include_preview: bool = True,
     ) -> dict[str, Any]:
+        focus = session.focus
         payload: dict[str, Any] = {
             "event": "snapshot",
             "width": session.width,
@@ -489,6 +508,7 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
             "initial_score": session.initial_score,
             "stop_reason": session.stop_reason,
             "batch_summary": session.batch_summary,
+            "focus": focus.to_dict() if focus is not None else None,
         }
         if include_preview:
             payload["preview"] = image_to_data_url(session.result().image)
