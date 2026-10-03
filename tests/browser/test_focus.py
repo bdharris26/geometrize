@@ -67,7 +67,8 @@ def test_focus_mapping_gestures_and_overlay_keep_preview_pixels(size: tuple[int,
         </style><div id="source" class="stage"><img id="source-img" class="media"></div>
         <div id="result" class="stage" tabindex="0"><img id="result-img" class="media" hidden>
         <canvas id="canvas" class="media"></canvas><svg id="overlay" class="media" hidden>
-        <circle class="focus-ring"></circle><circle class="focus-center"></circle></svg></div><output id="zoom"></output>""")
+        <circle class="focus-ring"></circle><circle class="focus-center"></circle>
+        </svg></div><output id="zoom"></output>""")
         _module(page, "preview.js")
         page.evaluate("""([width,height]) => {
           window.moves = [];
@@ -137,7 +138,9 @@ def test_focus_mapping_gestures_and_overlay_keep_preview_pixels(size: tuple[int,
         page.mouse.move(source["x"] + 190, source["y"] + 160)
         page.mouse.up()
         assert page.evaluate("preview.pan.x") > pan_before
-        assert page.locator("#source-img").evaluate("e => e.style.transform") == page.locator("#canvas").evaluate("e => e.style.transform")
+        assert page.locator("#source-img").evaluate("e => e.style.transform") == page.locator("#canvas").evaluate(
+            "e => e.style.transform"
+        )
         page.mouse.move(result["x"] + 180, result["y"] + 160)
         page.mouse.wheel(0, -100)
         expect(page.locator("#zoom")).to_have_text("115%")
@@ -167,7 +170,10 @@ def test_focus_updates_coalesce_serially_and_ignore_old_run_replies() -> None:
           const tick = () => new Promise(resolve => setTimeout(resolve, 0));
           const focus = x => ({x, y:0.5, radius:0.2, strength:0.75});
           const updates = new FocusUpdates({onState: (state, message) => states.push([state, message]),
-            post: (path, payload) => {calls.push({path, payload}); return new Promise((resolve, reject) => deferred.push({resolve,reject}));}});
+            post: (path, payload) => {
+              calls.push({path, payload});
+              return new Promise((resolve, reject) => deferred.push({resolve,reject}));
+            }});
           updates.begin({sessionId:'old/session',runId:'old-run',contentVersion:1,runVersion:1}, null);
           updates.update(focus(0.1)); updates.update(focus(0.2)); updates.update(focus(0.3));
           const inFlightCount = calls.length;
@@ -203,7 +209,10 @@ def test_paint_queue_bounds_positions_cancellation_and_failure() -> None:
           const tick = () => new Promise(resolve => setTimeout(resolve, 0));
           const focus = x => ({x, y:0.5, radius:0.2, strength:0.75});
           const queue = new PaintQueue({capacity:2, onState: (state, detail) => states.push([state, detail]),
-            runStroke: value => {calls.push(value); return new Promise((resolve,reject) => deferred.push({resolve,reject}));}});
+            runStroke: value => {
+              calls.push(value);
+              return new Promise((resolve,reject) => deferred.push({resolve,reject}));
+            }});
           queue.setEnabled(true); const first = focus(0.1); queue.enqueue(first); first.x = 1;
           queue.enqueue(focus(0.2)); queue.enqueue(focus(0.3)); const overflow = queue.enqueue(focus(0.4));
           const initialCount = calls.length;
@@ -223,7 +232,10 @@ def test_paint_queue_bounds_positions_cancellation_and_failure() -> None:
         assert [call["x"] for call in result["calls"]] == [0.1, 0.2, 0.8, 0.95, 0.99]
         assert result["pending"] == 0
         assert [detail["detail"] for state, detail in result["states"] if state == "error"] == ["stroke failed"]
-        assert any(state == "rejected" and detail["detail"] == "Fit already adequate" for state, detail in result["states"])
+        assert any(
+            state == "rejected" and detail["detail"] == "Fit already adequate"
+            for state, detail in result["states"]
+        )
         browser.close()
 
 
@@ -270,7 +282,9 @@ def _mock_runs(page: Page) -> None:
     }""")
 
 
-def test_paint_clicks_send_one_step_each_and_focus_edits_do_not_retarget_strokes(server_url: str, tmp_path: Path) -> None:
+def test_paint_clicks_send_one_step_each_and_focus_edits_do_not_retarget_strokes(
+    server_url: str, tmp_path: Path
+) -> None:
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
         page = browser.new_page(viewport={"width": 1440, "height": 1050})
@@ -381,7 +395,9 @@ def test_live_focus_requests_and_late_errors_leave_new_source_untouched(server_u
         _click_fraction(page, 0.4, 0.6)
         _click_fraction(page, 0.8, 0.7)
         assert page.evaluate("focusRequests.length") == 1
-        page.evaluate("focusReplies[0](new Response(JSON.stringify({focus:focusRequests[0].focus,applies:'next_attempt'}), {headers:{'Content-Type':'application/json'}}))")
+        page.evaluate("""() => focusReplies[0](new Response(
+          JSON.stringify({focus:focusRequests[0].focus,applies:'next_attempt'}),
+          {headers:{'Content-Type':'application/json'}}))""")
         page.wait_for_function("focusRequests.length === 2")
         final = page.evaluate("focusRequests[1]")
         assert final["run_id"] == "stroke-1"
@@ -390,7 +406,9 @@ def test_live_focus_requests_and_late_errors_leave_new_source_untouched(server_u
         page.evaluate("finishStroke()")
         expect(page.locator("#run-button")).to_have_text("Continue")
         page.get_by_role("button", name="Sample", exact=True).click()
-        page.evaluate("focusReplies[1](new Response(JSON.stringify({error:'Old run expired',code:'stale_run'}), {status:409,headers:{'Content-Type':'application/json'}}))")
+        page.evaluate("""() => focusReplies[1](new Response(
+          JSON.stringify({error:'Old run expired',code:'stale_run'}),
+          {status:409,headers:{'Content-Type':'application/json'}}))""")
         page.evaluate("() => new Promise(resolve => setTimeout(resolve, 0))")
         expect(page.locator("#status")).to_have_text("Ready")
         expect(page.locator("#focus-status")).to_have_text("Off · drag previews to pan")
@@ -470,7 +488,9 @@ def test_project_focus_legacy_validation_and_overlay_free_exports(server_url: st
 
 
 @pytest.mark.parametrize("reason,broken", [("paused",False),("error",False),("target_reached",True)])
-def test_paint_interruption_stops_pending_clicks_and_preserves_snapshot(server_url: str, reason: str, broken: bool) -> None:
+def test_paint_interruption_stops_pending_clicks_and_preserves_snapshot(
+    server_url: str, reason: str, broken: bool
+) -> None:
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
         page = browser.new_page(viewport={"width": 1440, "height": 1050})
