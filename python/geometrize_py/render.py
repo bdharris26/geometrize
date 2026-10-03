@@ -4,8 +4,12 @@ Each shape is rasterized at export resolution on its own transparent layer and
 alpha-composited in sequence. Strokes are at least one output pixel wide;
 circles use the smaller axis scale to stay circular. Rotated ellipses and
 quadratic curves are sampled as 48-sided polygons and 32 line segments. SVG
-and browser Canvas use continuous paths, so edge coverage can differ even when
-the intended geometry agrees. The native scorer has its own pixel-grid rules.
+and browser Canvas use continuous paths, so antialiased edge coverage differs.
+The native scorer truncates coordinates to integer scanlines, uses 20 vertices
+for rotated ellipses and 20 segments for quadratic curves, and blends with
+integer arithmetic. Its fitting bitmap can therefore differ in actual shape
+coverage and color from this PNG, even at source size. Byte identity here means
+identity with the previous Pillow exporter, not the native fitting bitmap.
 """
 
 from __future__ import annotations
