@@ -20,7 +20,7 @@
       <form id="run-form">
         <div class="input-actions">
           <label class="drop-zone" for="image-input">
-          <input id="image-input" type="file" accept=".png,.jpg,.jpeg,.webp,.bmp,.gif,.tif,.tiff,image/png,image/jpeg,image/webp,image/bmp,image/gif,image/tiff">
+          <input id="image-input" type="file" accept=".png,.jpg,.jpeg,.webp,.bmp,.gif,image/png,image/jpeg,image/webp,image/bmp,image/gif">
             <span id="file-label">Choose image</span>
             <span id="image-name">No image selected</span>
           </label>
@@ -34,69 +34,96 @@
             <button id="load-project-button" class="secondary" type="button">Open project</button>
             <button id="save-project-button" class="secondary" type="button" disabled>Save project</button>
           </div>
-          <p id="project-help">Project JSON restores the source, result, options, and run history.</p>
+          <p id="project-help">Project JSON restores the source, result, options, and run history. Run starts fresh; saved geometry can still be exported.</p>
         </fieldset>
 
-        <fieldset class="shape-grid">
+        <div class="field">
+          <label for="preset">Starting preset</label>
+          <select id="preset" aria-label="Starting preset">
+            <option value="quick">Quick sketch</option>
+            <option value="balanced" selected>Balanced</option>
+            <option value="fine">Fine detail</option>
+            <option value="custom">Custom</option>
+          </select>
+        </div>
+
+        <fieldset id="shape-grid" class="shape-grid">
           <legend>Shapes</legend>
-          <label><input type="checkbox" name="shape" value="ellipse" checked><span class="shape-symbol ellipse-symbol"></span><span class="shape-name">Ellipse</span></label>
-          <label><input type="checkbox" name="shape" value="rotated_rectangle" checked><span class="shape-symbol rotated-rectangle-symbol"></span><span class="shape-name">Rotated rectangle</span></label>
-          <label><input type="checkbox" name="shape" value="triangle" checked><span class="shape-symbol triangle-symbol"></span><span class="shape-name">Triangle</span></label>
-          <label><input type="checkbox" name="shape" value="circle"><span class="shape-symbol circle-symbol"></span><span class="shape-name">Circle</span></label>
-          <label><input type="checkbox" name="shape" value="rectangle"><span class="shape-symbol rectangle-symbol"></span><span class="shape-name">Rectangle</span></label>
-          <label><input type="checkbox" name="shape" value="line"><span class="shape-symbol line-symbol"></span><span class="shape-name">Line</span></label>
         </fieldset>
 
         <div class="field">
           <label for="steps" title="How many accepted primitives to add in this batch. Continue adds another batch to the current result.">Shapes to add <output id="steps-out">128</output></label>
-          <input id="steps" name="steps" type="range" min="1" max="4096" value="128">
-        </div>
-
-        <div class="field two">
-          <label>Alpha <input id="alpha" name="alpha" type="number" min="1" max="255" value="128"></label>
-          <label>Seed <input id="seed" name="seed" type="number" min="0" max="2147483647" value="9001"></label>
-        </div>
-
-        <div class="field two">
-          <label title="Candidate primitives tested for each accepted shape.">Candidates per shape <input id="shape-count" name="shape_count" type="number" min="1" max="512" value="64"></label>
-          <label title="Random refinements tried for each candidate primitive.">Mutations per candidate <input id="mutations" name="mutations" type="number" min="1" max="2048" value="128"></label>
+          <div class="range-with-input">
+            <input id="steps" name="steps" type="range" min="1" max="4096" value="128">
+            <input id="steps-number" type="number" min="1" max="4096" value="128" aria-label="Shapes to add value">
+          </div>
         </div>
 
         <div class="field">
           <label for="max-size" title="Longest source dimension used by the optimizer. Lower values run faster and retain smaller resumable sessions.">Working resolution <output id="max-size-out">1024</output></label>
           <div class="range-with-input">
-            <input id="max-size" name="max_size" type="range" min="64" max="2048" step="64" value="1024">
-            <input id="max-size-number" type="number" min="64" max="2048" step="64" value="1024" aria-label="Working resolution value">
+            <input id="max-size" name="max_size" type="range" min="32" max="2048" step="32" value="1024">
+            <input id="max-size-number" type="number" min="32" max="2048" step="32" value="1024" aria-label="Working resolution value">
           </div>
         </div>
 
         <div class="field">
           <label for="export-size" title="Longest dimension for PNG and SVG output. This does not increase optimizer memory use.">Export resolution <output id="export-size-out">1024</output></label>
           <div class="range-with-input">
-            <input id="export-size" name="export_size" type="range" min="64" max="4096" step="64" value="1024">
-            <input id="export-size-number" type="number" min="64" max="4096" step="64" value="1024" aria-label="Export resolution value">
+            <input id="export-size" name="export_size" type="range" min="32" max="4096" step="32" value="1024">
+            <input id="export-size-number" type="number" min="32" max="4096" step="32" value="1024" aria-label="Export resolution value">
           </div>
         </div>
+
+        <details class="advanced-controls">
+          <summary>Advanced controls</summary>
+          <div class="advanced-fields">
+            <div class="field two">
+              <label>Alpha <input id="alpha" name="alpha" type="number" min="1" max="255" value="128"></label>
+              <label>Seed <input id="seed" name="seed" type="number" min="0" max="2147483647" value="9001"></label>
+            </div>
+            <div class="field two">
+              <label title="Candidate primitives tested for each accepted shape.">Candidates per shape <input id="shape-count" name="shape_count" type="number" min="1" max="512" value="64"></label>
+              <label title="Random refinements tried for each candidate primitive.">Mutations per candidate <input id="mutations" name="mutations" type="number" min="1" max="2048" value="128"></label>
+            </div>
+            <div class="field two">
+              <label title="0 uses the server's available worker budget.">Worker limit <input id="max-threads" name="max_threads" type="number" min="0" max="128" value="0"></label>
+              <label title="Stop after this many unsuccessful attempts; 0 disables this limit.">Stagnation limit <input id="stagnation-limit" name="stagnation_limit" type="number" min="0" max="4096" value="128"></label>
+            </div>
+          </div>
+        </details>
+
+        <p id="settings-help" class="settings-help">Settings apply to the next batch. Working resolution changes require a new render.</p>
 
         <div class="run-actions">
           <button id="run-button" type="submit">Run</button>
           <button id="pause-button" class="secondary" type="button" disabled>Pause</button>
+          <button id="restart-button" class="secondary" type="button" disabled>New render</button>
         </div>
       </form>
     </aside>
 
     <main class="workspace">
       <section class="preview-wrap" aria-label="Image preview">
+        <div class="preview-toolbar" aria-label="Preview zoom controls">
+          <button id="zoom-out" class="secondary" type="button" aria-label="Zoom out">−</button>
+          <output id="zoom-value">100%</output>
+          <button id="zoom-in" class="secondary" type="button" aria-label="Zoom in">+</button>
+          <button id="zoom-fit" class="secondary" type="button">Fit</button>
+          <span>Drag either preview to pan both</span>
+        </div>
         <div class="preview-grid">
           <figure class="preview-panel">
             <figcaption><span>Source</span><span id="source-meta"></span></figcaption>
-            <img id="source-preview" alt="">
+            <div id="source-stage" class="preview-stage">
+              <img id="source-preview" class="preview-media" alt="">
+            </div>
           </figure>
           <figure class="preview-panel">
             <figcaption><span>Live result</span><span id="result-meta"></span></figcaption>
-            <div class="result-stage">
-              <canvas id="result-canvas" aria-label="Live result preview"></canvas>
-              <img id="result-preview" alt="" aria-hidden="true">
+            <div id="result-stage" class="preview-stage">
+              <canvas id="result-canvas" class="preview-media" aria-label="Live result preview"></canvas>
+              <img id="result-preview" class="preview-media" alt="" aria-hidden="true">
             </div>
           </figure>
         </div>
@@ -113,6 +140,7 @@
         <div class="telemetry-grid">
           <article class="telemetry-card">
             <header><span>Convergence</span><output id="telemetry-score">--</output></header>
+            <p id="telemetry-baseline" class="graph-caption">Initial error -- · recent 0 points</p>
             <svg id="score-graph" class="telemetry-graph" viewBox="0 0 360 120" role="img" aria-label="Convergence graph"></svg>
           </article>
           <article class="telemetry-card">
@@ -140,6 +168,6 @@
       </footer>
     </main>
   </div>
-  <script src="/static/app.js"></script>
+  <script type="module" src="/static/app.js"></script>
 </body>
 </html>

@@ -71,6 +71,7 @@ def test_sample_continue_and_project_round_trip(server_url: str, tmp_path: Path)
         page.get_by_role("button", name="Continue", exact=True).wait_for(timeout=120_000)
         assert "6 accepted" in page.locator("#telemetry-acceptance").inner_text()
 
+        page.locator(".advanced-controls summary").click()
         page.locator("#alpha").fill("0")
         page.locator("#seed").fill(str(2**31))
         page.locator("#shape-count").fill("")
@@ -140,40 +141,211 @@ def test_sample_continue_and_project_round_trip(server_url: str, tmp_path: Path)
     assert page_errors == []
 
 
-def test_source_controls_stay_locked_during_run(server_url: str) -> None:
+def test_pause_keeps_controls_locked_until_final_snapshot(server_url: str, tmp_path: Path) -> None:
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
         page = browser.new_page()
         page.goto(server_url, wait_until="networkidle")
         page.get_by_role("button", name="Sample", exact=True).click()
-        page.evaluate(
-            """
-            () => {
-              const originalFetch = window.fetch;
-              window.fetch = (url, options = {}) => {
-                if (String(url).endsWith("/api/run/stream")) {
-                  return new Promise((resolve, reject) => {
-                    options.signal.addEventListener(
-                      "abort",
-                      () => reject(new DOMException("Aborted", "AbortError")),
-                      { once: true }
-                    );
-                  });
-                }
-                return originalFetch(url, options);
-              };
-            }
-            """
-        )
-
+        page.locator("#steps-number").fill("512")
+        page.locator("#max-size-number").fill("128")
+        page.locator(".advanced-controls summary").click()
+        page.locator("#max-threads").fill("1")
         page.get_by_role("button", name="Run", exact=True).click()
+        expect(page.get_by_role("button", name="Pause", exact=True)).to_be_enabled(timeout=30_000)
         expect(page.locator("#image-input")).to_be_disabled()
         expect(page.get_by_role("button", name="Sample", exact=True)).to_be_disabled()
         page.get_by_role("button", name="Pause", exact=True).click()
-        expect(page.locator("#status")).to_have_text("Paused")
+        pause_state = page.evaluate("""() => ({
+          status: document.querySelector('#status').textContent,
+          sourceDisabled: document.querySelector('#image-input').disabled
+        })""")
+        assert "Paus" in pause_state["status"]
+        if "Pausing" in pause_state["status"]:
+            assert pause_state["sourceDisabled"]
+        expect(page.locator("#telemetry-state")).to_have_text("Paused", timeout=120_000)
         expect(page.locator("#image-input")).to_be_enabled()
         expect(page.get_by_role("button", name="Sample", exact=True)).to_be_enabled()
+        expect(page.locator("#run-button")).to_have_text("Continue")
+        expect(page.locator("#download-png")).to_have_attribute("aria-disabled", "false")
 
+        project_path = tmp_path / "paused.geometrize-project.json"
+        with page.expect_download() as download_info:
+            page.get_by_role("button", name="Save project", exact=True).click()
+        download_info.value.save_as(project_path)
+        project = json.loads(project_path.read_text(encoding="utf-8"))
+        batch = project["telemetry"]["batches"][-1]
+        assert batch["added"] == len(project["result"]["shapes"])
+        assert batch["attempts"] == project["telemetry"]["attempts"]
+
+        browser.close()
+
+
+def test_exports_follow_resolution_without_adding_shapes(server_url: str, tmp_path: Path) -> None:
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = browser.new_page()
+        page.goto(server_url, wait_until="networkidle")
+        _run_sample(page, shapes=3)
+
+        initial_acceptance = page.locator("#telemetry-acceptance").inner_text()
+        first_path = tmp_path / "first.png"
+        with page.expect_download() as download_info:
+            page.locator("#download-png").click()
+        download_info.value.save_as(first_path)
+        with Image.open(first_path) as image:
+            assert image.size[0] == 256
+
+        page.locator("#export-size-number").fill("512")
+        second_path = tmp_path / "second.png"
+        with page.expect_download() as download_info:
+            page.locator("#download-png").click()
+        download_info.value.save_as(second_path)
+        with Image.open(second_path) as image:
+            assert image.size[0] == 512
+        assert page.locator("#telemetry-acceptance").inner_text() == initial_acceptance
+
+        project_path = tmp_path / "export.geometrize-project.json"
+        with page.expect_download() as download_info:
+            page.get_by_role("button", name="Save project", exact=True).click()
+        download_info.value.save_as(project_path)
+        page.reload(wait_until="networkidle")
+        page.locator("#project-input").set_input_files(project_path)
+        expect(page.locator("#status")).to_have_text("Project loaded — Run starts a new render")
+        expect(page.locator("#download-svg")).to_have_attribute("aria-disabled", "false")
+        svg_path = tmp_path / "restored.svg"
+        with page.expect_download() as download_info:
+            page.locator("#download-svg").click()
+        download_info.value.save_as(svg_path)
+        assert 'width="512"' in svg_path.read_text(encoding="utf-8")
+
+        browser.close()
+
+
+def test_controls_zoom_and_incomplete_stream(server_url: str) -> None:
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = browser.new_page(viewport={"width": 1440, "height": 1000})
+        page.goto(server_url, wait_until="networkidle")
+        assert page.locator("input[name='shape']").count() == 9
+        assert ".tif" not in page.locator("#image-input").get_attribute("accept")
+        page.locator("#image-input").set_input_files({
+            "name": "unsupported.tiff", "mimeType": "image/tiff", "buffer": b"TIFF",
+        })
+        expect(page.locator("#status")).to_have_text(
+            "Could not load image: Choose a PNG, JPEG, WebP, BMP, or GIF image"
+        )
+        page.locator("#preset").select_option("quick")
+        expect(page.locator("#steps-number")).to_have_value("64")
+        expect(page.locator("#shape-count")).to_have_value("16")
+        expect(page.locator("#mutations")).to_have_value("32")
+        expect(page.locator("#max-size-number")).to_have_value("256")
+
+        _run_sample(page, shapes=1)
+        boxes = page.evaluate(
+            """() => {
+              const source = document.querySelector('#source-preview').getBoundingClientRect();
+              const result = document.querySelector('#result-canvas').getBoundingClientRect();
+              return [source.width, source.height, result.width, result.height];
+            }"""
+        )
+        assert abs(boxes[0] - boxes[2]) < 3
+        assert abs(boxes[1] - boxes[3]) < 3
+        page.get_by_role("button", name="Zoom in").click()
+        expect(page.locator("#zoom-value")).to_have_text("125%")
+        source_stage = page.locator("#source-stage").bounding_box()
+        assert source_stage
+        page.mouse.move(source_stage["x"] + 100, source_stage["y"] + 100)
+        page.mouse.down()
+        page.mouse.move(source_stage["x"] + 130, source_stage["y"] + 110)
+        page.mouse.up()
+        transform = page.evaluate(
+            """() => [
+              document.querySelector('#source-preview').style.transform,
+              document.querySelector('#result-canvas').style.transform
+            ]"""
+        )
+        assert transform[0] == transform[1]
+        assert "lower is better" in page.locator("#telemetry-improvement").inner_text()
+
+        page.route("**/api/run/stream", lambda route: route.fulfill(
+            status=200,
+            content_type="application/x-ndjson",
+            body=json.dumps({
+                "event": "start", "session_id": "missing-session", "width": 8, "height": 8,
+                "background": {"r": 0, "g": 0, "b": 0, "a": 255}, "shapes": [],
+                "attempts": 0, "initial_score": 0.5,
+            }) + "\n",
+        ))
+        page.route("**/api/sessions/missing-session/snapshot", lambda route: route.fulfill(
+            status=404, content_type="application/json",
+            body=json.dumps({"code": "unknown_session", "error": "Unknown render session"}),
+        ))
+        page.get_by_role("button", name="Continue", exact=True).click()
+        expect(page.locator("#telemetry-state")).to_have_text("Error")
+        expect(page.locator("#run-button")).to_have_text("Run")
+        expect(page.locator("#download-png")).to_have_attribute("aria-disabled", "false")
+        assert "ended before a final result" in page.locator("#status").inner_text()
+        with page.expect_download() as download_info:
+            page.locator("#download-png").click()
+        assert download_info.value.suggested_filename == "geometrize.png"
+        page.get_by_role("button", name="New render", exact=True).click()
+        expect(page.locator("#download-png")).to_have_attribute("aria-disabled", "true")
+
+        browser.close()
+
+
+def test_incomplete_stream_reconciles_from_idle_snapshot(server_url: str) -> None:
+    first = {
+        "type": "circle", "color": {"r": 0, "g": 0, "b": 0, "a": 255},
+        "data": {"x": 2, "y": 2, "r": 1}, "score": 0.7,
+    }
+    second = {
+        "type": "circle", "color": {"r": 0, "g": 0, "b": 0, "a": 255},
+        "data": {"x": 5, "y": 5, "r": 1}, "score": 0.5,
+    }
+    background = {"r": 255, "g": 255, "b": 255, "a": 255}
+    events = [
+        {
+            "event": "start", "session_id": "recoverable", "run_id": "one-run",
+            "width": 8, "height": 8, "background": background,
+            "shapes": [], "attempts": 0, "revision": 0, "initial_score": 0.9,
+        },
+        {
+            "event": "step", "shapes": [first], "attempts": 6, "revision": 1,
+            "batch_shape_count": 1, "batch_goal": 2,
+        },
+    ]
+    snapshot = {
+        "event": "snapshot", "session_id": "recoverable", "width": 8, "height": 8,
+        "background": background, "shapes": [first, second], "attempts": 7,
+        "revision": 2, "initial_score": 0.9, "score": 0.5,
+        "stop_reason": "paused",
+        "batch_summary": {
+            "index": 1, "target": 2, "shapeTypes": ["circle"],
+            "candidates": 16, "mutations": 32, "alpha": 128, "seed": 9001,
+            "max_threads": 0, "effective_threads": 1,
+            "start_shape_count": 0, "start_attempts": 0,
+            "added": 2, "attempts": 7, "state": "Paused", "reason": "paused",
+        },
+    }
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = browser.new_page()
+        page.goto(server_url, wait_until="networkidle")
+        page.get_by_role("button", name="Sample", exact=True).click()
+        page.route("**/api/run/stream", lambda route: route.fulfill(
+            status=200, content_type="application/x-ndjson",
+            body="\n".join(json.dumps(event) for event in events) + "\n",
+        ))
+        page.route("**/api/sessions/recoverable/snapshot", lambda route: route.fulfill(
+            status=200, content_type="application/json", body=json.dumps(snapshot),
+        ))
+        page.get_by_role("button", name="Run", exact=True).click()
+        expect(page.locator("#status")).to_have_text("Stream interrupted; recovered final result")
+        expect(page.locator("#telemetry-acceptance")).to_have_text("2 accepted / 7 attempts")
+        expect(page.locator("#run-button")).to_have_text("Continue")
+        expect(page.locator("#batch-history .batch-chip strong")).to_have_text("+2")
         browser.close()
 
 
