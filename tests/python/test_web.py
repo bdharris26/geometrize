@@ -667,6 +667,115 @@ def test_base64_image_uses_bounded_string_allowance(server: GeometrizeServer) ->
     assert server.work_budget.usage() == (0, 0)
 
 
+@pytest.mark.parametrize("header", ["data:image/bmp;base64,", "DATA:IMAGE/BMP;BASE64,"])
+@pytest.mark.parametrize("separator", ["", "\r\n"])
+def test_wrapped_image_prepares_under_string_budget_with_original_bytes(
+    server: GeometrizeServer, monkeypatch, header: str, separator: str,
+) -> None:
+    from geometrize_py import web
+    from geometrize_py.resources import WorkBudget
+
+    output = io.BytesIO()
+    Image.new("RGB", (128, 128), (20, 40, 60)).save(output, format="BMP")
+    original = output.getvalue()
+    encoded = base64.b64encode(original).decode("ascii")
+    encoded = separator.join(encoded[i:i + 17] for i in range(0, len(encoded), 17))
+    body = json.dumps({"image": header + encoded}).encode()
+    server.work_budget = WorkBudget(1, 1536 * 1024)
+    assert len(body) * web.JSON_EXPANSION_FACTOR > server.work_budget.memory_bytes
+    decoded = []
+    actual_open = web.open_image_bytes
+
+    def open_image(raw, *args, **kwargs):
+        decoded.append(raw)
+        return actual_open(raw, *args, **kwargs)
+
+    monkeypatch.setattr(web, "open_image_bytes", open_image)
+    result = _post(server, "/api/source/prepare", body=body)
+    assert (result["width"], result["height"], result["mime_type"]) == (128, 128, "image/bmp")
+    with Image.open(io.BytesIO(base64.b64decode(result["preview_data_url"].split(",", 1)[1]))) as preview:
+        assert preview.getpixel((0, 0)) == (20, 40, 60, 255)
+    assert decoded == [original]
+    assert server.work_budget.usage() == (0, 0)
+
+
+@pytest.mark.parametrize("kind", ["unused", "other-field", "escaped-quote", "containers", "nested", "export"])
+def test_image_allowance_keeps_other_json_admitted_before_parsing(
+    server: GeometrizeServer, monkeypatch, kind: str,
+) -> None:
+    from geometrize_py import web
+    from geometrize_py.resources import WorkBudget
+
+    path = "/api/source/prepare"
+    if kind == "unused":
+        payload = {"unused": "data:image/png;base64," + "a" * 70_000}
+    elif kind == "other-field":
+        payload = {"image": "data:image/png;base64,YWJj\r\n", "unused": "a" * 70_000}
+    elif kind == "escaped-quote":
+        payload = {"image": "data:image/png;base64," + "a" * 20_000 + '"' + "a" * 60_000}
+    elif kind in {"containers", "nested"}:
+        payload = {"unused": [[0]] * 30_000}
+    else:
+        path = "/api/export"
+        payload = {"image": "data:image/png;base64," + "a" * 70_000}
+    body_text = ('{"unused":' + "[" * 2000 + "0" + "]" * 2000 + "}"
+                 if kind == "nested" else json.dumps(payload))
+    body = body_text.encode()
+    decoded = []
+    actual_loads = json.loads
+
+    def loads(value, *args, **kwargs):
+        if value == body_text:
+            decoded.append(value)
+        return actual_loads(value, *args, **kwargs)
+
+    monkeypatch.setattr(web.json, "loads", loads)
+    server.work_budget = WorkBudget(1, 96 * 1024 if kind == "nested" else 1024 * 1024)
+    with pytest.raises(HTTPError) as error:
+        _post(server, path, body=body)
+    assert json.load(error.value)["code"] == "memory_limit"
+    assert not decoded and server.work_budget.usage() == (0, 0)
+
+
+def test_estimated_image_string_still_requires_valid_json_escapes(server: GeometrizeServer, monkeypatch) -> None:
+    from geometrize_py import web
+    from geometrize_py.resources import WorkBudget
+
+    server.work_budget = WorkBudget(1, 1024 * 1024)
+    body = b'{"image":"data:image/png;base64,' + b"a" * 70_000 + b'\\q"}'
+    monkeypatch.setattr(web, "image_data_url_bytes", lambda *_args: pytest.fail("Invalid JSON decoded image bytes"))
+    with pytest.raises(HTTPError) as error:
+        _post(server, "/api/source/prepare", body=body)
+    assert json.load(error.value)["code"] == "invalid_request"
+    assert server.work_budget.usage() == (0, 0)
+
+
+@pytest.mark.parametrize("invalid", ["\t", "\f", "\\", "!"])
+def test_estimated_wrapped_image_still_requires_strict_base64(
+    server: GeometrizeServer, monkeypatch, invalid: str,
+) -> None:
+    from geometrize_py import web
+
+    monkeypatch.setattr(web, "probe_source", lambda *_args: pytest.fail("Invalid base64 reached the container probe"))
+    with pytest.raises(HTTPError) as error:
+        _post(server, "/api/source/prepare", {"image": "data:image/png;base64,YW\r\n" + invalid + "Jj"})
+    assert json.load(error.value)["code"] == "invalid_image"
+    assert server.work_budget.usage() == (0, 0)
+
+
+def test_wrapped_image_does_not_bypass_the_request_byte_cap(server: GeometrizeServer, monkeypatch) -> None:
+    from geometrize_py import web
+
+    body = json.dumps({"image": "data:image/png;base64," + "YWJj\r\n" * 100}).encode()
+    monkeypatch.setattr(web, "MAX_REQUEST_BYTES", len(body) - 1)
+    monkeypatch.setattr(_ObservedHandler, "_read_json", lambda _self: pytest.fail("Oversized image body was read"))
+    with pytest.raises(HTTPError) as error:
+        _post(server, "/api/source/prepare", body=body)
+    assert error.value.code == HTTPStatus.REQUEST_ENTITY_TOO_LARGE
+    assert json.load(error.value)["code"] == "request_too_large"
+    assert server.work_budget.usage() == (0, 0)
+
+
 def test_malformed_json_releases_request_memory(server: GeometrizeServer) -> None:
     with pytest.raises(HTTPError) as error:
         _post(server, "/api/export", body=b'{"result":[1,2,}')

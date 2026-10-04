@@ -75,8 +75,10 @@ ESTIMATED_BYTES_PER_PIXEL = 16
 ESTIMATED_SESSION_OVERHEAD_BYTES = 64 * 1024
 LOGGER = logging.getLogger(__name__)
 SESSION_ACTION = re.compile(r"^/api/sessions/([a-zA-Z0-9_-]+)/(pause|focus|snapshot)$")
+# Estimate scalar-string memory, including JSON escapes for wrapped base64.
+# JSON and image decoding still validate the value; raw quotes end the span.
 IMAGE_LITERAL = re.compile(
-    rb'"image"\s*:\s*"(data:(?:image/[^"\\]{0,128}|application/octet-stream);base64,[A-Za-z0-9+/=]*)"'
+    rb'"image"\s*:\s*"((?i:data:(?:image/[^"\\]{0,128}|application/octet-stream);base64,)[A-Za-z0-9+/=\\]*)"'
 )
 
 
@@ -317,11 +319,11 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
                             HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
                         )
                 else:
-                    self._request_lease = self._reserve_work(0, _request_memory(path, length, 0, parsed=False))
+                    self._request_lease = self._reserve_work(0, _request_memory(path, length, 0, inspected=False))
                 body_read_started = True
                 payload = self._read_json()
                 if self._request_lease is not None:
-                    self._request_body_memory = _request_memory(path, length, self._request_image_bytes, parsed=True)
+                    self._request_body_memory = _request_memory(path, length, self._request_image_bytes, inspected=True)
                     self._resize_request_memory(self._request_body_memory)
             except TimeoutError:
                 self.close_connection = True
@@ -837,8 +839,10 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
         image_routes = {"/api/run", "/api/run/stream", "/api/restore", "/api/palette", "/api/source/prepare"}
         image_span = IMAGE_LITERAL.search(body) if urlsplit(self.path).path in image_routes else None
         self._request_image_bytes = image_span.end(1) - image_span.start(1) if image_span is not None else 0
+        # The scan is complete: unmatched bytes need the full JSON allowance
+        # before json.loads allocates strings or containers.
         self._resize_request_memory(
-            _request_memory(urlsplit(self.path).path, len(body), self._request_image_bytes, parsed=False)
+            _request_memory(urlsplit(self.path).path, len(body), self._request_image_bytes, inspected=True)
         )
 
     def _charge_request_scene(self, raw: RenderScene | dict[str, Any]) -> None:
@@ -971,7 +975,7 @@ def _scene_from_snapshot(snapshot: dict[str, Any]) -> RenderScene:
     )
 
 
-def _request_memory(path: str, body_bytes: int, image_bytes: int, *, parsed: bool) -> int:
+def _request_memory(path: str, body_bytes: int, image_bytes: int, *, inspected: bool) -> int:
     if path in {"/api/run", "/api/run/stream", "/api/restore", "/api/palette", "/api/source/prepare"}:
         # Encoded image data is a large string with predictable expansion;
         # other JSON can contain deeply nested Python containers and needs a
@@ -980,7 +984,7 @@ def _request_memory(path: str, body_bytes: int, image_bytes: int, *, parsed: boo
             return max(
                 REQUEST_MEMORY_FLOOR, 4 * image_bytes + JSON_EXPANSION_FACTOR * (body_bytes - image_bytes)
             )
-        if not parsed:
+        if not inspected:
             return max(REQUEST_MEMORY_FLOOR, 4 * body_bytes)
     return max(REQUEST_MEMORY_FLOOR, JSON_EXPANSION_FACTOR * body_bytes)
 
