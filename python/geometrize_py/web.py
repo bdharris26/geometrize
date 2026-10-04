@@ -837,12 +837,19 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
         if self._request_lease is None:
             return
         image_routes = {"/api/run", "/api/run/stream", "/api/restore", "/api/palette", "/api/source/prepare"}
-        image_span = IMAGE_LITERAL.search(body) if urlsplit(self.path).path in image_routes else None
-        self._request_image_bytes = image_span.end(1) - image_span.start(1) if image_span is not None else 0
+        path = urlsplit(self.path).path
+        image_span = IMAGE_LITERAL.search(body) if path in image_routes and body.isascii() else None
+        self._request_image_bytes = 0
+        if image_span is not None:
+            start, end = image_span.span(1)
+            # Unicode can widen the entire decoded JSON text or image scalar.
+            # An escaped quote can also truncate this match before such a suffix.
+            if not body.endswith(b"\\", start, end) and body.find(b"\\u", start, end) == -1:
+                self._request_image_bytes = end - start
         # The scan is complete: unmatched bytes need the full JSON allowance
         # before json.loads allocates strings or containers.
         self._resize_request_memory(
-            _request_memory(urlsplit(self.path).path, len(body), self._request_image_bytes, inspected=True)
+            _request_memory(path, len(body), self._request_image_bytes, inspected=True)
         )
 
     def _charge_request_scene(self, raw: RenderScene | dict[str, Any]) -> None:

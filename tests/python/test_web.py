@@ -737,6 +737,62 @@ def test_image_allowance_keeps_other_json_admitted_before_parsing(
     assert not decoded and server.work_budget.usage() == (0, 0)
 
 
+@pytest.mark.parametrize("kind", [
+    "astral-escape", "bmp-escape", "ascii-escape", "raw-outside", "raw-header",
+    "raw-payload", "escaped-quote", "double-escape", "mixed",
+])
+def test_image_strings_that_can_widen_require_generic_admission_before_parsing(
+    server: GeometrizeServer, monkeypatch, kind: str,
+) -> None:
+    from geometrize_py import web
+    from geometrize_py.resources import WorkBudget
+
+    image = "data:image/png;base64," + "a" * 70_000
+    payload = {"image": image}
+    if kind == "bmp-escape":
+        payload["image"] += "\u0100"
+    elif kind == "ascii-escape":
+        payload["image"] += "A"
+    elif kind == "raw-outside":
+        payload["unused"] = "\U0001f600"
+    elif kind == "raw-header":
+        payload["image"] = image.replace("image/png", "image/png;name=\U0001f600")
+    elif kind == "escaped-quote":
+        payload["image"] += '"\U0001f600'
+    elif kind == "double-escape":
+        payload["image"] += r"\u0061"
+    elif kind == "mixed":
+        payload["image"] += "\r\n\U0001f600"
+    else:
+        payload["image"] += "\U0001f600"
+    body_text = json.dumps(payload, ensure_ascii=not kind.startswith("raw-"))
+    if kind == "ascii-escape":
+        body_text = body_text.replace('A"}', r'\u0041"}')
+    body = body_text.encode()
+    decoded = []
+    actual_loads = json.loads
+
+    def loads(value, *args, **kwargs):
+        if value == body_text:
+            decoded.append(value)
+        return actual_loads(value, *args, **kwargs)
+
+    monkeypatch.setattr(web.json, "loads", loads)
+    server.work_budget = WorkBudget(1, 5 * len(body))
+    with pytest.raises(HTTPError) as error:
+        _post(server, "/api/source/prepare", body=body)
+    assert json.load(error.value)["code"] == "memory_limit"
+    assert not decoded and server.work_budget.usage() == (0, 0)
+
+
+def test_unicode_source_header_can_prepare_when_generic_memory_is_available(server: GeometrizeServer) -> None:
+    image = image_to_data_url(Image.new("RGB", (2, 2), (20, 40, 60)))
+    image = image.replace("image/png", "image/png;name=\U0001f600")
+    result = _post(server, "/api/source/prepare", body=json.dumps({"image": image}, ensure_ascii=False).encode())
+    assert (result["width"], result["height"], result["mime_type"]) == (2, 2, "image/png")
+    assert server.work_budget.usage() == (0, 0)
+
+
 def test_estimated_image_string_still_requires_valid_json_escapes(server: GeometrizeServer, monkeypatch) -> None:
     from geometrize_py import web
     from geometrize_py.resources import WorkBudget
