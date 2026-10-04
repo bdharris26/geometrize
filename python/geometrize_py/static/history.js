@@ -1,11 +1,14 @@
 "use strict";
 
+import { copyPalette, paletteLabel } from "./palette.js";
+
 const ID = /^[a-zA-Z0-9_-]{1,64}$/;
 const copyOptions = options => ({ ...options, shape_types: [...options.shape_types],
-  focus: options.focus ? { ...options.focus } : null });
+  focus: options.focus ? { ...options.focus } : null, palette: copyPalette(options.palette) });
 const pointsIn = shapes => shapes.reduce((total, shape) => total +
   (shape?.type === "polyline" ? shape.data.points.length : 0), 0);
-const copyTelemetry = telemetry => ({ ...telemetry, batches: [...telemetry.batches] });
+const copyTelemetry = telemetry => ({ ...telemetry, batches: telemetry.batches.map(batch => ({ ...batch,
+  ...("palette" in batch ? { palette: copyPalette(batch.palette) } : {}) })) });
 const background = scene => Array.isArray(scene.background) ? scene.background : scene.background ?
   [scene.background.r, scene.background.g, scene.background.b, scene.background.a] : null;
 
@@ -161,7 +164,7 @@ export class HistoryControls {
               "Scrub to inspect; Restore and Fork keep the original experiment.";
     const settings = active?.options;
     el.settings.textContent = settings ?
-      `${settings.shape_types.join(", ")} · alpha ${settings.alpha} · seed ${settings.seed} · ${settings.max_size}px working` : "";
+      `${settings.shape_types.join(", ")} · alpha ${settings.alpha} · seed ${settings.seed} · ${settings.max_size}px working · ${paletteLabel(settings.palette)}` : "";
   }
 }
 
