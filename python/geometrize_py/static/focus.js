@@ -90,9 +90,10 @@ export class FocusUpdates {
 // starts another stroke when fitting finishes, so no timer can build a backlog.
 // Stopping discards future work; the current one-shape stroke finishes.
 export class PaintQueue {
-  constructor({ runStroke, onState = () => {}, canHold = () => true, capacity = 12 }) {
+  constructor({ runStroke, onState = () => {}, onIdle = () => {}, canHold = () => true, capacity = 12 }) {
     this.runStroke = runStroke;
     this.onState = onState;
+    this.onIdle = onIdle;
     this.canHold = canHold;
     this.capacity = capacity;
     this.enabled = false;
@@ -184,7 +185,7 @@ export class PaintQueue {
   }
 
   async drain() {
-    if (this.running || this.busy || !this.enabled) return;
+    if (this.running || this.busy || !this.enabled || (!this.pending.length && !(this.held && this.holdTarget))) return;
     const generation = this.generation;
     this.running = true;
     try {
@@ -237,6 +238,7 @@ export class PaintQueue {
         this.releaseGeneration = null;
         this.report("released");
       }
+      this.onIdle();
       if (generation !== this.generation) void this.drain();
     }
   }
@@ -318,9 +320,10 @@ export class FocusControls {
     this.changed();
   }
 
-  setAvailability(available, running) {
+  setAvailability(available, running, paintAvailable = available) {
     this.available = available;
     this.running = running;
+    this.paintAvailable = paintAvailable;
     this.render();
   }
 
@@ -332,8 +335,8 @@ export class FocusControls {
   render() {
     const value = this.value || this.remembered || this.defaults();
     this.el.toggle.disabled = !this.available;
-    this.el.paint.disabled = !this.available;
-    this.el.behavior.disabled = !this.available;
+    this.el.paint.disabled = !this.paintAvailable;
+    this.el.behavior.disabled = !this.paintAvailable;
     this.el.behavior.value = this.paintBehavior;
     this.el.toggle.setAttribute("aria-pressed", String(this.mode === "focus"));
     this.el.paint.setAttribute("aria-pressed", String(this.mode === "paint"));

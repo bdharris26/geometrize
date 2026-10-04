@@ -83,7 +83,7 @@ def test_sample_continue_and_project_round_trip(server_url: str, tmp_path: Path)
 
         project = json.loads(project_path.read_text(encoding="utf-8"))
         assert project["format"] == "geometrize-project"
-        assert project["version"] == 1
+        assert project["version"] == 2
         assert project["options"]["max_size"] == 128
         assert project["options"]["export_size"] == 256
         assert project["options"]["alpha"] == 1
@@ -99,11 +99,12 @@ def test_sample_continue_and_project_round_trip(server_url: str, tmp_path: Path)
         page.reload(wait_until="networkidle")
         page.locator("#project-input").set_input_files(project_path)
         expect(page.locator("#status")).to_have_text(
-            "Project loaded — Run starts a new render",
+            "Project loaded — Restore or fork to continue",
             timeout=30_000,
         )
 
         assert page.locator("#run-button").inner_text() == "Run"
+        expect(page.locator("#run-button")).to_be_disabled()
         expect(page.locator("#max-size")).to_have_value("128")
         expect(page.locator("#export-size")).to_have_value("256")
         assert page.locator("#download-png").get_attribute("aria-disabled") == "false"
@@ -220,7 +221,7 @@ def test_exports_follow_resolution_without_adding_shapes(server_url: str, tmp_pa
         download_info.value.save_as(project_path)
         page.reload(wait_until="networkidle")
         page.locator("#project-input").set_input_files(project_path)
-        expect(page.locator("#status")).to_have_text("Project loaded — Run starts a new render")
+        expect(page.locator("#status")).to_have_text("Project loaded — Restore or fork to continue")
         expect(page.locator("#download-svg")).to_have_attribute("aria-disabled", "false")
         svg_path = tmp_path / "restored.svg"
         with page.expect_download() as download_info:
@@ -409,9 +410,6 @@ def test_failed_recovery_saves_only_the_last_confirmed_scene(server_url: str, tm
         download_info.value.save_as(original_path)
         original = json.loads(original_path.read_text(encoding="utf-8"))
 
-        page.reload(wait_until="networkidle")
-        page.locator("#project-input").set_input_files(original_path)
-        expect(page.locator("#status")).to_have_text("Project loaded — Run starts a new render")
         confirmed_preview = page.locator("#result-canvas").evaluate("canvas => canvas.toDataURL()")
         confirmed_acceptance = page.locator("#telemetry-acceptance").inner_text()
         confirmed_history = page.locator("#batch-history").inner_text()
@@ -420,16 +418,17 @@ def test_failed_recovery_saves_only_the_last_confirmed_scene(server_url: str, tm
         height = original["result"]["render_height"]
         start = {
             "event": "start", "session_id": "unconfirmed", "run_id": "broken-run",
-            "continued": False, "width": width, "height": height,
-            "background": {"r": 255, "g": 255, "b": 255, "a": 255},
-            "shapes": [], "attempts": 0, "revision": 0, "initial_score": 0.9,
+            "continued": True, "width": width, "height": height,
+            "background": original["result"]["background"],
+            "shapes": original["result"]["shapes"],
+            "attempts": original["telemetry"]["attempts"], "revision": 3, "initial_score": 0.9,
         }
         step = {
             "event": "step", "shapes": [{
                 "type": "rectangle", "color": {"r": 0, "g": 0, "b": 0, "a": 255},
                 "data": {"x1": 0, "y1": 0, "x2": width, "y2": height}, "score": 0.5,
             }],
-            "attempts": 1, "revision": 1, "batch_shape_count": 1, "batch_goal": 2,
+            "attempts": 1, "revision": 4, "batch_shape_count": 1, "batch_goal": 2,
         }
         page.route("**/api/run/stream", lambda route: route.fulfill(
             status=200, content_type="application/x-ndjson",
@@ -439,7 +438,7 @@ def test_failed_recovery_saves_only_the_last_confirmed_scene(server_url: str, tm
             status=503, content_type="application/json",
             body=json.dumps({"code": "snapshot_unavailable", "error": "Snapshot unavailable"}),
         ))
-        page.get_by_role("button", name="Run", exact=True).click()
+        page.get_by_role("button", name="Continue", exact=True).click()
         expect(page.locator("#run-button")).to_have_text("Recover result")
         expect(page.locator("#telemetry-state")).to_have_text("Error")
         assert page.locator("#result-canvas").evaluate("canvas => canvas.toDataURL()") == confirmed_preview
@@ -455,7 +454,7 @@ def test_failed_recovery_saves_only_the_last_confirmed_scene(server_url: str, tm
         assert saved["result"]["preview_data_url"] == original["result"]["preview_data_url"]
         assert saved["result"]["render_width"] == original["result"]["render_width"]
         assert saved["result"]["render_height"] == original["result"]["render_height"]
-        assert [saved["result"]["background"][key] for key in ("r", "g", "b", "a")] == original["result"]["background"]
+        assert saved["result"]["background"] == original["result"]["background"]
         assert saved["telemetry"] == original["telemetry"]
         browser.close()
 
@@ -477,7 +476,8 @@ def test_preview_only_project_survives_save_reopen_and_new_render(server_url: st
 
         page.reload(wait_until="networkidle")
         page.locator("#project-input").set_input_files(preview_only_path)
-        expect(page.locator("#status")).to_have_text("Project loaded — Run starts a new render")
+        expect(page.locator("#status")).to_have_text("Project loaded — New render starts a fresh experiment")
+        expect(page.locator("#run-button")).to_be_disabled()
         expect(page.locator("#result-preview")).to_be_visible()
         expect(page.locator("#download-png")).to_have_attribute("aria-disabled", "true")
         assert page.locator("#result-preview").get_attribute("src") == preview_only["result"]["preview_data_url"]
@@ -497,10 +497,11 @@ def test_preview_only_project_survives_save_reopen_and_new_render(server_url: st
 
         page.reload(wait_until="networkidle")
         page.locator("#project-input").set_input_files(saved_path)
-        expect(page.locator("#status")).to_have_text("Project loaded — Run starts a new render")
+        expect(page.locator("#status")).to_have_text("Project loaded — New render starts a fresh experiment")
         expect(page.locator("#result-preview")).to_be_visible()
         assert page.locator("#result-preview").get_attribute("src") == preview_only["result"]["preview_data_url"]
 
+        page.locator("#restart-button").click()
         page.locator("#steps-number").fill("1")
         page.get_by_role("button", name="Run", exact=True).click()
         page.get_by_role("button", name="Continue", exact=True).wait_for(timeout=120_000)
@@ -516,6 +517,9 @@ def test_preview_only_project_survives_save_reopen_and_new_render(server_url: st
         rendered = json.loads(rendered_path.read_text(encoding="utf-8"))
         assert len(rendered["result"]["shapes"]) == 1
         assert rendered["result"]["preview_data_url"] == rendered_preview
+        assert len(rendered["history"]["branches"]) == 2
+        retained = rendered["history"]["branches"][0]["result"]
+        assert retained["preview_data_url"] == preview_only["result"]["preview_data_url"]
         browser.close()
 
 

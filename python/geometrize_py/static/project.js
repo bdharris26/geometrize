@@ -1,6 +1,7 @@
 "use strict";
 
 import { validateFocus } from "./focus.js";
+import { validateHistory } from "./history.js";
 
 function object(value, label) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
@@ -172,19 +173,12 @@ function batches(raw, contract) {
   });
 }
 
-export function validateProject(raw, contract) {
-  if (Array.isArray(raw)) throw new Error("This is a Shapes JSON export, not a Geometrize project");
-  const project = object(raw, "project");
-  if (project.format !== contract.project.format) throw new Error("This JSON file is not a Geometrize project");
-  if (project.version !== contract.project.version) throw new Error(`Project version ${String(project.version)} is not supported`);
-  const source = object(project.source, "source");
-  const result = object(project.result, "result");
-  const telemetry = object(project.telemetry, "telemetry");
-  if (!Array.isArray(result.shapes) || result.shapes.length > contract.project.max_shapes) {
+function shapeBudgets(shapes, contract) {
+  if (!Array.isArray(shapes) || shapes.length > contract.project.max_shapes) {
     throw new Error(`A project can contain at most ${contract.project.max_shapes} shapes`);
   }
   let totalPoints = 0;
-  result.shapes.forEach((item, index) => {
+  shapes.forEach((item, index) => {
     if (item?.type !== "polyline") return;
     const points = item.data?.points;
     if (!Array.isArray(points) || points.length > contract.project.max_points) {
@@ -195,6 +189,12 @@ export function validateProject(raw, contract) {
       throw new Error(`Project cannot exceed ${contract.project.max_total_points} polyline points`);
     }
   });
+}
+
+function scene(rawResult, rawTelemetry, contract) {
+  const result = object(rawResult, "result");
+  const telemetry = object(rawTelemetry, "telemetry");
+  shapeBudgets(result.shapes, contract);
   const width = optionalDimension(result.width, "result width", contract);
   const height = optionalDimension(result.height, "result height", contract);
   const renderWidth = optionalDimension(result.render_width, "render width", contract);
@@ -202,13 +202,6 @@ export function validateProject(raw, contract) {
   const longest = Math.max(renderWidth || width, renderHeight || height);
   const geometryLimit = longest ? contract.project.max_geometry_factor * longest : contract.project.max_coordinate;
   return {
-    source: {
-      name: typeof source.name === "string" && source.name.length <= 512 && source.name ? source.name : "Source image",
-      data_url: rasterDataUrl(source.data_url, "source image", contract),
-      width: optionalDimension(source.width, "source width", contract),
-      height: optionalDimension(source.height, "source height", contract)
-    },
-    options: options(project.options, contract),
     result: {
       preview_data_url: result.preview_data_url == null ? "" : rasterDataUrl(result.preview_data_url, "result preview", contract),
       width,
@@ -216,6 +209,7 @@ export function validateProject(raw, contract) {
       render_width: renderWidth,
       render_height: renderHeight,
       background: result.background == null ? null : color(result.background, "result background"),
+      restored_shape_count: integer(result.restored_shape_count ?? 0, 0, result.shapes.length, "retained shape count"),
       shapes: result.shapes.map((item, index) => shape(item, index, contract, geometryLimit))
     },
     telemetry: {
@@ -224,6 +218,63 @@ export function validateProject(raw, contract) {
       initial_score: telemetry.initial_score == null ? null : finite(telemetry.initial_score, "initial score", contract),
       batches: batches(telemetry.batches, contract)
     }
+  };
+}
+
+function knownFields(value, fields, label) {
+  if (Object.keys(value).some(key => !fields.includes(key))) throw new Error(`Project ${label} contains an unknown field`);
+}
+
+function history(raw, root, contract) {
+  if (raw === undefined || raw === null) {
+    return { active_branch: "experiment-1", view_shape_count: root.result.shapes.length,
+      branches: [{ id: "experiment-1", name: "Original", parent_id: null, fork_shape_count: 0, ...root }] };
+  }
+  const input = object(raw, "history");
+  knownFields(input, ["active_branch", "view_shape_count", "branches"], "history");
+  if (!Array.isArray(input.branches) || !input.branches.length || input.branches.length > contract.project.max_branches) {
+    throw new Error(`Project history must contain 1 to ${contract.project.max_branches} experiments`);
+  }
+  // Check raw array budgets and graph links before allocating validated scenes.
+  const branches = input.branches.map(value => {
+    const branch = object(value, "experiment");
+    knownFields(branch, ["id", "name", "parent_id", "fork_shape_count", "options", "result", "telemetry"], "experiment");
+    const active = branch.id === input.active_branch;
+    if (active && ("result" in branch || "telemetry" in branch)) {
+      throw new Error("Project active experiment uses the top-level result and telemetry");
+    }
+    const result = active ? root.result : object(branch.result, "experiment result");
+    shapeBudgets(result.shapes, contract);
+    return { ...branch, result };
+  });
+  const state = validateHistory({ active_branch: input.active_branch, view_shape_count: input.view_shape_count, branches }, contract.project);
+  state.branches = state.branches.map(branch => ({
+    id: branch.id, name: branch.name, parent_id: branch.parent_id, fork_shape_count: branch.fork_shape_count,
+    options: options(branch.options, contract),
+    ...(branch.id === input.active_branch ? { result: root.result, telemetry: root.telemetry } :
+      scene(branch.result, branch.telemetry, contract))
+  }));
+  return state;
+}
+
+export function validateProject(raw, contract) {
+  if (Array.isArray(raw)) throw new Error("This is a Shapes JSON export, not a Geometrize project");
+  const project = object(raw, "project");
+  if (project.format !== contract.project.format) throw new Error("This JSON file is not a Geometrize project");
+  if (project.version !== 1 && project.version !== contract.project.version) {
+    throw new Error(`Project version ${String(project.version)} is not supported`);
+  }
+  if (project.version === 1 && project.history != null) throw new Error("Version 1 projects cannot contain experiments");
+  const source = object(project.source, "source");
+  const root = { options: options(project.options, contract), ...scene(project.result, project.telemetry, contract) };
+  return {
+    source: {
+      name: typeof source.name === "string" && source.name.length <= 512 && source.name ? source.name : "Source image",
+      data_url: rasterDataUrl(source.data_url, "source image", contract),
+      width: optionalDimension(source.width, "source width", contract),
+      height: optionalDimension(source.height, "source height", contract)
+    },
+    ...root, history: history(project.history, root, contract)
   };
 }
 
@@ -237,8 +288,12 @@ export async function openProjectFile(file, contract) {
     throw error;
   }
   const project = validateProject(raw, contract);
-  const images = [decodeImage(project.source.data_url, "Project source image", contract)];
-  if (project.result.preview_data_url) images.push(decodeImage(project.result.preview_data_url, "Project result preview", contract));
-  await Promise.all(images);
+  await decodeImage(project.source.data_url, "Project source image", contract);
+  if (project.result.preview_data_url) await decodeImage(project.result.preview_data_url, "Project result preview", contract);
+  for (const branch of project.history.branches) {
+    if (branch.id !== project.history.active_branch && branch.result.preview_data_url) {
+      await decodeImage(branch.result.preview_data_url, "Experiment preview", contract);
+    }
+  }
   return project;
 }

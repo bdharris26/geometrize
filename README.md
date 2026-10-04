@@ -31,7 +31,7 @@ Open `http://127.0.0.1:7860`, choose a PNG, JPEG, WebP, BMP, or GIF, and choose
 Quick sketch, Balanced, or Fine detail. Set the number of shapes to add, then
 start a render. Advanced controls expose all nine primitives, seed, candidates,
 mutations, and a per-batch CPU limit. Changes apply to the next batch; New render
-clears the result so Run starts a fresh fit with the current settings.
+creates a blank experiment with the current settings and keeps the previous result.
 
 Enable Focus area to guide candidate starts toward a circular region. Click or
 drag the live result to move the center, and adjust radius (a fraction of the
@@ -51,22 +51,35 @@ already matched. Projects save focus settings and the complete batch history.
 The history panel keeps a fixed height, shows at most 50 batches, and lets you
 page through older entries without shrinking the previews.
 
+Scrub the Shape timeline to inspect an earlier prefix without changing the full
+experiment. Head returns to its latest shape. Restore prefix or Fork experiment
+creates a named child with the selected shapes and current settings; the original
+stays selectable. Restoring recomputes native scores and resets attempts, batch
+counts, and the random sequence. Fitting and Paint stay disabled while inspecting.
+Switch between retained experiments to compare them, and use Name / remove to
+rename one or remove an inactive experiment after its children have been removed.
+Working resolution stays fixed to each experiment's scene until New render.
+
 The source and live result share zoom and pan controls. Pause finishes the
 current fitting step and confirms the final counts before Continue becomes
 available. The error chart shows the initial baseline and recent improvements;
 lower error is better. A batch also stops when the source is already matched,
 improvement stalls, or its attempt limit is reached.
 
-PNG and SVG exports are generated on demand from the current result. Changing
+PNG, SVG, and Shapes JSON export the visible timeline prefix. Changing
 export size does not add shapes or rerun fitting. Working resolution and display
 zoom are independent of export size. Both working and export resolution allow
 up to 8192px on the longest edge. PNG rendering
 preserves Pillow's rasterization and curve sampling; SVG and the live canvas use
 continuous paths and antialiasing, so curved boundaries can differ more at larger
 export sizes. The fitting engine uses its own
-scanline and blending rules for the error score. Project JSON restores the
-source, result, settings, and history, and allows exporting the saved result.
-Continuing after reopening a project starts a new native fit.
+scanline and blending rules for the error score. Project JSON saves the source,
+every experiment's full head and settings, complete batch history, and the selected
+prefix. Version 2 projects accept older version 1 files as a single Original
+experiment. Live sessions can Continue after switching back; reopened or expired
+sessions require an explicit Restore or Fork before fitting. A project supports
+32 experiments, 200,000 retained shapes, and 1,000,000 polyline points in total.
+Legacy preview-only results use New render to start fitting while retaining the preview.
 
 ## Command Line
 

@@ -69,6 +69,8 @@ export class Telemetry {
     this.scoreSeries = [];
     this.impacts = [];
     this.attempts = 0;
+    this.retained = 0;
+    this.inspection = null;
     this.initialScore = null;
     this.batches = [];
     this.historyStart = null;
@@ -78,10 +80,11 @@ export class Telemetry {
     this.render();
   }
 
-  replace(shapes, attempts, initialScore = this.initialScore) {
+  replace(shapes, attempts, initialScore = this.initialScore, retained = this.retained) {
     this.shapes = [...shapes];
     this.attempts = attempts || 0;
     this.initialScore = typeof initialScore === "number" ? initialScore : null;
+    this.retained = retained;
     this.rebuildSeries();
     this.render();
   }
@@ -147,12 +150,30 @@ export class Telemetry {
     this.render();
   }
 
+  inspect(count) {
+    this.inspection = count;
+    if (count === null) this.render();
+    else this.renderInspection();
+  }
+
+  renderInspection() {
+    const count = this.inspection;
+    const score = count ? this.shapes[count - 1]?.score : this.initialScore;
+    this.el.state.textContent = "Inspecting prefix";
+    this.el.acceptance.textContent = `${count} / ${this.shapes.length} shapes · read-only`;
+    this.el.score.textContent = fixed(score);
+    this.el.improvement.textContent = `Prefix error ${fixed(score)} · lower is better`;
+    this.el.baseline.textContent = `Full experiment graph · initial error ${fixed(this.initialScore)}`;
+  }
+
   render() {
     const el = this.el;
     const latestScore = this.scoreSeries.at(-1)?.score;
     const latestImpact = this.impacts.at(-1);
     el.state.textContent = this.state;
-    el.acceptance.textContent = `${this.shapes.length} accepted / ${this.attempts} attempts`;
+    el.acceptance.textContent = this.retained ?
+      `${this.retained} retained · ${Math.max(0, this.shapes.length - this.retained)} new accepted / ${this.attempts} attempts` :
+      `${this.shapes.length} accepted / ${this.attempts} attempts`;
     el.improvement.textContent = `Error ${fixed(latestScore)} · lower is better`;
     el.duration.textContent = this.elapsed ? duration(this.elapsed) : "--";
     el.score.textContent = fixed(latestScore);
@@ -180,6 +201,7 @@ export class Telemetry {
     el.mix.replaceChildren(...rows);
 
     this.renderHistory();
+    if (this.inspection !== null) this.renderInspection();
   }
 
   pageHistory(direction) {

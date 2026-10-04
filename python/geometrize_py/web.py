@@ -21,11 +21,26 @@ from pathlib import PurePosixPath
 from typing import Any, cast
 from urllib.parse import unquote, urlsplit
 
-from .contracts import MAX_REQUEST_BYTES, OPTION_LIMITS, app_contract
+from .contracts import (
+    MAX_REQUEST_BYTES,
+    OPTION_LIMITS,
+    PROJECT_MAX_SHAPES,
+    PROJECT_MAX_TOTAL_POINTS,
+    RESTORE_MAX_WORK,
+    app_contract,
+)
 from .errors import APIError
 from .exporting import ExportArtifact, ExportCache, RenderScene, build_export, inspect_scene, validate_scene
 from .images import image_bytes_size, image_data_url_bytes, image_to_data_url, open_image_bytes
-from .native import ImageSession, NativeBackendUnavailable, RunOptions, native_available, normalize_focus
+from .native import (
+    ImageSession,
+    NativeBackendUnavailable,
+    RunOptions,
+    native_available,
+    normalize_focus,
+    normalize_restore_count,
+    require_restore_native,
+)
 from .render import export_dimensions
 from .resources import (
     DEFAULT_ACTIVE_MEMORY_BYTES,
@@ -51,7 +66,6 @@ REJECTED_BODY_DRAIN_SECONDS = 0.25
 REQUEST_MEMORY_FLOOR = 64 * 1024
 JSON_EXPANSION_FACTOR = 32
 ESTIMATED_BYTES_PER_PIXEL = 16
-ESTIMATED_BYTES_PER_SHAPE = 512
 ESTIMATED_SESSION_OVERHEAD_BYTES = 64 * 1024
 LOGGER = logging.getLogger(__name__)
 SESSION_ACTION = re.compile(r"^/api/sessions/([a-zA-Z0-9_-]+)/(pause|focus|snapshot)$")
@@ -80,6 +94,7 @@ class GeometrizeServer(ThreadingHTTPServer):
         max_session_bytes: int | None = None,
         worker_budget: int = DEFAULT_WORKER_BUDGET,
         active_memory_bytes: int = DEFAULT_ACTIVE_MEMORY_BYTES,
+        restore_work_limit: int = RESTORE_MAX_WORK,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         if max_session_bytes is None:
@@ -90,11 +105,15 @@ class GeometrizeServer(ThreadingHTTPServer):
             raise ValueError("Session, render, and cache limits must be positive")
         if min(request_timeout_seconds, session_idle_seconds) <= 0:
             raise ValueError("Request and session timeouts must be positive")
+        if (isinstance(restore_work_limit, bool) or not isinstance(restore_work_limit, int)
+                or not 1 <= restore_work_limit <= RESTORE_MAX_WORK):
+            raise ValueError(f"restore_work_limit must be an integer between 1 and {RESTORE_MAX_WORK}")
         self.work_budget = WorkBudget(worker_budget, active_memory_bytes)
         super().__init__(server_address, RequestHandlerClass)
         self.sessions: OrderedDict[str, _StoredSession] = OrderedDict()
         self.sessions_lock = threading.RLock()
         self.active_runs: dict[str, str] = {}
+        self._active_session_bytes: dict[str, int] = {}
         self._render_slots = threading.BoundedSemaphore(max_active_renders)
         self.max_sessions = max_sessions
         self.max_active_renders = max_active_renders
@@ -102,6 +121,7 @@ class GeometrizeServer(ThreadingHTTPServer):
         self.request_timeout_seconds = request_timeout_seconds
         self.session_idle_seconds = session_idle_seconds
         self.max_session_bytes = max_session_bytes
+        self.restore_work_limit = restore_work_limit
         self.export_cache = ExportCache()
         self._clock = clock
         self._stored_session_bytes = 0
@@ -112,17 +132,30 @@ class GeometrizeServer(ThreadingHTTPServer):
     def release_render_slot(self) -> None:
         self._render_slots.release()
 
-    def store_session(self, session_id: str, session: ImageSession) -> None:
+    def store_session(self, session_id: str, session: ImageSession, *, require_retention: bool = False) -> None:
         with self.sessions_lock:
             now = self._clock()
+            estimated = max(_estimate_session_bytes(session), self._active_session_bytes.get(session_id, 0))
+            record = _StoredSession(session, now, estimated)
+            if require_retention:
+                protected = [
+                    stored for key, stored in self.sessions.items()
+                    if key != session_id and key in self.active_runs
+                ]
+                if (len(protected) + 1 > self.max_sessions
+                        or sum(stored.estimated_bytes for stored in protected) + record.estimated_bytes
+                        > self.max_session_bytes):
+                    raise APIError(
+                        "session_capacity", "Active sessions fill the saved session cache; wait for a run to finish",
+                        HTTPStatus.TOO_MANY_REQUESTS,
+                    )
             self._remove_expired_sessions(now)
             previous = self.sessions.pop(session_id, None)
             if previous is not None:
                 self._stored_session_bytes -= previous.estimated_bytes
-            record = _StoredSession(session, now, _estimate_session_bytes(session))
             self.sessions[session_id] = record
             self._stored_session_bytes += record.estimated_bytes
-            self._enforce_session_limits()
+            self._enforce_session_limits(session_id if require_retention else None)
 
     def get_session(self, session_id: str) -> ImageSession | None:
         with self.sessions_lock:
@@ -135,14 +168,30 @@ class GeometrizeServer(ThreadingHTTPServer):
             self.sessions.move_to_end(session_id)
             return record.session
 
-    def activate_session(self, session_id: str, session: ImageSession, run_id: str) -> None:
+    def activate_session(self, session_id: str, session: ImageSession, run_id: str, *, options: RunOptions) -> None:
         with self.sessions_lock:
+            projected = _projected_session_bytes(session, options)
+            previous_run = self.active_runs.get(session_id)
+            previous_projection = self._active_session_bytes.get(session_id)
             self.active_runs[session_id] = run_id
-            self.store_session(session_id, session)
+            self._active_session_bytes[session_id] = projected
+            try:
+                self.store_session(session_id, session)
+            except BaseException:
+                if previous_run is None:
+                    self.active_runs.pop(session_id, None)
+                else:
+                    self.active_runs[session_id] = previous_run
+                if previous_projection is None:
+                    self._active_session_bytes.pop(session_id, None)
+                else:
+                    self._active_session_bytes[session_id] = previous_projection
+                raise
 
     def finish_session(self, session_id: str, session: ImageSession) -> None:
         with self.sessions_lock:
             self.active_runs.pop(session_id, None)
+            self._active_session_bytes.pop(session_id, None)
             self.store_session(session_id, session)
 
     def service_actions(self) -> None:
@@ -155,11 +204,11 @@ class GeometrizeServer(ThreadingHTTPServer):
             if session_id not in self.active_runs and now - record.last_accessed >= self.session_idle_seconds:
                 self._remove_session(session_id)
 
-    def _enforce_session_limits(self) -> None:
+    def _enforce_session_limits(self, protected_session_id: str | None = None) -> None:
         for session_id in list(self.sessions):
             if len(self.sessions) <= self.max_sessions and self._stored_session_bytes <= self.max_session_bytes:
                 break
-            if session_id not in self.active_runs:
+            if session_id not in self.active_runs and session_id != protected_session_id:
                 self._remove_session(session_id)
 
     def _remove_session(self, session_id: str) -> None:
@@ -173,12 +222,14 @@ def run_server(
     *,
     worker_budget: int = DEFAULT_WORKER_BUDGET,
     active_memory_bytes: int = DEFAULT_ACTIVE_MEMORY_BYTES,
+    restore_work_limit: int = RESTORE_MAX_WORK,
 ) -> None:
     server = GeometrizeServer(
         (host, port),
         GeometrizeRequestHandler,
         worker_budget=worker_budget,
         active_memory_bytes=active_memory_bytes,
+        restore_work_limit=restore_work_limit,
     )
     url = f"http://{host}:{server.server_port}"
     print(f"Geometrize UI running at {url}")
@@ -221,6 +272,7 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
                 "max_active_renders": server.max_active_renders,
                 "active_memory_bytes": server.work_budget.memory_bytes,
             }
+            config["restore"]["max_work"] = server.restore_work_limit
             self._send_json(config)
         elif str(path).startswith("/static/"):
             self._send_static(str(path).removeprefix("/static/"))
@@ -230,7 +282,7 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         path = urlsplit(self.path).path
         action = SESSION_ACTION.fullmatch(path)
-        if path not in {"/api/run", "/api/run/stream", "/api/export"} and action is None:
+        if path not in {"/api/run", "/api/run/stream", "/api/export", "/api/restore"} and action is None:
             self.send_error(HTTPStatus.NOT_FOUND)
             return
         self._request_lease: ResourceLease | None = None
@@ -283,6 +335,8 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
                 raise _busy_error()
             if path == "/api/export":
                 self._export(payload)
+            elif path == "/api/restore":
+                self._restore(payload)
             elif path == "/api/run/stream":
                 self._run_stream(payload)
             else:
@@ -350,7 +404,7 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
                 options, lease = self._reserve_fit(options, session.width, session.height)
             session.prepare_run(options)
             self._charge_request_scene({"shapes": session.shapes})
-            self.geometrize_server.activate_session(session_id, session, run_id)
+            self.geometrize_server.activate_session(session_id, session, run_id, options=options)
             activated = True
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
@@ -369,6 +423,7 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
                         "background": session.background,
                         "attempts": session.attempts,
                         "shape_count": len(session.shapes),
+                        "restored_shape_count": session.restored_shape_count,
                         "shapes": session.shapes,
                         "batch": session.batch_count + 1,
                         "batch_goal": options.steps,
@@ -478,6 +533,65 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
             raise
         return session, options, lease
 
+    def _restore(self, payload: dict[str, Any]) -> None:
+        options = _options(payload)
+        raw_scene = payload.get("result")
+        # Count and admit metadata before normalization copies its geometry.
+        self._charge_request_scene(raw_scene)
+        scene = validate_scene(raw_scene)
+        if "shape_count" in payload and payload["shape_count"] is None:
+            raise APIError("invalid_result", "shape_count must be an integer")
+        count = normalize_restore_count(payload.get("shape_count"), len(scene.shapes))
+        prefix = scene.shapes[:count]
+        shape_count, point_count = inspect_scene({"shapes": prefix})
+        cache_memory = _retained_session_bytes(scene.width, scene.height, shape_count, point_count)
+        if cache_memory > self.geometrize_server.max_session_bytes:
+            raise APIError("memory_limit", "Restored prefix exceeds the retained session budget; restore fewer shapes")
+        try:
+            scratch_memory = require_restore_native().replay_memory(
+                scene.width, scene.height, scene.background, prefix,
+                max_work=self.geometrize_server.restore_work_limit,
+            )
+        except (ValueError, TypeError, OverflowError) as exc:
+            raise APIError("invalid_result", str(exc)) from exc
+        try:
+            raw = image_data_url_bytes(_required_text(payload, "image"))
+            source_width, source_height = image_bytes_size(raw)
+        except (ValueError, OSError) as exc:
+            raise APIError("invalid_image", str(exc)) from exc
+        memory = (
+            fitting_memory_bytes(scene.width, scene.height, 1)
+            + source_width * source_height * 12 + len(raw) * 2 + scratch_memory
+        )
+        lease = self._reserve_work(1, memory)
+        try:
+            try:
+                image = open_image_bytes(raw)
+            except (ValueError, OSError) as exc:
+                raise APIError("invalid_image", str(exc)) from exc
+            try:
+                session = ImageSession._from_validated_scene(
+                    image, options, scene, count, native_checked=True,
+                    replay_work_limit=self.geometrize_server.restore_work_limit,
+                )
+            except (ValueError, TypeError, OverflowError) as exc:
+                if isinstance(exc, APIError):
+                    raise
+                raise APIError("invalid_result", str(exc)) from exc
+            session_id = uuid.uuid4().hex
+            snapshot = self._snapshot_payload(session, session_id)
+            snapshot["event"] = "restored"
+            snapshot["restore"] = {
+                "shape_count": count,
+                "source_shape_count": len(scene.shapes),
+                "source_attempts": scene.attempts,
+                "attempt_policy": "reset",
+            }
+            self.geometrize_server.store_session(session_id, session, require_retention=True)
+            self._send_json(snapshot)
+        finally:
+            self.geometrize_server.work_budget.release(lease)
+
     def _reserve_fit(
         self,
         options: RunOptions,
@@ -518,6 +632,7 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
             "shapes": session.shapes.copy(),
             "attempts": session.attempts,
             "shape_count": len(session.shapes),
+            "restored_shape_count": session.restored_shape_count,
             "revision": session.revision,
             "score": session.score,
             "initial_score": session.initial_score,
@@ -633,7 +748,8 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
     def _admit_json_body(self, body: bytes) -> None:
         if self._request_lease is None:
             return
-        image_span = IMAGE_LITERAL.search(body) if urlsplit(self.path).path in {"/api/run", "/api/run/stream"} else None
+        image_routes = {"/api/run", "/api/run/stream", "/api/restore"}
+        image_span = IMAGE_LITERAL.search(body) if urlsplit(self.path).path in image_routes else None
         self._request_image_bytes = image_span.end(1) - image_span.start(1) if image_span is not None else 0
         self._resize_request_memory(
             _request_memory(urlsplit(self.path).path, len(body), self._request_image_bytes, parsed=False)
@@ -762,7 +878,7 @@ def _scene_from_snapshot(snapshot: dict[str, Any]) -> RenderScene:
 
 
 def _request_memory(path: str, body_bytes: int, image_bytes: int, *, parsed: bool) -> int:
-    if path in {"/api/run", "/api/run/stream"}:
+    if path in {"/api/run", "/api/run/stream", "/api/restore"}:
         # Encoded image data is a large string with predictable expansion;
         # other JSON can contain deeply nested Python containers and needs a
         # higher allowance before json.loads constructs them.
@@ -802,9 +918,23 @@ def _safe_static_path(name: str) -> PurePosixPath | None:
 
 
 def _estimate_session_bytes(session: ImageSession) -> int:
-    pixels = max(0, session.width) * max(0, session.height)
+    count, points = inspect_scene({"shapes": session.shapes})
+    return _retained_session_bytes(session.width, session.height, count, points)
+
+
+def _projected_session_bytes(session: ImageSession, options: RunOptions) -> int:
+    count, points = inspect_scene({"shapes": session.shapes})
+    added = min(options.steps, max(0, PROJECT_MAX_SHAPES - count))
+    added_points = min(4 * added, max(0, PROJECT_MAX_TOTAL_POINTS - points)) if "polyline" in options.shape_types else 0
+    # Active batches accept at most `steps` shapes. Charge their possible new
+    # geometry until finish, so cache admission cannot depend on live progress.
+    return _retained_session_bytes(session.width, session.height, count + added, points + added_points)
+
+
+def _retained_session_bytes(width: int, height: int, shape_count: int, point_count: int) -> int:
+    pixels = max(0, width) * max(0, height)
     return (
         ESTIMATED_SESSION_OVERHEAD_BYTES
         + pixels * ESTIMATED_BYTES_PER_PIXEL
-        + len(session.shapes) * ESTIMATED_BYTES_PER_SHAPE
+        + scene_memory_bytes(shape_count, point_count)
     )

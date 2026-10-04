@@ -4,6 +4,7 @@ import { ApiError, postJson, readRunStream } from "./stream.js";
 import { Preview } from "./preview.js";
 import { FocusControls, FocusUpdates, PaintQueue } from "./focus.js";
 import { Telemetry } from "./telemetry.js";
+import { ReconstructionHistory, HistoryControls } from "./history.js";
 import { decodeImage, imageToPngDataUrl, openProjectFile, rasterDataUrl, readFileAsDataUrl } from "./project.js";
 
 const byId = (id) => {
@@ -38,6 +39,8 @@ const STOP_LABELS = {
   adequate_fit: "Fit already adequate",
   no_further_improvement: "No further improvement",
   attempt_limit: "Attempt limit reached",
+  shape_limit: "Shape limit reached",
+  geometry_limit: "Polyline point limit reached",
   paused: "Paused",
   error: "Render failed"
 };
@@ -48,6 +51,10 @@ let telemetry;
 let focus;
 let focusUpdates;
 let paintQueue;
+let history;
+let historyControls;
+let restoreContext = null;
+let inspectionFrame = 0;
 let runIsPaint = false;
 let focusAtRunStart = null;
 let sourceDataUrl = "";
@@ -164,23 +171,41 @@ function applyOptions(options) {
 
 function setControls() {
   const busy = phase === "running" || phase === "pausing";
-  ui.run.disabled = !contract || !sourceDataUrl || busy;
-  ui.run.textContent = busy ? (phase === "pausing" ? "Pausing" : "Running") :
+  const pumpBusy = Boolean(paintQueue?.running || paintQueue?.pending.length);
+  const restoring = phase === "restoring";
+  const inspecting = history?.inspecting || false;
+  const previewOnly = Boolean(loadedPreviewOnlyResult?.preview_data_url || loadedPreviewOnlyResult?.shapes.length);
+  const retainedHead = Boolean((stableResult || previewOnly) && !sessionId);
+  const capacity = history?.fitCapacity(selectedShapeTypes()) ?? Infinity;
+  const canFit = !inspecting && !restoring && !retainedHead && phase !== "recovery" && capacity > 0;
+  const recovering = phase === "recovery" && Boolean(sessionId);
+  ui.run.disabled = !contract || !sourceDataUrl || busy || pumpBusy || restoring || inspecting ||
+    (!recovering && (retainedHead || capacity === 0));
+  ui.run.textContent = restoring ? "Restoring" : busy ? (phase === "pausing" ? "Pausing" : "Running") :
     (phase === "recovery" && sessionId ? "Recover result" : (sessionId ? "Continue" : "Run"));
   ui.pause.disabled = phase !== "running" || !sessionId || !activeRunId;
-  ui.restart.disabled = !sourceDataUrl || busy;
-  ui.imageInput.disabled = busy;
-  ui.sample.disabled = busy;
-  ui.projectInput.disabled = busy;
-  ui.openProject.disabled = busy;
-  ui.saveProject.disabled = busy || !sourceDataUrl;
-  ui.maxSize.disabled = busy || Boolean(sessionId);
-  ui.maxSizeNumber.disabled = busy || Boolean(sessionId);
-  ui.settingsHelp.textContent = sessionId
+  ui.restart.disabled = !sourceDataUrl || busy || pumpBusy || restoring;
+  ui.imageInput.disabled = busy || pumpBusy;
+  ui.sample.disabled = busy || pumpBusy;
+  ui.projectInput.disabled = busy || pumpBusy;
+  ui.openProject.disabled = busy || pumpBusy;
+  ui.saveProject.disabled = busy || pumpBusy || restoring || !sourceDataUrl;
+  ui.maxSize.disabled = busy || restoring || Boolean(sessionId) || Boolean(stableResult);
+  ui.maxSizeNumber.disabled = ui.maxSize.disabled;
+  for (const input of [ui.preset, ui.steps, ui.stepsNumber, ui.exportSize, ui.exportSizeNumber,
+    ui.alpha, ui.seed, ui.shapeCount, ui.mutations, ui.maxThreads, ui.stagnationLimit,
+    ...document.querySelectorAll("input[name='shape']")]) input.disabled = restoring;
+  ui.settingsHelp.textContent = capacity === 0 ? "History budget reached. Remove an inactive experiment or choose fewer polyline shapes." :
+    inspecting ? "Inspecting a read-only prefix. Restore or fork it before fitting." : previewOnly ?
+    "This legacy preview cannot be replayed. New render creates a blank experiment and keeps its preview." : retainedHead ?
+    "Restore or fork to continue this experiment. New render creates a blank experiment." : sessionId
     ? "Edits apply to the next batch. Working resolution is fixed until New render."
     : "Settings apply when you Run. Export resolution is used when a download is clicked.";
-  focus?.setAvailability(Boolean(sourceDataUrl), busy);
-  paintQueue?.setBusy(busy && !runIsPaint);
+  focus?.setAvailability(Boolean(sourceDataUrl), busy, Boolean(sourceDataUrl) && canFit);
+  preview?.setInteractionEnabled(!inspecting && !restoring && !retainedHead && phase !== "recovery");
+  paintQueue?.setEnabled(focus?.mode === "paint" && canFit);
+  paintQueue?.setBusy((busy && !runIsPaint) || restoring || phase === "recovery" || inspecting || retainedHead);
+  historyControls?.render({ busy: busy || pumpBusy || phase === "recovery", restoring });
   for (const link of Object.values(ui.downloads)) {
     const available = Boolean(stableResult);
     link.setAttribute("aria-disabled", available ? "false" : "true");
@@ -188,7 +213,9 @@ function setControls() {
   }
 }
 
-function clearResult() {
+function clearResult({ keepHistory = false } = {}) {
+  restoreContext = null;
+  cancelAnimationFrame(inspectionFrame);
   focusUpdates.end();
   paintQueue.clear();
   sessionId = "";
@@ -204,6 +231,10 @@ function clearResult() {
   exportVersion += 1;
   preview.clearResult();
   telemetry.reset();
+  if (!keepHistory) {
+    history.reset();
+    if (sourceDataUrl) history.add(emptyExperiment());
+  }
   ui.resultMeta.textContent = "";
   ui.metrics.textContent = "";
   ui.pipeline.textContent = "0 shapes";
@@ -283,6 +314,171 @@ function stopLabel(reason, eventName) {
   return STOP_LABELS[reason] || (eventName === "paused" ? "Paused" : "Complete");
 }
 
+function emptyExperiment(options = currentOptions()) {
+  return { options, sessionId: "", result: { width: 0, height: 0, background: null, shapes: [], restored_shape_count: 0 },
+    telemetry: { attempts: 0, duration_ms: 0, initial_score: null, batches: [] } };
+}
+
+function captureExperiment() {
+  if (!stableResult) return;
+  history.checkpoint({ result: stableResult, options: currentOptions(), sessionId,
+    telemetry: { attempts: stableResult.attempts, duration_ms: Math.round(lastDurationMs),
+      initial_score: telemetry.initialScore, batches: telemetry.batches } });
+}
+
+function historyLocked() { return ["running", "pausing", "recovery"].includes(phase) || Boolean(paintQueue?.running || paintQueue?.pending.length); }
+
+function expireCurrentSession() {
+  sessionId = "";
+  history.expireSession();
+}
+
+function normalizeWorkingSize(result) {
+  return Math.min(contract.limits.max_size.max, Math.max(contract.limits.max_size.min,
+    result.render_width || result.width || 0, result.render_height || result.height || 0));
+}
+
+function installExperiment(branch) {
+  const result = branch.result;
+  const width = result.render_width || result.width;
+  const height = result.render_height || result.height;
+  sessionId = branch.sessionId || "";
+  activeRunId = "";
+  workingResult = null;
+  stableResult = width && height && result.background ? {
+    width, height, background: result.background, shapes: result.shapes,
+    attempts: branch.telemetry.attempts, revision: result.shapes.length,
+    restored_shape_count: result.restored_shape_count || 0
+  } : null;
+  loadedPreviewOnlyResult = stableResult ? null : result;
+  if (stableResult) preview.showPrefix(stableResult, history.cursor);
+  else if (width && height && result.preview_data_url) preview.showImage(result.preview_data_url, width, height);
+  else preview.clearResult();
+  const options = { ...branch.options };
+  if (stableResult) options.max_size = normalizeWorkingSize(result);
+  applyOptions(options);
+  history.rememberOptions(options);
+  telemetry.reset();
+  telemetry.replace(result.shapes, branch.telemetry.attempts, branch.telemetry.initial_score, result.restored_shape_count || 0);
+  telemetry.batches = [...branch.telemetry.batches];
+  lastDurationMs = branch.telemetry.duration_ms;
+  telemetry.setState("Experiment ready", lastDurationMs);
+  telemetry.inspect(history.inspecting ? history.cursor : null);
+  ui.resultMeta.textContent = width && height ? `${width} x ${height}` : "";
+  ui.metrics.textContent = `${history.cursor} / ${result.shapes.length} shapes`;
+  ui.pipeline.textContent = `${branch.telemetry.attempts} attempts`;
+  phase = "loaded";
+  runIsPaint = false;
+  setControls();
+}
+
+function invalidateExperimentView() {
+  restoreContext = null;
+  cancelAnimationFrame(inspectionFrame);
+  runVersion += 1;
+  contentVersion += 1;
+  sceneVersion += 1;
+  exportVersion += 1;
+  focusUpdates.end();
+  preview.stopPaintGesture();
+  paintQueue.clear();
+  exportCache.clear();
+  pendingExports.clear();
+  lastArtifact = null;
+}
+
+function inspectExperiment(count) {
+  if (historyLocked() || phase === "restoring" || !stableResult) return;
+  preview.stopPaintGesture();
+  paintQueue.clear();
+  history.inspect(count);
+  exportVersion += 1;
+  cancelAnimationFrame(inspectionFrame);
+  const branchId = history.activeId;
+  inspectionFrame = requestAnimationFrame(() => {
+    if (branchId !== history.activeId || historyLocked() || phase === "restoring" || !stableResult) return;
+    preview.showPrefix(stableResult, history.cursor);
+  });
+  telemetry.inspect(history.inspecting ? history.cursor : null);
+  ui.metrics.textContent = `${history.cursor} / ${history.length} shapes`;
+  ui.status.textContent = history.inspecting ? `Inspecting ${history.cursor} of ${history.length} shapes` : `${history.active.name} · Head`;
+  setControls();
+}
+
+function selectExperiment(id) {
+  if (historyLocked() || id === history.activeId) return;
+  history.rememberOptions(currentOptions());
+  invalidateExperimentView();
+  const branch = history.select(id);
+  installExperiment(branch);
+  ui.status.textContent = `${branch.name} selected`;
+}
+
+function manageExperiment(action, value) {
+  if (historyLocked() || phase === "restoring") return;
+  try {
+    if (action === "rename") history.rename(value);
+    else history.remove(value);
+    setControls();
+    ui.status.textContent = action === "rename" ? "Experiment renamed" : "Inactive experiment removed";
+  } catch (error) { ui.status.textContent = error.message; }
+}
+
+async function restoreExperiment(fork) {
+  if (historyLocked() || phase === "restoring" || !stableResult) return;
+  let context;
+  try {
+    const parent = history.active;
+    const count = history.cursor;
+    const name = history.checkChild(count, historyControls.childName(fork), stableResult.shapes);
+    const options = currentOptions();
+    options.max_size = normalizeWorkingSize(stableResult);
+    history.rememberOptions(currentOptions());
+    invalidateExperimentView();
+    context = { parentId: parent.id, contentVersion, runVersion };
+    restoreContext = context;
+    phase = "restoring";
+    ui.status.textContent = `Restoring ${count} shapes to “${name}”`;
+    setControls();
+    const snapshot = await postJson("/api/restore", {
+      image: sourceDataUrl, options, shape_count: count,
+      result: { width: stableResult.width, height: stableResult.height, background: stableResult.background,
+        shapes: stableResult.shapes, attempts: stableResult.attempts }
+    });
+    if (restoreContext !== context || history.activeId !== context.parentId ||
+        contentVersion !== context.contentVersion || runVersion !== context.runVersion) return;
+    if (snapshot.event !== "restored" || typeof snapshot.session_id !== "string" || !snapshot.session_id ||
+        !Array.isArray(snapshot.shapes) || snapshot.shapes.length !== count || snapshot.restored_shape_count !== count ||
+        snapshot.attempts !== 0 || snapshot.width !== stableResult.width || snapshot.height !== stableResult.height || !snapshot.background) {
+      throw new Error("The server did not confirm the restored experiment");
+    }
+    const result = { width: snapshot.width, height: snapshot.height, background: snapshot.background,
+      shapes: snapshot.shapes, attempts: 0, revision: snapshot.revision, restored_shape_count: count };
+    history.add({ result, options, sessionId: snapshot.session_id,
+      telemetry: { attempts: 0, duration_ms: 0, initial_score: snapshot.initial_score ?? null, batches: [] } },
+    { name, parent_id: parent.id, fork_shape_count: count });
+    restoreContext = null;
+    sceneVersion += 1;
+    exportVersion += 1;
+    installExperiment(history.active);
+    ui.status.textContent = `${name} · ${count} retained shapes · ready to Continue`;
+  } catch (error) {
+    if (context && (restoreContext !== context || contentVersion !== context.contentVersion || runVersion !== context.runVersion)) return;
+    restoreContext = null;
+    phase = "loaded";
+    ui.status.textContent = `Could not restore experiment: ${error.message}`;
+    setControls();
+  } finally {
+    // A rejected import may advance the content token without replacing the
+    // view. Release only this restore's ownership; keep the import's feedback.
+    if (context && restoreContext === context) {
+      restoreContext = null;
+      if (phase === "restoring") phase = "loaded";
+      setControls();
+    }
+  }
+}
+
 function onRunEvent(event, version) {
   if (version !== runVersion) return;
   if (event.event === "start") {
@@ -292,6 +488,7 @@ function onRunEvent(event, version) {
       focusUpdates.begin({ sessionId, runId: activeRunId, runVersion: version, contentVersion }, focusAtRunStart);
     }
     if (!event.continued) telemetry.reset();
+    telemetry.retained = event.restored_shape_count ?? (event.continued ? stableResult?.restored_shape_count || 0 : 0);
     workingResult = {
       width: event.width, height: event.height, background: event.background,
       shapes: [...(event.shapes || [])], attempts: event.attempts || 0,
@@ -337,14 +534,15 @@ function acceptSnapshot(event, eventName) {
   stableResult = {
     width: event.width, height: event.height, background: event.background,
     shapes: event.shapes, attempts: event.attempts || 0,
-    revision: event.revision || 0
+    revision: event.revision || 0,
+    restored_shape_count: event.restored_shape_count ?? stableResult?.restored_shape_count ?? 0
   };
   workingResult = null;
   loadedPreviewOnlyResult = null;
   sceneVersion += 1;
   exportVersion += 1;
   lastDurationMs = Math.max(0, performance.now() - runStartedAt);
-  telemetry.replace(stableResult.shapes, stableResult.attempts, event.initial_score ?? telemetry.initialScore);
+  telemetry.replace(stableResult.shapes, stableResult.attempts, event.initial_score ?? telemetry.initialScore, stableResult.restored_shape_count);
   telemetry.addBatch(event.batch_summary);
   const label = stopLabel(event.stop_reason, eventName);
   telemetry.setState(label, lastDurationMs);
@@ -354,6 +552,7 @@ function acceptSnapshot(event, eventName) {
   ui.pipeline.textContent = `${stableResult.attempts} attempts`;
   ui.status.textContent = label;
   phase = "ready";
+  captureExperiment();
   setControls();
 }
 
@@ -365,6 +564,7 @@ function captureConfirmedView() {
     shapes: [...telemetry.shapes],
     attempts: telemetry.attempts,
     initialScore: telemetry.initialScore,
+    retained: telemetry.retained,
     batches: [...telemetry.batches],
     elapsed: telemetry.elapsed,
     resultMeta: ui.resultMeta.textContent,
@@ -386,7 +586,7 @@ function restoreConfirmedView(confirmed) {
   } else {
     preview.clearResult();
   }
-  telemetry.replace(confirmed.shapes, confirmed.attempts, confirmed.initialScore);
+  telemetry.replace(confirmed.shapes, confirmed.attempts, confirmed.initialScore, confirmed.retained);
   telemetry.batches = confirmed.batches;
   telemetry.setState("Error", confirmed.elapsed);
   ui.resultMeta.textContent = confirmed.resultMeta;
@@ -408,11 +608,12 @@ async function recoverSnapshot(version) {
         : "Stream interrupted; recovered final result";
       return true;
     } catch (error) {
+      if (version !== runVersion) return false;
       if (error.code === "session_busy" || error.code === "renderer_busy") {
         await new Promise((resolve) => setTimeout(resolve, 500));
         continue;
       }
-      if (error.code === "unknown_session") sessionId = "";
+      if (error.code === "unknown_session") expireCurrentSession();
       return false;
     }
   }
@@ -420,13 +621,21 @@ async function recoverSnapshot(version) {
 }
 
 async function startRun({ paintFocus = null } = {}) {
-  if (!sourceDataUrl || phase === "running" || phase === "pausing") return;
+  if (!sourceDataUrl || phase === "running" || phase === "pausing" || phase === "restoring" || history.inspecting) return;
+  if (!sessionId && (stableResult || loadedPreviewOnlyResult?.preview_data_url || loadedPreviewOnlyResult?.shapes.length)) {
+    ui.status.textContent = stableResult ? "Restore or fork this experiment before continuing" :
+      "Use New render to start a fresh experiment and retain this preview";
+    return;
+  }
   if (phase === "recovery") {
-    if (!await recoverSnapshot(runVersion)) {
+    const version = runVersion;
+    const recovered = await recoverSnapshot(version);
+    if (version !== runVersion) return;
+    if (!recovered) {
       phase = sessionId ? "recovery" : "error";
       ui.status.textContent = sessionId
         ? "Could not confirm the final result. Retry recovery or start a New render."
-        : "Render session expired. Start a New render.";
+        : "Session expired. Restore or fork the retained experiment to continue.";
       setControls();
     }
     return;
@@ -440,6 +649,13 @@ async function startRun({ paintFocus = null } = {}) {
     ui.status.textContent = "Choose at least one shape";
     return;
   }
+  const capacity = history.fitCapacity(options.shape_types);
+  if (options.steps > capacity) {
+    ui.status.textContent = capacity ? `History budget allows ${capacity} more shapes; choose a smaller batch or remove an experiment` :
+      "History budget reached; remove an inactive experiment or choose shapes that fit the remaining polyline budget";
+    return;
+  }
+  cancelAnimationFrame(inspectionFrame);
   const continuing = Boolean(sessionId);
   const initialShapeCount = continuing ? stableResult?.shapes.length || 0 : 0;
   runIsPaint = Boolean(paintFocus);
@@ -480,7 +696,7 @@ async function startRun({ paintFocus = null } = {}) {
       confirmed: Boolean(terminal),
       added: terminal?.batch_summary?.added ?? Math.max(0, (stableResult?.shapes.length || 0) - initialShapeCount),
       reason: stopLabel(terminal?.stop_reason, terminal?.event),
-      cancelled: ["paused", "error"].includes(terminal?.stop_reason) || terminal?.event === "paused"
+      cancelled: ["paused", "error", "shape_limit", "geometry_limit"].includes(terminal?.stop_reason) || terminal?.event === "paused"
     };
   } catch (error) {
     if (version !== runVersion) return;
@@ -494,13 +710,14 @@ async function startRun({ paintFocus = null } = {}) {
     }
     restoreConfirmedView(confirmedView);
     const code = error.code || "request_failed";
-    if (code === "unknown_session") sessionId = "";
+    if (code === "unknown_session") expireCurrentSession();
     if (sessionId && sawStart) {
       phase = "recovery";
       ui.status.textContent = `${error.message}. Recover the result before continuing.`;
     } else {
       phase = stableResult ? "ready" : "error";
-      ui.status.textContent = error.message || "Render failed";
+      ui.status.textContent = code === "unknown_session" ? "Session expired. Restore or fork the retained experiment to continue." :
+        error.message || "Render failed";
     }
     telemetry.setState("Error", lastDurationMs);
     return { confirmed: false, message: ui.status.textContent };
@@ -532,9 +749,22 @@ async function pauseRun() {
   }
 }
 
+function serializeScene(result, previewData = null) {
+  return {
+    preview_data_url: result?.background ? previewData : result?.preview_data_url || null,
+    width: result?.width || null, height: result?.height || null,
+    render_width: result?.render_width || result?.width || null,
+    render_height: result?.render_height || result?.height || null,
+    background: result?.background || null, shapes: result?.shapes || [],
+    restored_shape_count: result?.restored_shape_count || 0
+  };
+}
+
 function createProject() {
   const result = stableResult;
   const previewOnly = result ? null : loadedPreviewOnlyResult;
+  const options = currentOptions();
+  history.rememberOptions(options);
   return {
     format: contract.project.format,
     version: contract.project.version,
@@ -543,21 +773,14 @@ function createProject() {
       name: sourceName || "Source image", data_url: sourceDataUrl,
       width: ui.sourceImage.naturalWidth || null, height: ui.sourceImage.naturalHeight || null
     },
-    options: currentOptions(),
-    result: {
-      preview_data_url: previewOnly?.preview_data_url || (result ? preview.currentPreview() || null : null),
-      width: result?.width || previewOnly?.width || null,
-      height: result?.height || previewOnly?.height || null,
-      render_width: result?.width || previewOnly?.render_width || null,
-      render_height: result?.height || previewOnly?.render_height || null,
-      background: result?.background || previewOnly?.background || null,
-      shapes: result?.shapes || previewOnly?.shapes || []
-    },
+    options,
+    result: serializeScene(result || previewOnly, !history.inspecting && result ? preview.currentPreview() || null : null),
     telemetry: {
       attempts: result?.attempts ?? (previewOnly ? telemetry.attempts : 0),
       duration_ms: Math.round(lastDurationMs),
       initial_score: telemetry.initialScore, batches: telemetry.batches
-    }
+    },
+    history: history.serialize(serializeScene)
   };
 }
 
@@ -583,46 +806,29 @@ function saveProject() {
 
 function applyProject(project) {
   setSource(project.source.data_url, project.source.name);
-  applyOptions(project.options);
-  const result = project.result;
-  const width = result.render_width || result.width;
-  const height = result.render_height || result.height;
-  if (width && height && result.background) {
-    stableResult = {
-      width, height, background: result.background,
-      shapes: result.shapes, attempts: project.telemetry.attempts, revision: 0
-    };
-    preview.rebuild(width, height, result.background, result.shapes);
-    ui.resultMeta.textContent = `${width} x ${height}`;
-    sceneVersion += 1;
-  } else {
-    loadedPreviewOnlyResult = result;
-    if (width && height && result.preview_data_url) {
-      preview.showImage(result.preview_data_url, width, height);
-      ui.resultMeta.textContent = `${width} x ${height}`;
-    }
-  }
-  telemetry.replace(result.shapes, project.telemetry.attempts, project.telemetry.initial_score);
-  telemetry.batches = project.telemetry.batches;
-  lastDurationMs = project.telemetry.duration_ms;
+  history.load(project.history);
+  installExperiment(history.active);
+  applyOptions({ ...project.options, ...(stableResult ? { max_size: normalizeWorkingSize(stableResult) } : {}) });
+  history.rememberOptions(currentOptions());
   telemetry.setState("Loaded project", lastDurationMs);
-  ui.metrics.textContent = `${result.shapes.length} shapes`;
-  ui.pipeline.textContent = `${project.telemetry.attempts} attempts`;
-  ui.status.textContent = "Project loaded — Run starts a new render";
-  phase = "loaded";
+  if (history.inspecting) telemetry.inspect(history.cursor);
+  ui.status.textContent = stableResult ? "Project loaded — Restore or fork to continue" : loadedPreviewOnlyResult?.preview_data_url ?
+    "Project loaded — New render starts a fresh experiment" : "Project loaded — Run starts a new render";
   setControls();
 }
 
 async function downloadResult(type) {
   if (!stableResult) return;
+  const count = history.cursor;
+  const shapes = count === stableResult.shapes.length ? stableResult.shapes : stableResult.shapes.slice(0, count);
   if (type === "json") {
-    triggerDownload(JSON.stringify(stableResult.shapes, null, 2), "application/json", "geometrize-shapes.json");
+    triggerDownload(JSON.stringify(shapes, null, 2), "application/json", "geometrize-shapes.json");
     return;
   }
   const size = commitExportSize(ui.exportSizeNumber.value);
   const version = exportVersion;
   const scene = sceneVersion;
-  const cacheKey = `${scene}:${size}`;
+  const cacheKey = `${scene}:${count}:${size}`;
   try {
     let artifact = exportCache.get(cacheKey);
     if (!artifact) {
@@ -632,7 +838,7 @@ async function downloadResult(type) {
         request = postJson("/api/export", {
           result: {
             width: stableResult.width, height: stableResult.height,
-            background: stableResult.background, shapes: stableResult.shapes,
+            background: stableResult.background, shapes,
             attempts: stableResult.attempts
           },
           export_size: size
@@ -647,13 +853,13 @@ async function downloadResult(type) {
       exportCache.set(cacheKey, artifact);
       while (exportCache.size > 3) exportCache.delete(exportCache.keys().next().value);
     }
-    lastArtifact = { size, artifact };
+    lastArtifact = { size, artifact, key: cacheKey };
     if (type === "png") triggerDownload(artifact.preview, "image/png", "geometrize.png");
     else triggerDownload(artifact.svg, "image/svg+xml", "geometrize.svg");
     ui.status.textContent = `Exported ${artifact.export_width} x ${artifact.export_height}`;
   } catch (error) {
     if (version !== exportVersion || scene !== sceneVersion) return;
-    if (lastArtifact?.size === size) {
+    if (lastArtifact?.key === cacheKey) {
       const old = lastArtifact.artifact;
       if (type === "png") triggerDownload(old.preview, "image/png", "geometrize-previous.png");
       else triggerDownload(old.svg, "image/svg+xml", "geometrize-previous.svg");
@@ -683,14 +889,14 @@ function bindEvents() {
     if (!preset) return;
     const values = preset.options;
     if (values.steps != null) syncPair(ui.steps, ui.stepsNumber, ui.stepsOut, values.steps);
-    if (values.max_size != null && !sessionId) syncPair(ui.maxSize, ui.maxSizeNumber, ui.maxSizeOut, values.max_size);
+    if (values.max_size != null && !sessionId && !stableResult) syncPair(ui.maxSize, ui.maxSizeNumber, ui.maxSizeOut, values.max_size);
     if (values.shape_count != null) ui.shapeCount.value = String(values.shape_count);
     if (values.mutations != null) ui.mutations.value = String(values.mutations);
     ui.status.textContent = `${preset.label} settings selected for the next ${sessionId ? "batch" : "render"}`;
   });
   for (const input of [ui.alpha, ui.seed, ui.shapeCount, ui.mutations, ui.maxThreads,
     ui.stagnationLimit, ...document.querySelectorAll("input[name='shape']")]) {
-    input.addEventListener("change", () => { ui.preset.value = "custom"; });
+    input.addEventListener("change", () => { ui.preset.value = "custom"; setControls(); });
   }
   ui.imageInput.addEventListener("change", async () => {
     const file = ui.imageInput.files[0];
@@ -721,17 +927,26 @@ function bindEvents() {
   });
   ui.form.addEventListener("submit", (event) => {
     event.preventDefault();
-    if (phase === "running" || phase === "pausing") return;
+    if ((historyLocked() && phase !== "recovery") || phase === "restoring" || history.inspecting ||
+        (!sessionId && (stableResult || loadedPreviewOnlyResult?.preview_data_url || loadedPreviewOnlyResult?.shapes.length))) return;
     if (focus.mode === "paint") focus.setMode("focus");
     paintQueue.clear();
     void startRun();
   });
   ui.pause.addEventListener("click", () => { void pauseRun(); });
   ui.restart.addEventListener("click", () => {
-    if (phase === "running" || phase === "pausing") return;
-    runVersion += 1;
-    clearResult();
-    ui.status.textContent = "New render ready";
+    if ((historyLocked() && phase !== "recovery") || phase === "restoring") return;
+    try {
+      if (phase === "recovery") expireCurrentSession();
+      history.rememberOptions(currentOptions());
+      const active = history.active;
+      if (active && (active.result.background || active.result.preview_data_url || active.result.shapes.length)) {
+        history.add(emptyExperiment(), { name: history.uniqueName("Render") });
+      }
+      invalidateExperimentView();
+      clearResult({ keepHistory: true });
+      ui.status.textContent = "New render ready";
+    } catch (error) { ui.status.textContent = error.message; }
   });
   for (const [type, link] of Object.entries(ui.downloads)) {
     link.addEventListener("click", (event) => {
@@ -749,6 +964,7 @@ async function init() {
     const response = await fetch("/api/config");
     if (!response.ok) throw new Error(`Server returned ${response.status}`);
     contract = await response.json();
+    history = new ReconstructionHistory(contract.project);
     renderShapeControls();
     for (const [key, input] of [["steps", ui.stepsNumber], ["alpha", ui.alpha],
       ["seed", ui.seed], ["shape_count", ui.shapeCount], ["mutations", ui.mutations],
@@ -786,6 +1002,7 @@ async function init() {
           "Focus applies from the next attempt.")
     });
     paintQueue = new PaintQueue({
+      onIdle: () => setControls(),
       canHold: () => preview.paintGestureActive(),
       runStroke: async (paintFocus) => {
         const outcome = await startRun({ paintFocus });
@@ -823,6 +1040,7 @@ async function init() {
       paintQueue.setEnabled(mode === "paint");
       paintQueue.updateHoldSettings(value);
       ui.preset.value = "custom";
+      setControls();
     });
     telemetry = new Telemetry({
       state: byId("telemetry-state"), acceptance: byId("telemetry-acceptance"),
@@ -835,6 +1053,14 @@ async function init() {
       historyOlder: byId("batch-history-older"), historyNewer: byId("batch-history-newer"),
       historyLatest: byId("batch-history-latest")
     }, Object.fromEntries(contract.shapes.map((shape) => [shape.type, shape.label])));
+    historyControls = new HistoryControls({
+      branch: byId("experiment-select"), name: byId("experiment-name"), rename: byId("experiment-rename"),
+      fork: byId("experiment-fork"), slider: byId("history-slider"), count: byId("history-count"),
+      position: byId("history-position"), head: byId("history-head"), restore: byId("history-restore"),
+      help: byId("history-help"), settings: byId("experiment-settings"), remove: byId("experiment-remove"),
+      removeChoice: byId("experiment-remove-choice"), removeHelp: byId("experiment-remove-help")
+    }, history, { select: selectExperiment, inspect: inspectExperiment, restore: restoreExperiment,
+      rename: name => manageExperiment("rename", name), remove: id => manageExperiment("remove", id) });
     bindEvents();
     setControls();
   } catch (error) {

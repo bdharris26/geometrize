@@ -20,7 +20,7 @@ from PIL import Image, ImageDraw
 
 from geometrize_py.contracts import MAX_REQUEST_BYTES
 from geometrize_py.images import image_to_data_url
-from geometrize_py.native import Focus, ImageSession, native_available
+from geometrize_py.native import Focus, ImageSession, RunOptions, native_available
 from geometrize_py.web import GeometrizeRequestHandler, GeometrizeServer, _estimate_session_bytes, _safe_static_path
 
 
@@ -797,7 +797,7 @@ def test_pause_can_cancel_when_workers_and_memory_are_exhausted(server: Geometri
     fitting_lease = server.work_budget.try_reserve(1, server.work_budget.memory_bytes)
     assert fitting_lease is not None
     session = ImageSession(1, 1, (0, 0, 0, 255), SimpleNamespace(attempts=0))
-    server.activate_session("controlled", session, "active-run")
+    server.activate_session("controlled", session, "active-run", options=RunOptions(steps=1))
     try:
         ack = _post(server, "/api/sessions/controlled/pause", {"run_id": "active-run"})
         assert ack["event"] == "pause_requested"
@@ -823,7 +823,7 @@ def test_focus_control_remains_available_at_exhausted_capacity(server: Geometriz
     assert server.try_acquire_render_slot()
     session = ImageSession(1, 1, (0, 0, 0, 255), SimpleNamespace(attempts=0))
     assert session.try_acquire_run()
-    server.activate_session("controlled", session, "active-run")
+    server.activate_session("controlled", session, "active-run", options=RunOptions(steps=1))
     try:
         ack = _post(server, "/api/sessions/controlled/focus", {"run_id": "active-run", "focus": {"x": 0, "y": 1}})
         expected = Focus(0, 1).to_dict()
@@ -859,7 +859,7 @@ def test_focus_control_remains_available_at_exhausted_capacity(server: Geometriz
 )
 def test_focus_control_rejects_invalid_small_messages(server: GeometrizeServer, payload: dict) -> None:
     session = ImageSession(1, 1, (0, 0, 0, 255), SimpleNamespace(attempts=0))
-    server.activate_session("controlled", session, "active-run")
+    server.activate_session("controlled", session, "active-run", options=RunOptions(steps=1))
     with pytest.raises(HTTPError) as error:
         _post(server, "/api/sessions/controlled/focus", payload)
     assert error.value.code == HTTPStatus.BAD_REQUEST
@@ -870,7 +870,7 @@ def test_focus_control_rejects_invalid_small_messages(server: GeometrizeServer, 
 
 def test_focus_control_rejects_old_and_finished_run_tokens(server: GeometrizeServer) -> None:
     session = ImageSession(1, 1, (0, 0, 0, 255), SimpleNamespace(attempts=0))
-    server.activate_session("controlled", session, "active-run")
+    server.activate_session("controlled", session, "active-run", options=RunOptions(steps=1))
     for token in ("old-run", "future-run"):
         with pytest.raises(HTTPError) as error:
             _post(server, "/api/sessions/controlled/focus", {"run_id": token, "focus": {"x": 1, "y": 1}})
@@ -982,7 +982,7 @@ def test_active_session_is_pinned_until_finish(server: GeometrizeServer) -> None
     server.session_idle_seconds = 1
     server.max_sessions = 1
     active = _fake_session(16, 16)
-    server.activate_session("active", active, "current-run")
+    server.activate_session("active", active, "current-run", options=RunOptions(steps=1))
     clock.advance(2)
     server.service_actions()
     server.store_session("idle", _fake_session(16, 16))
