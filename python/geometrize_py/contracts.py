@@ -79,7 +79,7 @@ MAX_SOURCE_DIMENSION = 16384
 MAX_SOURCE_PIXELS = 8192 * 8192
 MAX_REQUEST_BYTES = 64 * 1024 * 1024
 PROJECT_FORMAT = "geometrize-project"
-PROJECT_VERSION = 1
+PROJECT_VERSION = 2
 PROJECT_MAX_BYTES = MAX_REQUEST_BYTES
 PROJECT_MAX_SHAPES = 100000
 PROJECT_MAX_BATCHES = 10000
@@ -87,6 +87,11 @@ PROJECT_MAX_COORDINATE = 1e9
 PROJECT_MAX_POINTS = 10000
 PROJECT_MAX_TOTAL_POINTS = 1_000_000
 PROJECT_MAX_GEOMETRY_FACTOR = 16
+PROJECT_MAX_BRANCHES = 32
+PROJECT_MAX_HISTORY_SHAPES = 200000
+PROJECT_MAX_HISTORY_POINTS = 1_000_000
+RESTORE_MAX_RASTER_POINTS = 2_000_000
+RESTORE_MAX_WORK = 1_000_000_000
 RASTER_MIME_TYPES = ("image/png", "image/jpeg", "image/webp", "image/bmp", "image/gif")
 RASTER_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif")
 
@@ -133,6 +138,19 @@ def app_contract() -> dict[str, Any]:
             "max_points": PROJECT_MAX_POINTS,
             "max_total_points": PROJECT_MAX_TOTAL_POINTS,
             "max_geometry_factor": PROJECT_MAX_GEOMETRY_FACTOR,
+            "max_branches": PROJECT_MAX_BRANCHES,
+            "max_history_shapes": PROJECT_MAX_HISTORY_SHAPES,
+            "max_history_points": PROJECT_MAX_HISTORY_POINTS,
+        },
+        "restore": {
+            "max_dimension": MAX_WORKING_IMAGE_SIZE,
+            "max_raster_points": RESTORE_MAX_RASTER_POINTS,
+            "max_work": RESTORE_MAX_WORK,
+            "attempt_policy": "reset",
+        },
+        "stop_reasons": {
+            "shape_limit": "Shape limit reached",
+            "geometry_limit": "Polyline point limit reached",
         },
         "presets": deepcopy(PRESETS),
     }

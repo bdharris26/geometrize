@@ -20,8 +20,13 @@ from .contracts import (
     MAX_WORKING_IMAGE_SIZE,
     OPTION_DEFAULTS,
     OPTION_LIMITS,
+    PROJECT_MAX_SHAPES,
+    PROJECT_MAX_TOTAL_POINTS,
+    RESTORE_MAX_WORK,
     SHAPE_TYPES,
 )
+from .errors import APIError
+from .exporting import RenderScene, inspect_scene, validate_scene
 from .images import average_color, fit_image
 
 __all__ = [
@@ -179,6 +184,7 @@ class ImageSession:
         self.background = background
         self._session = session
         self.shapes: list[dict[str, Any]] = []
+        self.restored_shape_count = 0
         self.batch_count = 0
         self._run_lock = RLock()
         self._focus_lock = Lock()
@@ -195,9 +201,59 @@ class ImageSession:
         backend = require_native()
         source = fit_image(image, options.max_size).convert("RGBA")
         width, height = source.size
-        background = average_color(source)
         session = backend.RunnerSession(width, height, source.tobytes(), options.to_native_dict())
-        return cls(width, height, background, session, options.focus)
+        background = getattr(session, "background", None)
+        if background is None:
+            background = average_color(source)
+        return cls(width, height, tuple(background), session, options.focus)
+
+    @classmethod
+    def from_scene(
+        cls,
+        image: Image.Image,
+        options: RunOptions,
+        scene: RenderScene | dict[str, Any],
+        shape_count: int | None = None,
+    ) -> ImageSession:
+        """Replay a frozen prefix into a fresh experiment with zero attempts.
+
+        The source uses the saved working dimensions. New options configure
+        future fitting; they never rescale retained geometry or resume old RNG.
+        """
+        if isinstance(scene, RenderScene):
+            scene = {
+                "width": scene.width,
+                "height": scene.height,
+                "background": scene.background,
+                "shapes": scene.shapes,
+                "attempts": scene.attempts,
+                "revision": scene.revision,
+            }
+        validated = validate_scene(scene)
+        count = normalize_restore_count(shape_count, len(validated.shapes))
+        return cls._from_validated_scene(image, options, validated, count)
+
+    @classmethod
+    def _from_validated_scene(
+        cls, image: Image.Image, options: RunOptions, scene: RenderScene, shape_count: int,
+        *, native_checked: bool = False, replay_work_limit: int = RESTORE_MAX_WORK,
+    ) -> ImageSession:
+        backend = require_restore_native()
+        prefix = scene.shapes[:shape_count]
+        if not native_checked:
+            backend.replay_memory(scene.width, scene.height, scene.background, prefix, max_work=replay_work_limit)
+        source = fit_image(image, max(scene.width, scene.height)).convert("RGBA")
+        if source.size != (scene.width, scene.height):
+            raise APIError("invalid_result", "Saved working dimensions do not match the source image fit")
+        restored = backend.restore_rgba(
+            scene.width, scene.height, source.tobytes(), options.to_native_dict(),
+            scene.background, prefix, max_work=replay_work_limit,
+        )
+        session = cls(scene.width, scene.height, scene.background, restored["session"], options.focus)
+        session.shapes = list(restored["shapes"])
+        session.restored_shape_count = shape_count
+        session.revision = shape_count
+        return session
 
     @property
     def attempts(self) -> int:
@@ -261,6 +317,7 @@ class ImageSession:
         attempts_at_start = self.attempts
         max_attempts = max(options.steps * 8, options.steps + 64)
         native_options = options.to_native_dict()
+        _existing_count, polyline_points = inspect_scene({"shapes": self.shapes})
         rejected_in_a_row = 0
         reason: str | None = None
         self._batch_summary = {
@@ -300,6 +357,14 @@ class ImageSession:
                 if added >= options.steps:
                     reason = "target_reached"
                     break
+                if len(self.shapes) >= PROJECT_MAX_SHAPES:
+                    reason = "shape_limit"
+                    break
+                # Upstream generates exactly four vertices for each polyline.
+                # Stop before fitting can accept a shape that exceeds the cap.
+                if "polyline" in options.shape_types and polyline_points + 4 > PROJECT_MAX_TOTAL_POINTS:
+                    reason = "geometry_limit"
+                    break
                 if batch_attempts >= max_attempts:
                     reason = "attempt_limit"
                     break
@@ -316,6 +381,9 @@ class ImageSession:
                 step = self._session.step(native_options)
                 step_shapes = list(step["shapes"])
                 self.shapes.extend(step_shapes)
+                polyline_points += sum(
+                    len(shape["data"]["points"]) for shape in step_shapes if shape["type"] == "polyline"
+                )
                 if step_shapes:
                     self._score = float(getattr(self._session, "score", step_shapes[-1].get("score", self.score)))
                     self.revision += len(step_shapes)
@@ -338,6 +406,7 @@ class ImageSession:
                     "attempts": int(step["attempt"]),
                     "shapes": step_shapes,
                     "shape_count": len(self.shapes),
+                    "restored_shape_count": self.restored_shape_count,
                     "batch_shape_count": added,
                     "batch_goal": options.steps,
                     "score": self.score,
@@ -384,6 +453,7 @@ def diagnostics() -> dict[str, Any]:
     """Return concise native import details for the CLI doctor command."""
     return {
         "available": native_available(),
+        "restore_available": native_available() and _restore_supported(_native),
         "module": "geometrize_py._native",
         "module_path": str(getattr(_native, "__file__", "")) if _native else None,
         "import_error_type": type(_IMPORT_ERROR).__name__ if _IMPORT_ERROR else None,
@@ -398,6 +468,19 @@ def require_native() -> Any:
         detail = f": {_IMPORT_ERROR}" if _IMPORT_ERROR else ""
         raise NativeBackendUnavailable(f"Geometrize native backend is unavailable{detail}")
     return _native
+
+
+def _restore_supported(backend: Any) -> bool:
+    return all(callable(getattr(backend, name, None)) for name in ("restore_rgba", "replay_memory"))
+
+
+def require_restore_native() -> Any:
+    backend = require_native()
+    if not _restore_supported(backend):
+        raise NativeBackendUnavailable(
+            "Installed native backend lacks scene restore; rebuild or reinstall geometrize-py"
+        )
+    return backend
 
 
 def run_image(image: Image.Image, options: RunOptions | None = None) -> RunResult:
@@ -426,6 +509,7 @@ def iter_image(image: Image.Image, options: RunOptions | None = None) -> Iterato
         "score": session.score,
         "initial_score": session.initial_score,
         "revision": session.revision,
+        "restored_shape_count": session.restored_shape_count,
         "focus": options.focus.to_dict() if options.focus is not None else None,
     }
 
@@ -439,6 +523,7 @@ def iter_image(image: Image.Image, options: RunOptions | None = None) -> Iterato
         "height": result.height,
         "attempts": result.attempts,
         "shape_count": len(result.shapes),
+        "restored_shape_count": session.restored_shape_count,
         "batch": session.batch_count,
         "score": session.score,
         "initial_score": session.initial_score,
@@ -463,6 +548,14 @@ def normalize_shape_types(values: Iterable[str]) -> tuple[str, ...]:
     if not normalized:
         raise ValueError("At least one shape type is required")
     return tuple(normalized)
+
+
+def normalize_restore_count(value: Any, available: int) -> int:
+    if value is None:
+        return available
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= available:
+        raise APIError("invalid_result", f"shape_count must be an integer from 0 to {available}")
+    return value
 
 
 def _clamp_option(name: str, value: Any) -> int:

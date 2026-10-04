@@ -21,6 +21,7 @@
 #include "geometrize/shape/shapetypes.h"
 #include "geometrize/shaperesult.h"
 #include "native_focus.h"
+#include "native_replay.h"
 
 namespace py = pybind11;
 
@@ -226,10 +227,11 @@ public:
         m_height{height},
         m_pixels{bytesToPixels(width, height, rgba)},
         m_target{static_cast<std::uint32_t>(width), static_cast<std::uint32_t>(height), m_pixels},
-        m_runner{m_target},
+        m_runner{std::make_unique<geometrize::ImageRunner>(m_target)},
         m_options{runnerOptionsFromDict(options)},
         m_focus{focusFromDict(options)},
-        m_initialScore{geometrize::core::differenceFull(m_target, m_runner.getCurrent())},
+        m_background{m_runner->getCurrent().getPixel(0, 0)},
+        m_initialScore{geometrize::core::differenceFull(m_target, m_runner->getCurrent())},
         m_score{m_initialScore},
         m_attempts{0}
     {}
@@ -247,14 +249,14 @@ public:
         {
             py::gil_scoped_release release;
             if(m_focus && m_focus->strength > 0.0) {
-                stepShapes = m_runner.step(m_options,
+                stepShapes = m_runner->step(m_options,
                     geometrize_py::focusedShapeCreator(m_options.shapeTypes, m_width, m_height, *m_focus));
             } else if(m_width == 1 || m_height == 1) {
-                stepShapes = m_runner.step(m_options,
+                stepShapes = m_runner->step(m_options,
                     geometrize_py::safeShapeCreator(m_options.shapeTypes, m_width, m_height));
             } else {
                 // Preserve the original factory and RNG path when disabled.
-                stepShapes = m_runner.step(m_options);
+                stepShapes = m_runner->step(m_options);
             }
         }
 
@@ -277,7 +279,42 @@ public:
 
     py::bytes currentRgba() const
     {
-        return py::bytes(geometrize::exporter::exportBitmapData(m_runner.getCurrent()));
+        return py::bytes(geometrize::exporter::exportBitmapData(m_runner->getCurrent()));
+    }
+
+    std::vector<geometrize::ShapeResult> replay(const geometrize_py::ReplayScene& scene, const std::uint64_t maxWork)
+    {
+        // Called only by restoreRgba on a fresh, unpublished session. No fit
+        // attempts or random-generator offsets are advanced during replay.
+        py::gil_scoped_release release;
+        geometrize::Bitmap current{static_cast<std::uint32_t>(m_width), static_cast<std::uint32_t>(m_height), scene.background};
+        geometrize::Bitmap before{current};
+        m_background = scene.background;
+        m_initialScore = geometrize::core::differenceFull(m_target, current);
+        double score{m_initialScore};
+        std::uint64_t work{scene.work};
+        const auto pixels{static_cast<std::uint64_t>(m_width) * m_height};
+        std::vector<geometrize::ShapeResult> results;
+        results.reserve(scene.shapes.size());
+        for(const auto& item : scene.shapes) {
+            const auto lines{item.shape->rasterize(*item.shape)};
+            geometrize::copyLines(before, current, lines);
+            geometrize::drawLines(current, item.color, lines);
+            score = geometrize::core::differencePartial(m_target, before, current, score, lines);
+            // Rounded partial SSE can underflow at a perfect imported fit.
+            if(!std::isfinite(score) || score < 0.0 || score > 1.0) {
+                // Imported tiny shapes can trigger this repeatedly. Debit the
+                // whole-image scan before running it on this unpublished model.
+                geometrize_py::consumeReplayWork(work, pixels, maxWork);
+                score = geometrize::core::differenceFull(m_target, current);
+            }
+            results.push_back({score, item.color, item.shape});
+        }
+        m_runner = std::make_unique<geometrize::ImageRunner>(m_target, current);
+        // The new model and Python score both start from actual replayed pixels,
+        // including any accumulated partial-score rounding in imported scenes.
+        m_score = geometrize::core::differenceFull(m_target, m_runner->getCurrent());
+        return results;
     }
 
     int width() const
@@ -305,6 +342,12 @@ public:
         return m_score;
     }
 
+    py::tuple background() const
+    {
+        return py::make_tuple(static_cast<int>(m_background.r), static_cast<int>(m_background.g),
+            static_cast<int>(m_background.b), static_cast<int>(m_background.a));
+    }
+
 private:
     static std::vector<std::uint8_t> bytesToPixels(const int width, const int height, const py::bytes& rgba)
     {
@@ -325,9 +368,10 @@ private:
     int m_height;
     std::vector<std::uint8_t> m_pixels;
     geometrize::Bitmap m_target;
-    geometrize::ImageRunner m_runner;
+    std::unique_ptr<geometrize::ImageRunner> m_runner;
     geometrize::ImageRunnerOptions m_options;
     std::optional<geometrize_py::Focus> m_focus;
+    geometrize::rgba m_background;
     double m_initialScore;
     double m_score;
     int m_attempts;
@@ -355,6 +399,26 @@ py::dict runRgba(const int width, const int height, const py::bytes& rgba, const
     return out;
 }
 
+py::dict restoreRgba(const py::handle rawWidth, const py::handle rawHeight, const py::bytes& rgba,
+    const py::dict& options, const py::handle background, const py::handle shapes, const py::handle rawMaxWork)
+{
+    const int width{geometrize_py::replayInteger(rawWidth, 1, geometrize_py::MAX_REPLAY_DIMENSION, "Replay width")};
+    const int height{geometrize_py::replayInteger(rawHeight, 1, geometrize_py::MAX_REPLAY_DIMENSION, "Replay height")};
+    const int maxWork{geometrize_py::replayInteger(rawMaxWork, 1, geometrize_py::MAX_REPLAY_WORK, "Replay max_work")};
+    // Complete geometry, color, scratch, and work validation precedes drawing.
+    const auto scene{geometrize_py::parseReplay(width, height, background, shapes, SHAPE_NAMES, maxWork)};
+    auto session{std::make_unique<RunnerSession>(width, height, rgba, options)};
+    const auto results{session->replay(scene, maxWork)};
+    py::list restored;
+    for(const auto& result : results) {
+        restored.append(shapeResultToDict(result));
+    }
+    py::dict out;
+    out["session"] = py::cast(std::move(session));
+    out["shapes"] = restored;
+    return out;
+}
+
 }
 
 PYBIND11_MODULE(_native, module)
@@ -362,6 +426,16 @@ PYBIND11_MODULE(_native, module)
     module.doc() = "Native bindings for the Geometrize image runner.";
     module.def("is_available", []() { return true; });
     module.def("run_rgba", &runRgba, py::arg("width"), py::arg("height"), py::arg("rgba"), py::arg("options"));
+    module.def("replay_memory", [](const py::handle rawWidth, const py::handle rawHeight,
+        const py::handle background, const py::handle shapes, const py::handle rawMaxWork) {
+        const int width{geometrize_py::replayInteger(rawWidth, 1, geometrize_py::MAX_REPLAY_DIMENSION, "Replay width")};
+        const int height{geometrize_py::replayInteger(rawHeight, 1, geometrize_py::MAX_REPLAY_DIMENSION, "Replay height")};
+        const int maxWork{geometrize_py::replayInteger(rawMaxWork, 1, geometrize_py::MAX_REPLAY_WORK, "Replay max_work")};
+        return geometrize_py::parseReplay(width, height, background, shapes, SHAPE_NAMES, maxWork).scratchBytes;
+    }, py::arg("width"), py::arg("height"), py::arg("background"), py::arg("shapes"),
+        py::arg("max_work") = geometrize_py::MAX_REPLAY_WORK);
+    module.def("restore_rgba", &restoreRgba, py::arg("width"), py::arg("height"), py::arg("rgba"),
+        py::arg("options"), py::arg("background"), py::arg("shapes"), py::arg("max_work") = geometrize_py::MAX_REPLAY_WORK);
     py::class_<RunnerSession>(module, "RunnerSession")
         .def(py::init<int, int, const py::bytes&, const py::dict&>(), py::arg("width"), py::arg("height"), py::arg("rgba"), py::arg("options"))
         .def("step", &RunnerSession::step, py::arg("options") = py::dict())
@@ -369,6 +443,7 @@ PYBIND11_MODULE(_native, module)
         .def_property_readonly("width", &RunnerSession::width)
         .def_property_readonly("height", &RunnerSession::height)
         .def_property_readonly("attempts", &RunnerSession::attempts)
+        .def_property_readonly("background", &RunnerSession::background)
         .def_property_readonly("initial_score", &RunnerSession::initialScore)
         .def_property_readonly("score", &RunnerSession::score);
 }
