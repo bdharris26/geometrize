@@ -569,8 +569,6 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
             fitting_memory_bytes(scene.width, scene.height, 1)
             + source_width * source_height * 12 + len(raw) * 2 + scratch_memory
         )
-        if options.palette is not None and options.palette.strength > 0:
-            memory += palette_fitting_memory_bytes(scene.width, scene.height, 1)
         lease = self._reserve_work(1, memory)
         try:
             try:

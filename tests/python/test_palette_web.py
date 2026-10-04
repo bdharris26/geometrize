@@ -14,7 +14,7 @@ from PIL import Image
 
 from geometrize_py import native, web
 from geometrize_py.images import image_to_data_url
-from geometrize_py.native import RunOptions, native_available
+from geometrize_py.native import ImageSession, RunOptions, native_available
 from geometrize_py.palette import Palette, palette_fitting_memory_bytes, palette_memory_bytes
 from geometrize_py.resources import WorkBudget, fitting_memory_bytes
 from geometrize_py.web import GeometrizeRequestHandler, GeometrizeServer
@@ -212,3 +212,57 @@ def test_positive_palette_fit_accounts_for_masks_and_replacement_before_native(p
     assert palette_server.work_budget.usage() == (0, 0)
     _options, lease = handler._reserve_fit(RunOptions(max_threads=1), 48, 32)
     palette_server.work_budget.release(lease)
+
+
+@pytest.mark.skipif(not native_available(), reason="native backend is not built")
+def test_palette_restore_admits_replay_without_reserving_future_fitting(palette_server, monkeypatch) -> None:
+    source = Image.new("RGBA", (1, 4096), (200, 110, 35, 255))
+    source.paste((25, 70, 210, 255), (0, 0, 1, 2048))
+    options = RunOptions(steps=1, max_size=4096, max_threads=8, shape_count=1, mutations=8,
+                         palette=Palette([(0, 0, 0), (255, 255, 255)]))
+    scene = {"width": 1, "height": 4096, "background": [10, 20, 30, 255], "attempts": 17,
+             "shapes": [{"type": "rectangle", "color": [17, 33, 65, 128],
+                         "data": {"x1": 0, "y1": 2, "x2": 0, "y2": 25}}]}
+    expected = ImageSession.from_scene(source, options, scene)
+    palette_server.work_budget = WorkBudget(8, 2600 * 1024)
+    observed = []
+    send_json = _PaletteHandler._send_json
+
+    def observe_restore(handler, payload, *args, **kwargs):
+        if payload.get("event") == "restored":
+            observed.append(handler.geometrize_server.work_budget.usage())
+        return send_json(handler, payload, *args, **kwargs)
+
+    monkeypatch.setattr(_PaletteHandler, "_send_json", observe_restore)
+    confirmed = _post(palette_server, "/api/restore", {
+        "image": image_to_data_url(source), "options": options.to_native_dict(), "result": scene,
+    })
+    restored = palette_server.get_session(confirmed["session_id"])
+    assert restored is not None
+    assert confirmed["palette"] == restored.palette.to_dict() == options.palette.to_dict()
+    assert confirmed["attempts"] == restored.batch_count == 0
+    assert confirmed["batch_summary"] is None
+    assert confirmed["shape_count"] == confirmed["restored_shape_count"] == confirmed["revision"] == 1
+    assert confirmed["background"] == scene["background"]
+    assert confirmed["shapes"][0]["color"] == {"r": 17, "g": 33, "b": 65, "a": 128}
+    assert restored.result().image.tobytes() == expected.result().image.tobytes()
+    assert observed[0][0] == 1
+    assert observed[0][1] <= palette_server.work_budget.memory_bytes
+    assert observed[0][1] + palette_fitting_memory_bytes(1, 4096, 1) > palette_server.work_budget.memory_bytes
+    assert fitting_memory_bytes(1, 4096, 8) <= palette_server.work_budget.memory_bytes
+    assert (fitting_memory_bytes(1, 4096, 8) + palette_fitting_memory_bytes(1, 4096, 8)
+            > palette_server.work_budget.memory_bytes)
+    assert palette_server.work_budget.usage() == (0, 0)
+
+    monkeypatch.setattr(ImageSession, "prepare_run", lambda *_args: pytest.fail("Unadmitted palette fit started"))
+    with pytest.raises(HTTPError) as error:
+        _post(palette_server, "/api/run/stream", {
+            "session_id": confirmed["session_id"], "options": options.to_native_dict(),
+        }, stream=True)
+    assert json.load(error.value)["code"] == "memory_limit"
+    assert restored.attempts == restored.batch_count == 0
+    assert restored.revision == 1
+    assert restored.palette == options.palette
+    assert restored.result().image.tobytes() == expected.result().image.tobytes()
+    assert not palette_server.active_runs
+    assert palette_server.work_budget.usage() == (0, 0)
