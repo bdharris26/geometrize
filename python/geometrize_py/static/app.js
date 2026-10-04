@@ -5,6 +5,7 @@ import { Preview } from "./preview.js";
 import { FocusControls, FocusUpdates, PaintQueue } from "./focus.js";
 import { Telemetry } from "./telemetry.js";
 import { ReconstructionHistory, HistoryControls } from "./history.js";
+import { PaletteControls } from "./palette.js";
 import { decodeImage, imageToPngDataUrl, openProjectFile, rasterDataUrl, readFileAsDataUrl } from "./project.js";
 
 const byId = (id) => {
@@ -53,6 +54,7 @@ let focusUpdates;
 let paintQueue;
 let history;
 let historyControls;
+let palette;
 let restoreContext = null;
 let inspectionFrame = 0;
 let runIsPaint = false;
@@ -149,11 +151,13 @@ function currentOptions() {
     stagnation_limit: normalizeInteger(ui.stagnationLimit, "stagnation_limit"),
     max_size: maxSize,
     export_size: exportSize,
-    focus: focus.value ? { ...focus.value } : null
+    focus: focus.value ? { ...focus.value } : null,
+    palette: palette?.value || null
   };
 }
 
 function applyOptions(options) {
+  palette.replace(options.palette);
   focus.replace(options.focus);
   syncPair(ui.steps, ui.stepsNumber, ui.stepsOut, options.steps);
   syncPair(ui.maxSize, ui.maxSizeNumber, ui.maxSizeOut, options.max_size);
@@ -206,6 +210,7 @@ function setControls() {
   paintQueue?.setEnabled(focus?.mode === "paint" && canFit);
   paintQueue?.setBusy((busy && !runIsPaint) || restoring || phase === "recovery" || inspecting || retainedHead);
   historyControls?.render({ busy: busy || pumpBusy || phase === "recovery", restoring });
+  palette?.setAvailability(Boolean(sourceDataUrl), restoring);
   for (const link of Object.values(ui.downloads)) {
     const available = Boolean(stableResult);
     link.setAttribute("aria-disabled", available ? "false" : "true");
@@ -244,6 +249,7 @@ function clearResult({ keepHistory = false } = {}) {
 }
 
 function setSource(dataUrl, name) {
+  palette.reset();
   focus.reset();
   contentVersion += 1;
   runVersion += 1;
@@ -262,6 +268,7 @@ function setSource(dataUrl, name) {
 }
 
 async function loadImage(file) {
+  palette.invalidate();
   const version = ++contentVersion;
   const type = file.type.toLowerCase();
   const extension = file.name.toLowerCase().match(/\.[^.]+$/)?.[0] || "";
@@ -373,6 +380,7 @@ function installExperiment(branch) {
 }
 
 function invalidateExperimentView() {
+  palette.invalidate();
   restoreContext = null;
   cancelAnimationFrame(inspectionFrame);
   runVersion += 1;
@@ -914,6 +922,7 @@ function bindEvents() {
     ui.projectInput.value = "";
     if (!file) return;
     const version = ++contentVersion;
+    palette.invalidate();
     try {
       const project = await openProjectFile(file, contract);
       if (version === contentVersion && phase !== "running" && phase !== "pausing") applyProject(project);
@@ -1053,6 +1062,13 @@ async function init() {
       historyOlder: byId("batch-history-older"), historyNewer: byId("batch-history-newer"),
       historyLatest: byId("batch-history-latest")
     }, Object.fromEntries(contract.shapes.map((shape) => [shape.type, shape.label])));
+    palette = new PaletteControls({
+      mode: byId("palette-mode"), summary: byId("palette-summary"), text: byId("palette-colors"),
+      apply: byId("palette-apply"), extract: byId("palette-extract"), extractCount: byId("palette-extract-count"),
+      strength: byId("palette-strength"), strengthNumber: byId("palette-strength-number"),
+      soft: byId("palette-soft"), swatches: byId("palette-swatches"), status: byId("palette-status")
+    }, contract.palette, { post: postJson, context: () => ({ image: sourceDataUrl, branchId: history.activeId }),
+      onChange: () => { ui.preset.value = "custom"; setControls(); } });
     historyControls = new HistoryControls({
       branch: byId("experiment-select"), name: byId("experiment-name"), rename: byId("experiment-rename"),
       fork: byId("experiment-fork"), slider: byId("history-slider"), count: byId("history-count"),

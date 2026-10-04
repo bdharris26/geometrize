@@ -51,6 +51,34 @@
           <legend>Shapes</legend>
         </fieldset>
 
+        <details class="palette-controls">
+          <summary id="palette-summary">Palette Off</summary>
+          <div class="palette-fields">
+            <label for="palette-mode">Color mode</label>
+            <select id="palette-mode" disabled>
+              <option value="off">Off</option>
+              <option value="exact">Exact</option>
+              <option value="soft">Soft</option>
+            </select>
+            <ul id="palette-swatches" class="palette-swatches" aria-label="Palette colors"></ul>
+            <label for="palette-colors">Hex colors <span>1–32 · #RGB or #RRGGBB</span></label>
+            <textarea id="palette-colors" rows="2" maxlength="512" placeholder="#E0B84F, #58C3A8, #D87368" aria-describedby="palette-status" disabled></textarea>
+            <button id="palette-apply" class="secondary" type="button" disabled>Use colors</button>
+            <div class="palette-extraction">
+              <label for="palette-extract-count">Max colors</label>
+              <input id="palette-extract-count" type="number" min="1" max="32" value="8" disabled>
+              <button id="palette-extract" class="secondary" type="button" disabled>Extract source</button>
+            </div>
+            <div id="palette-soft" class="palette-soft" hidden>
+              <label for="palette-strength" title="0% leaves shape colors unconstrained; 100% selects Exact.">Soft strength %</label>
+              <input id="palette-strength" type="range" min="0" max="100" step="0.1" value="75" disabled>
+              <input id="palette-strength-number" type="number" min="0" max="100" step="0.1" value="75" aria-label="Palette soft strength percent" disabled>
+            </div>
+            <p class="settings-help">Applies to new shapes from the next batch or Paint stroke. Exact constrains shape RGB; alpha blending may produce other visible colors. Retained shapes and background keep their colors.</p>
+            <p id="palette-status" class="settings-help" role="status"></p>
+          </div>
+        </details>
+
         <div class="field">
           <label for="steps" title="How many accepted primitives to add in this batch. Continue adds another batch to the current result.">Shapes to add <output id="steps-out">128</output></label>
           <div class="range-with-input">
