@@ -269,3 +269,59 @@ def test_palette_repaired_model_preserves_rng_across_rejections_workers_seeds_an
     ]
     assert runner.current_rgba() == reference.current_rgba()
     assert actual["attempt"] == 14
+
+
+@pytest.mark.skipif(not native_available(), reason="native backend is not built")
+@pytest.mark.parametrize("zero_strength", [False, True], ids=["off", "zero-strength"])
+def test_palette_repair_consumes_all_workers_when_candidate_count_is_lower(zero_strength: bool) -> None:
+    image = Image.new("RGBA", (1, 32))
+    image.putdata([(25, 70, 210, 255) if index % 2 else (200, 110, 35, 255) for index in range(32)])
+    backend = native.require_native()
+    options = RunOptions(shape_types=("quadratic_bezier",), shape_count=1, mutations=8, max_threads=8,
+                         seed=888, alpha=128, focus=Focus(0.4, 0.6, 0.1, 0.8),
+                         palette=Palette([(0, 0, 0), (255, 255, 255), (255, 32, 96)], 0.5))
+    runner = backend.RunnerSession(1, 32, image.tobytes(), options.to_native_dict())
+    initial = runner.current_rgba()
+    rejected = replace(options, palette=Palette([runner.background[:3]]))
+    assert runner.step(rejected.to_native_dict())["shapes"] == []
+    assert runner.current_rgba() == initial
+
+    shapes = []
+    for _ in range(4):
+        before = runner.current_rgba()
+        added = runner.step(options.to_native_dict())["shapes"]
+        assert len(added) == 1
+        shapes.extend(added)
+        after = runner.current_rgba()
+        color = added[0]["color"]
+        opacity = color["a"] / 255
+        # Clipped curve pixels receive repeated blends, forcing model repair.
+        # One blend rounds by at most one byte; these move further than that.
+        assert any(abs(after[index] - ((1 - opacity) * before[index] + opacity * color["rgb"[index % 4]])) > 2
+                   for index in range(len(before)) if index % 4 < 3 and before[index] != after[index])
+
+    assert runner.attempts == 5
+    disabled = Palette(options.palette.colors, 0) if zero_strength else None
+    continuation = replace(options, palette=disabled, seed=71)
+
+    def prefix_reference(seed: int):
+        reference = backend.restore_rgba(
+            1, 32, image.tobytes(), continuation.to_native_dict(), runner.background, shapes,
+        )["session"]
+        event = reference.step(replace(continuation, seed=seed).to_native_dict())
+        return reference, [{key: value for key, value in shape.items() if key != "score"}
+                           for shape in event["shapes"]]
+
+    # Each upstream worker receives shape_count independently and advances the
+    # RNG once, even for a rejected attempt: five attempts consume forty seeds.
+    reference, expected = prefix_reference(continuation.seed + 5 * options.max_threads)
+    capped_reference, incorrectly_capped = prefix_reference(continuation.seed + 5 * options.shape_count)
+    actual = runner.step(continuation.to_native_dict())
+    assert actual["shapes"]
+    # Off retains ordinary partial-score rounding; compare geometry and pixels.
+    assert [{key: value for key, value in shape.items() if key != "score"}
+            for shape in actual["shapes"]] == expected
+    assert runner.current_rgba() == reference.current_rgba()
+    assert expected != incorrectly_capped
+    assert runner.current_rgba() != capped_reference.current_rgba()
+    assert actual["attempt"] == 6
