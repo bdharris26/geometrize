@@ -102,7 +102,8 @@ select {
   font-weight: 720;
 }
 
-form {
+form,
+.source-setup {
   display: flex;
   flex-direction: column;
   gap: 14px;
@@ -308,7 +309,8 @@ input[type="range"] {
   accent-color: var(--accent);
 }
 
-input[type="number"] {
+input[type="number"],
+.source-fields input[type="text"] {
   inline-size: 100%;
   min-height: 36px;
   padding: 6px 8px;
@@ -352,7 +354,8 @@ select {
   padding-top: 12px;
 }
 
-.palette-controls {
+.palette-controls,
+.source-controls {
   min-width: 0;
   padding: 10px;
   border: 1px solid var(--line);
@@ -360,7 +363,8 @@ select {
   background: rgba(35, 36, 40, 0.38);
 }
 
-.palette-controls summary {
+.palette-controls summary,
+.source-controls summary {
   color: var(--muted);
   cursor: pointer;
   font-size: 0.76rem;
@@ -456,6 +460,25 @@ select {
 }
 
 .palette-soft[hidden] {
+  display: none;
+}
+
+.source-fields {
+  display: grid;
+  gap: 8px;
+  padding-top: 10px;
+}
+
+.source-fields label {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.source-fields input[type="text"] {
+  font-family: ui-monospace, monospace;
+}
+
+.source-fields input[hidden] {
   display: none;
 }
 

@@ -90,12 +90,13 @@ export class Preview {
     this.prefixCount = 0;
     this.blankResult = false;
     this.sourceSize = null;
+    this.sourceDimensions = null;
     this.resultSize = null;
     this.canvasScale = 1;
     this.zoom = 1;
     this.pan = { x: 0, y: 0 };
     this.sourceImage.addEventListener("load", () => {
-      this.sourceSize = { width: sourceImage.naturalWidth, height: sourceImage.naturalHeight };
+      this.sourceSize = this.sourceDimensions || { width: sourceImage.naturalWidth, height: sourceImage.naturalHeight };
       this.ensurePaintTarget();
       this.layout();
     });
@@ -261,11 +262,13 @@ export class Preview {
     this.layout();
   }
 
-  setSource(dataUrl) {
+  setSource(dataUrl, dimensions = null, resetView = true) {
     this.stopPaintGesture();
-    this.sourceSize = null;
+    this.sourceDimensions = dimensions ? { ...dimensions } : null;
+    this.sourceSize = this.sourceDimensions;
     this.sourceImage.src = dataUrl;
-    this.fit();
+    if (resetView) this.fit();
+    else this.layout();
   }
 
   layout() {

@@ -17,15 +17,43 @@
         </div>
       </header>
 
-      <form id="run-form">
+      <div class="source-setup">
         <div class="input-actions">
           <label class="drop-zone" for="image-input">
-          <input id="image-input" type="file" accept=".png,.jpg,.jpeg,.webp,.bmp,.gif,image/png,image/jpeg,image/webp,image/bmp,image/gif">
+            <input id="image-input" type="file" accept=".png,.apng,.jpg,.jpeg,.webp,.bmp,.gif,image/apng,image/png,image/jpeg,image/webp,image/bmp,image/gif">
             <span id="file-label">Choose image</span>
             <span id="image-name">No image selected</span>
           </label>
           <button id="sample-button" class="secondary" type="button">Sample</button>
         </div>
+
+        <details class="source-controls">
+          <summary id="source-options-summary">Source options</summary>
+          <div class="source-fields">
+            <span id="source-options-meta" class="settings-help"></span>
+            <label for="source-frame" id="source-frame-label">Frame index (starts at 0)</label>
+            <input id="source-frame" type="number" min="0" max="255" step="1" value="0" disabled>
+            <label for="source-matte">Transparency matte</label>
+            <select id="source-matte" disabled>
+              <option value="none">Keep transparency</option>
+              <option value="white">White</option>
+              <option value="black">Black</option>
+              <option value="custom">Custom</option>
+            </select>
+            <input id="source-matte-color" type="text" maxlength="7" value="#FFFFFF" aria-label="Custom matte hex color" hidden disabled>
+            <label for="canvas-background">Starting canvas</label>
+            <select id="canvas-background" disabled>
+              <option value="average">Source average</option>
+              <option value="white">White</option>
+              <option value="black">Black</option>
+              <option value="custom">Custom</option>
+            </select>
+            <input id="canvas-background-color" type="text" maxlength="7" value="#FFFFFF" aria-label="Custom canvas hex color" hidden disabled>
+            <button id="source-apply" class="secondary" type="button" disabled>Apply to new render</button>
+            <p class="settings-help">Frame, matte and starting canvas are creation settings. Apply or New render starts a fresh experiment and keeps this one. Continue and Fork keep its applied target; Restore keeps its actual canvas.</p>
+            <p id="source-options-status" class="settings-help" role="status"></p>
+          </div>
+        </details>
 
         <fieldset class="project-files" aria-describedby="project-help">
           <legend>Project</legend>
@@ -36,7 +64,9 @@
           </div>
           <p id="project-help">Project JSON keeps the source, experiments, settings, and full history. Restore or fork a saved head to continue fitting.</p>
         </fieldset>
+      </div>
 
+      <form id="run-form">
         <div class="field">
           <label for="preset">Starting preset</label>
           <select id="preset" aria-label="Starting preset">

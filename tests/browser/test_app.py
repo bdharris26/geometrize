@@ -272,7 +272,7 @@ def test_controls_zoom_and_incomplete_stream(server_url: str) -> None:
             "name": "unsupported.tiff", "mimeType": "image/tiff", "buffer": b"TIFF",
         })
         expect(page.locator("#status")).to_have_text(
-            "Could not load image: Choose a PNG, JPEG, WebP, BMP, or GIF image"
+            "Could not load image: Choose a PNG, APNG, JPEG, WebP, BMP, or GIF image"
         )
         page.locator("#preset").select_option("quick")
         expect(page.locator("#steps-number")).to_have_value("64")

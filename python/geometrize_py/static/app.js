@@ -6,7 +6,8 @@ import { FocusControls, FocusUpdates, PaintQueue } from "./focus.js";
 import { Telemetry } from "./telemetry.js";
 import { ReconstructionHistory, HistoryControls } from "./history.js";
 import { PaletteControls } from "./palette.js";
-import { decodeImage, imageToPngDataUrl, openProjectFile, rasterDataUrl, readFileAsDataUrl } from "./project.js";
+import { SourceControls, SourcePreparation, canonicalImageUrl } from "./source.js";
+import { decodeImage, openProjectFile, projectContent, rasterDataUrl, readFileAsDataUrl } from "./project.js";
 
 const byId = (id) => {
   const element = document.getElementById(id);
@@ -36,7 +37,7 @@ const ui = {
 };
 
 const STOP_LABELS = {
-  target_reached: "Target reached",
+  target_reached: "Shape target reached",
   adequate_fit: "Fit already adequate",
   no_further_improvement: "No further improvement",
   attempt_limit: "Attempt limit reached",
@@ -55,6 +56,10 @@ let paintQueue;
 let history;
 let historyControls;
 let palette;
+let sourceControls;
+let sourcePreparation;
+let preparationContext = null;
+let sourceMetadata = null;
 let restoreContext = null;
 let inspectionFrame = 0;
 let runIsPaint = false;
@@ -152,11 +157,13 @@ function currentOptions() {
     max_size: maxSize,
     export_size: exportSize,
     focus: focus.value ? { ...focus.value } : null,
-    palette: palette?.value || null
+    palette: palette?.value || null,
+    ...(sourceControls?.value || { source: { frame: 0, matte: null }, background: null })
   };
 }
 
 function applyOptions(options) {
+  sourceControls.replace(options);
   palette.replace(options.palette);
   focus.replace(options.focus);
   syncPair(ui.steps, ui.stepsNumber, ui.stepsOut, options.steps);
@@ -176,7 +183,8 @@ function applyOptions(options) {
 function setControls() {
   const busy = phase === "running" || phase === "pausing";
   const pumpBusy = Boolean(paintQueue?.running || paintQueue?.pending.length);
-  const restoring = phase === "restoring";
+  const preparing = phase === "preparing";
+  const restoring = phase === "restoring" || preparing;
   const inspecting = history?.inspecting || false;
   const previewOnly = Boolean(loadedPreviewOnlyResult?.preview_data_url || loadedPreviewOnlyResult?.shapes.length);
   const retainedHead = Boolean((stableResult || previewOnly) && !sessionId);
@@ -185,7 +193,7 @@ function setControls() {
   const recovering = phase === "recovery" && Boolean(sessionId);
   ui.run.disabled = !contract || !sourceDataUrl || busy || pumpBusy || restoring || inspecting ||
     (!recovering && (retainedHead || capacity === 0));
-  ui.run.textContent = restoring ? "Restoring" : busy ? (phase === "pausing" ? "Pausing" : "Running") :
+  ui.run.textContent = preparing ? "Preparing" : restoring ? "Restoring" : busy ? (phase === "pausing" ? "Pausing" : "Running") :
     (phase === "recovery" && sessionId ? "Recover result" : (sessionId ? "Continue" : "Run"));
   ui.pause.disabled = phase !== "running" || !sessionId || !activeRunId;
   ui.restart.disabled = !sourceDataUrl || busy || pumpBusy || restoring;
@@ -211,6 +219,7 @@ function setControls() {
   paintQueue?.setBusy((busy && !runIsPaint) || restoring || phase === "recovery" || inspecting || retainedHead);
   historyControls?.render({ busy: busy || pumpBusy || phase === "recovery", restoring });
   palette?.setAvailability(Boolean(sourceDataUrl), restoring);
+  sourceControls?.setAvailability(Boolean(sourceDataUrl), restoring || busy || pumpBusy || phase === "recovery");
   for (const link of Object.values(ui.downloads)) {
     const available = Boolean(stableResult);
     link.setAttribute("aria-disabled", available ? "false" : "true");
@@ -248,48 +257,89 @@ function clearResult({ keepHistory = false } = {}) {
   setControls();
 }
 
-function setSource(dataUrl, name) {
+function showPreparedSource(prepared, resetView = false) {
+  sourceMetadata = prepared;
+  preview.setSource(prepared.preview_data_url, { width: prepared.width, height: prepared.height }, resetView);
+  ui.sourceImage.alt = sourceName;
+  ui.sourceMeta.textContent = `${prepared.width} x ${prepared.height}`;
+}
+
+function invalidatePreparation() {
+  sourcePreparation?.invalidate();
+  const previous = preparationContext;
+  preparationContext = null;
+  if (phase === "preparing" && previous) phase = previous.previousPhase;
+}
+
+async function prepareSourceWork(read, commit, label) {
+  invalidatePreparation();
+  const context = { token: sourcePreparation.begin(), previousPhase: phase === "restoring" ? "loaded" : phase,
+    source: sourceDataUrl, branchId: history.activeId };
+  preparationContext = context;
+  restoreContext = null;
+  runVersion += 1;
+  contentVersion += 1;
+  exportVersion += 1;
+  palette.invalidate();
+  focusUpdates.end();
+  preview.stopPaintGesture();
+  paintQueue.clear();
+  phase = "preparing";
+  ui.status.textContent = "Preparing source";
+  setControls();
+  const owns = () => preparationContext === context && sourcePreparation.owns(context.token) &&
+    sourceDataUrl === context.source && history.activeId === context.branchId;
+  try {
+    const request = await read();
+    if (!owns()) return;
+    const prepared = await sourcePreparation.prepare(request.image, request.source, context.token);
+    if (!owns() || !prepared) return;
+    const decoded = await decodeImage(prepared.preview_data_url, "Prepared preview", contract);
+    if (!owns()) return;
+    if (decoded.naturalWidth !== prepared.preview_width || decoded.naturalHeight !== prepared.preview_height) {
+      throw new Error("Prepared preview dimensions do not match the server metadata");
+    }
+    commit(prepared, request);
+  } catch (error) {
+    if (!owns()) return;
+    phase = context.previousPhase;
+    ui.status.textContent = `${label}: ${error.message}`;
+  } finally {
+    if (preparationContext === context) {
+      preparationContext = null;
+      if (phase === "preparing") phase = context.previousPhase;
+      setControls();
+    }
+  }
+}
+
+function setSource(dataUrl, name, prepared, options = { source: { frame: 0, matte: [255,255,255] }, background: null }) {
+  invalidatePreparation();
   palette.reset();
   focus.reset();
+  sourceControls.replace(options, prepared);
   contentVersion += 1;
   runVersion += 1;
   sourceDataUrl = dataUrl;
   sourceName = name;
-  preview.setSource(dataUrl);
-  ui.sourceImage.alt = name;
+  showPreparedSource(prepared, true);
   ui.fileLabel.textContent = "Change image";
   ui.imageName.textContent = name;
-  ui.sourceMeta.textContent = "";
-  ui.sourceImage.addEventListener("load", () => {
-    if (ui.sourceImage.src === dataUrl) ui.sourceMeta.textContent = `${ui.sourceImage.naturalWidth} x ${ui.sourceImage.naturalHeight}`;
-  }, { once: true });
   clearResult();
   ui.status.textContent = "Ready";
 }
 
 async function loadImage(file) {
-  palette.invalidate();
-  const version = ++contentVersion;
-  const type = file.type.toLowerCase();
-  const extension = file.name.toLowerCase().match(/\.[^.]+$/)?.[0] || "";
-  if (extension === ".svg" || extension === ".tif" || extension === ".tiff" ||
-      (type && type !== "application/octet-stream" && !contract.images.mime_types.includes(type))) {
-    throw new Error("Choose a PNG, JPEG, WebP, BMP, or GIF image");
-  }
-  let dataUrl;
-  if (contract.images.mime_types.includes(type)) {
-    dataUrl = await readFileAsDataUrl(file);
-    await decodeImage(dataUrl, "Source image", contract);
-    rasterDataUrl(dataUrl, "source image", contract);
-  } else {
-    const url = URL.createObjectURL(file);
-    try {
-      dataUrl = imageToPngDataUrl(await decodeImage(url, "Source image", contract));
-    } finally {
-      URL.revokeObjectURL(url);
+  await prepareSourceWork(async () => {
+    const type = file.type.toLowerCase(), extension = file.name.toLowerCase().match(/\.[^.]+$/)?.[0] || "";
+    if ([".svg", ".tif", ".tiff"].includes(extension) ||
+        (type && type !== "application/octet-stream" && type !== "image/apng" && !contract.images.mime_types.includes(type))) {
+      throw new Error("Choose a PNG, APNG, JPEG, WebP, BMP, or GIF image");
     }
-  }
-  if (version === contentVersion && phase !== "running" && phase !== "pausing") setSource(dataUrl, file.name);
+    const dataUrl = canonicalImageUrl(await readFileAsDataUrl(file), contract.images.mime_types.includes(type) ? type : "image/png");
+    rasterDataUrl(dataUrl, "source image", contract);
+    return { image: dataUrl, source: { frame: 0, matte: [255,255,255] } };
+  }, prepared => setSource(prepared.image, file.name, prepared), "Could not load image");
 }
 
 function sampleImage() {
@@ -314,7 +364,8 @@ function sampleImage() {
   context.lineTo(190, 138);
   context.closePath();
   context.fill();
-  setSource(canvas.toDataURL("image/png"), "Generated sample");
+  void prepareSourceWork(async () => ({ image: canvas.toDataURL("image/png"), source: { frame: 0, matte: [255,255,255] } }),
+    prepared => setSource(prepared.image, "Generated sample", prepared), "Could not load sample");
 }
 
 function stopLabel(reason, eventName) {
@@ -345,7 +396,7 @@ function normalizeWorkingSize(result) {
     result.render_width || result.width || 0, result.render_height || result.height || 0));
 }
 
-function installExperiment(branch) {
+function installExperiment(branch, prepared = null) {
   const result = branch.result;
   const width = result.render_width || result.width;
   const height = result.render_height || result.height;
@@ -355,7 +406,8 @@ function installExperiment(branch) {
   stableResult = width && height && result.background ? {
     width, height, background: result.background, shapes: result.shapes,
     attempts: branch.telemetry.attempts, revision: result.shapes.length,
-    restored_shape_count: result.restored_shape_count || 0
+    restored_shape_count: result.restored_shape_count || 0,
+    ...(result.target_digest ? { target_digest: result.target_digest } : {})
   } : null;
   loadedPreviewOnlyResult = stableResult ? null : result;
   if (stableResult) preview.showPrefix(stableResult, history.cursor);
@@ -364,6 +416,10 @@ function installExperiment(branch) {
   const options = { ...branch.options };
   if (stableResult) options.max_size = normalizeWorkingSize(result);
   applyOptions(options);
+  if (prepared) {
+    sourceControls.replace(options, prepared);
+    showPreparedSource(prepared);
+  }
   history.rememberOptions(options);
   telemetry.reset();
   telemetry.replace(result.shapes, branch.telemetry.attempts, branch.telemetry.initial_score, result.restored_shape_count || 0);
@@ -380,6 +436,7 @@ function installExperiment(branch) {
 }
 
 function invalidateExperimentView() {
+  invalidatePreparation();
   palette.invalidate();
   restoreContext = null;
   cancelAnimationFrame(inspectionFrame);
@@ -396,7 +453,7 @@ function invalidateExperimentView() {
 }
 
 function inspectExperiment(count) {
-  if (historyLocked() || phase === "restoring" || !stableResult) return;
+  if (historyLocked() || ["restoring", "preparing"].includes(phase) || !stableResult) return;
   preview.stopPaintGesture();
   paintQueue.clear();
   history.inspect(count);
@@ -404,7 +461,7 @@ function inspectExperiment(count) {
   cancelAnimationFrame(inspectionFrame);
   const branchId = history.activeId;
   inspectionFrame = requestAnimationFrame(() => {
-    if (branchId !== history.activeId || historyLocked() || phase === "restoring" || !stableResult) return;
+    if (branchId !== history.activeId || historyLocked() || ["restoring", "preparing"].includes(phase) || !stableResult) return;
     preview.showPrefix(stableResult, history.cursor);
   });
   telemetry.inspect(history.inspecting ? history.cursor : null);
@@ -413,17 +470,52 @@ function inspectExperiment(count) {
   setControls();
 }
 
-function selectExperiment(id) {
-  if (historyLocked() || id === history.activeId) return;
-  history.rememberOptions(currentOptions());
-  invalidateExperimentView();
-  const branch = history.select(id);
-  installExperiment(branch);
-  ui.status.textContent = `${branch.name} selected`;
+async function selectExperiment(id) {
+  if (historyLocked()) return;
+  if (id === history.activeId) {
+    if (phase === "preparing") {
+      invalidatePreparation();
+      ui.status.textContent = `${history.active.name} selected`;
+      setControls();
+    }
+    return;
+  }
+  const branch = history.branches.find(item => item.id === id);
+  if (!branch) return;
+  await prepareSourceWork(async () => ({ image: sourceDataUrl, source: branch.options.source }), prepared => {
+    history.rememberOptions(currentOptions());
+    invalidateExperimentView();
+    sourceDataUrl = prepared.image;
+    history.select(id);
+    installExperiment(branch, prepared);
+    ui.status.textContent = `${branch.name} selected`;
+  }, "Could not select experiment");
+}
+
+async function newRender() {
+  if ((historyLocked() && phase !== "recovery") || ["restoring", "preparing"].includes(phase) || !sourceDataUrl) return;
+  const wasRecovery = phase === "recovery";
+  let options, name;
+  try {
+    options = { ...currentOptions(), ...sourceControls.draft() };
+    name = history.checkChild(0, history.uniqueName("Render"));
+  } catch (error) { ui.status.textContent = error.message; return; }
+  await prepareSourceWork(async () => ({ image: sourceDataUrl, source: options.source }), prepared => {
+    history.checkChild(0, name);
+    history.rememberOptions(currentOptions());
+    if (wasRecovery) expireCurrentSession();
+    invalidateExperimentView();
+    sourceDataUrl = prepared.image;
+    history.add(emptyExperiment(options), { name });
+    sourceControls.replace(options, prepared);
+    showPreparedSource(prepared);
+    clearResult({ keepHistory: true });
+    ui.status.textContent = "New render ready";
+  }, "Could not prepare new render");
 }
 
 function manageExperiment(action, value) {
-  if (historyLocked() || phase === "restoring") return;
+  if (historyLocked() || ["restoring", "preparing"].includes(phase)) return;
   try {
     if (action === "rename") history.rename(value);
     else history.remove(value);
@@ -433,7 +525,7 @@ function manageExperiment(action, value) {
 }
 
 async function restoreExperiment(fork) {
-  if (historyLocked() || phase === "restoring" || !stableResult) return;
+  if (historyLocked() || ["restoring", "preparing"].includes(phase) || !stableResult) return;
   let context;
   try {
     const parent = history.active;
@@ -451,7 +543,8 @@ async function restoreExperiment(fork) {
     const snapshot = await postJson("/api/restore", {
       image: sourceDataUrl, options, shape_count: count,
       result: { width: stableResult.width, height: stableResult.height, background: stableResult.background,
-        shapes: stableResult.shapes, attempts: stableResult.attempts }
+        shapes: stableResult.shapes, attempts: stableResult.attempts,
+        ...(stableResult.target_digest ? { target_digest: stableResult.target_digest } : {}) }
     });
     if (restoreContext !== context || history.activeId !== context.parentId ||
         contentVersion !== context.contentVersion || runVersion !== context.runVersion) return;
@@ -461,7 +554,8 @@ async function restoreExperiment(fork) {
       throw new Error("The server did not confirm the restored experiment");
     }
     const result = { width: snapshot.width, height: snapshot.height, background: snapshot.background,
-      shapes: snapshot.shapes, attempts: 0, revision: snapshot.revision, restored_shape_count: count };
+      shapes: snapshot.shapes, attempts: 0, revision: snapshot.revision, restored_shape_count: count,
+      ...(snapshot.target_digest ? { target_digest: snapshot.target_digest } : {}) };
     history.add({ result, options, sessionId: snapshot.session_id,
       telemetry: { attempts: 0, duration_ms: 0, initial_score: snapshot.initial_score ?? null, batches: [] } },
     { name, parent_id: parent.id, fork_shape_count: count });
@@ -543,7 +637,8 @@ function acceptSnapshot(event, eventName) {
     width: event.width, height: event.height, background: event.background,
     shapes: event.shapes, attempts: event.attempts || 0,
     revision: event.revision || 0,
-    restored_shape_count: event.restored_shape_count ?? stableResult?.restored_shape_count ?? 0
+    restored_shape_count: event.restored_shape_count ?? stableResult?.restored_shape_count ?? 0,
+    ...(event.target_digest ? { target_digest: event.target_digest } : {})
   };
   workingResult = null;
   loadedPreviewOnlyResult = null;
@@ -629,7 +724,7 @@ async function recoverSnapshot(version) {
 }
 
 async function startRun({ paintFocus = null } = {}) {
-  if (!sourceDataUrl || phase === "running" || phase === "pausing" || phase === "restoring" || history.inspecting) return;
+  if (!sourceDataUrl || ["running", "pausing", "restoring", "preparing"].includes(phase) || history.inspecting) return;
   if (!sessionId && (stableResult || loadedPreviewOnlyResult?.preview_data_url || loadedPreviewOnlyResult?.shapes.length)) {
     ui.status.textContent = stableResult ? "Restore or fork this experiment before continuing" :
       "Use New render to start a fresh experiment and retain this preview";
@@ -764,7 +859,8 @@ function serializeScene(result, previewData = null) {
     render_width: result?.render_width || result?.width || null,
     render_height: result?.render_height || result?.height || null,
     background: result?.background || null, shapes: result?.shapes || [],
-    restored_shape_count: result?.restored_shape_count || 0
+    restored_shape_count: result?.restored_shape_count || 0,
+    ...(result?.target_digest ? { target_digest: result.target_digest } : {})
   };
 }
 
@@ -779,7 +875,7 @@ function createProject() {
     saved_at: new Date().toISOString(),
     source: {
       name: sourceName || "Source image", data_url: sourceDataUrl,
-      width: ui.sourceImage.naturalWidth || null, height: ui.sourceImage.naturalHeight || null
+      width: sourceMetadata?.width || null, height: sourceMetadata?.height || null
     },
     options,
     result: serializeScene(result || previewOnly, !history.inspecting && result ? preview.currentPreview() || null : null),
@@ -803,19 +899,19 @@ function triggerDownload(content, type, filename) {
 
 function saveProject() {
   if (!sourceDataUrl) return;
-  const content = JSON.stringify(createProject(), null, 2);
-  if (new Blob([content]).size > contract.project.max_bytes) {
-    throw new Error("Project is larger than 64 MB; lower the preview resolution before saving");
-  }
+  const { content, omitted } = projectContent(createProject(), contract.project.max_bytes);
   const base = sourceName.replace(/\.[^.]+$/, "").replace(/[^a-z0-9_-]+/gi, "-").replace(/^-+|-+$/g, "") || "geometrize";
   triggerDownload(content, "application/json", `${base}.geometrize-project.json`);
-  ui.status.textContent = "Project saved";
+  ui.status.textContent = omitted ? "Project saved · generated previews omitted to fit" : "Project saved";
 }
 
-function applyProject(project) {
-  setSource(project.source.data_url, project.source.name);
+function applyProject(project, prepared) {
+  for (const branch of project.history.branches) {
+    if (branch.options.source.frame >= prepared.frame_count) throw new Error("An experiment selects a frame outside the available source prefix");
+  }
+  setSource(prepared.image, project.source.name, prepared, project.options);
   history.load(project.history);
-  installExperiment(history.active);
+  installExperiment(history.active, prepared);
   applyOptions({ ...project.options, ...(stableResult ? { max_size: normalizeWorkingSize(stableResult) } : {}) });
   history.rememberOptions(currentOptions());
   telemetry.setState("Loaded project", lastDurationMs);
@@ -908,12 +1004,9 @@ function bindEvents() {
   }
   ui.imageInput.addEventListener("change", async () => {
     const file = ui.imageInput.files[0];
+    ui.imageInput.value = "";
     if (!file) return;
-    try { await loadImage(file); }
-    catch (error) {
-      ui.imageInput.value = "";
-      ui.status.textContent = `Could not load image: ${error.message}`;
-    }
+    await loadImage(file);
   });
   ui.sample.addEventListener("click", sampleImage);
   ui.openProject.addEventListener("click", () => ui.projectInput.click());
@@ -921,14 +1014,10 @@ function bindEvents() {
     const file = ui.projectInput.files[0];
     ui.projectInput.value = "";
     if (!file) return;
-    const version = ++contentVersion;
-    palette.invalidate();
-    try {
-      const project = await openProjectFile(file, contract);
-      if (version === contentVersion && phase !== "running" && phase !== "pausing") applyProject(project);
-    } catch (error) {
-      if (version === contentVersion) ui.status.textContent = `Could not open project: ${error.message}`;
-    }
+    await prepareSourceWork(async () => {
+      const project = await openProjectFile(file, contract, { decodeSource: false });
+      return { image: project.source.data_url, source: project.options.source, project };
+    }, (prepared, request) => applyProject(request.project, prepared), "Could not open project");
   });
   ui.saveProject.addEventListener("click", () => {
     try { saveProject(); }
@@ -936,27 +1025,14 @@ function bindEvents() {
   });
   ui.form.addEventListener("submit", (event) => {
     event.preventDefault();
-    if ((historyLocked() && phase !== "recovery") || phase === "restoring" || history.inspecting ||
+    if ((historyLocked() && phase !== "recovery") || ["restoring", "preparing"].includes(phase) || history.inspecting ||
         (!sessionId && (stableResult || loadedPreviewOnlyResult?.preview_data_url || loadedPreviewOnlyResult?.shapes.length))) return;
     if (focus.mode === "paint") focus.setMode("focus");
     paintQueue.clear();
     void startRun();
   });
   ui.pause.addEventListener("click", () => { void pauseRun(); });
-  ui.restart.addEventListener("click", () => {
-    if ((historyLocked() && phase !== "recovery") || phase === "restoring") return;
-    try {
-      if (phase === "recovery") expireCurrentSession();
-      history.rememberOptions(currentOptions());
-      const active = history.active;
-      if (active && (active.result.background || active.result.preview_data_url || active.result.shapes.length)) {
-        history.add(emptyExperiment(), { name: history.uniqueName("Render") });
-      }
-      invalidateExperimentView();
-      clearResult({ keepHistory: true });
-      ui.status.textContent = "New render ready";
-    } catch (error) { ui.status.textContent = error.message; }
-  });
+  ui.restart.addEventListener("click", () => { void newRender(); });
   for (const [type, link] of Object.entries(ui.downloads)) {
     link.addEventListener("click", (event) => {
       event.preventDefault();
@@ -974,6 +1050,13 @@ async function init() {
     if (!response.ok) throw new Error(`Server returned ${response.status}`);
     contract = await response.json();
     history = new ReconstructionHistory(contract.project);
+    sourcePreparation = new SourcePreparation(contract, postJson);
+    sourceControls = new SourceControls({
+      summary: byId("source-options-summary"), frame: byId("source-frame"), frameLabel: byId("source-frame-label"),
+      matte: byId("source-matte"), matteColor: byId("source-matte-color"),
+      background: byId("canvas-background"), backgroundColor: byId("canvas-background-color"),
+      metadata: byId("source-options-meta"), apply: byId("source-apply"), status: byId("source-options-status")
+    }, contract.source, newRender);
     renderShapeControls();
     for (const [key, input] of [["steps", ui.stepsNumber], ["alpha", ui.alpha],
       ["seed", ui.seed], ["shape_count", ui.shapeCount], ["mutations", ui.mutations],
@@ -1067,7 +1150,8 @@ async function init() {
       apply: byId("palette-apply"), extract: byId("palette-extract"), extractCount: byId("palette-extract-count"),
       strength: byId("palette-strength"), strengthNumber: byId("palette-strength-number"),
       soft: byId("palette-soft"), swatches: byId("palette-swatches"), status: byId("palette-status")
-    }, contract.palette, { post: postJson, context: () => ({ image: sourceDataUrl, branchId: history.activeId }),
+    }, contract.palette, { post: postJson, context: () => ({ image: sourceDataUrl, branchId: history.activeId,
+      source: sourceControls.value.source }),
       onChange: () => { ui.preset.value = "custom"; setControls(); } });
     historyControls = new HistoryControls({
       branch: byId("experiment-select"), name: byId("experiment-name"), rename: byId("experiment-rename"),

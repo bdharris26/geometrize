@@ -169,7 +169,8 @@ export class PaletteControls {
   owns(token) {
     const context = this.context();
     return this.extraction === token && this.requestId === token.id && this.revision === token.revision &&
-      context.image === token.image && context.branchId === token.branchId && !this.locked;
+      context.image === token.image && context.branchId === token.branchId &&
+      JSON.stringify(context.source ?? null) === token.sourceKey && !this.locked;
   }
 
   async extract() {
@@ -178,12 +179,14 @@ export class PaletteControls {
     const raw = this.el.extractCount.valueAsNumber;
     const count = Number.isFinite(raw) ? Math.max(1, Math.min(this.maxColors, Math.trunc(raw))) : this.defaultCount;
     this.el.extractCount.value = String(count);
-    const token = { id: ++this.requestId, revision: this.revision, image: context.image, branchId: context.branchId };
+    const source = context.source ? { frame: context.source.frame, matte: context.source.matte ? [...context.source.matte] : null } : null;
+    const token = { id: ++this.requestId, revision: this.revision, image: context.image, branchId: context.branchId,
+      source, sourceKey: JSON.stringify(source) };
     this.extraction = token;
     this.feedback = "Extracting source colors…";
     this.render();
     try {
-      const reply = await this.post("/api/palette", { image: token.image, max_colors: count });
+      const reply = await this.post("/api/palette", { image: token.image, max_colors: count, ...(source ? { source } : {}) });
       if (!this.owns(token)) return;
       const palette = validatePalette({ colors: reply.colors }, this.config, "Extracted palette");
       const sampleSize = this.config.sample_size ?? 256;
