@@ -9,7 +9,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, PngImagePlugin
 from playwright.sync_api import Page, expect, sync_playwright
 
 from geometrize_py.web import GeometrizeRequestHandler, GeometrizeServer
@@ -56,6 +56,88 @@ def _fitting_settings(page: Page) -> None:
     page.locator("#shape-count").fill("16")
     page.locator("#mutations").fill("24")
     page.locator("#max-threads").fill("1")
+
+
+@pytest.mark.parametrize("version", [1, 2, 3])
+def test_wrapped_project_source_prepares_restores_continues_and_preserves_original_bytes(
+    server_url: str, tmp_path: Path, version: int,
+) -> None:
+    original = Image.new("RGBA", (80, 40), (70, 90, 110, 128))
+    ImageDraw.Draw(original).rectangle((0, 0, 35, 39), fill=(180, 110, 50, 255))
+    ImageDraw.Draw(original).ellipse((45, 5, 75, 35), fill=(20, 170, 50, 255))
+    metadata = PngImagePlugin.PngInfo()
+    metadata.add_text("Original source", "Keep these encoded bytes, including PNG metadata")
+    buffer = io.BytesIO()
+    original.save(buffer, format="PNG", pnginfo=metadata)
+    encoded = buffer.getvalue()
+    payload = base64.b64encode(encoded).decode()
+    wrapped_url = "data:image/png;base64," + "\r\n".join(
+        payload[index:index + 76] for index in range(0, len(payload), 76)
+    )
+    matte = (16, 32, 48) if version == 3 else None
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = browser.new_page(viewport={"width": 1440, "height": 1000})
+        errors: list[str] = []
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        page.goto(server_url, wait_until="networkidle")
+        page.locator("#image-input").set_input_files({
+            "name": "original.png", "mimeType": "image/png", "buffer": encoded,
+        })
+        expect(page.locator("#status")).to_have_text("Ready")
+        page.locator(".source-controls summary").click()
+        page.locator("#source-matte").select_option("custom" if matte else "none")
+        if matte:
+            page.locator("#source-matte-color").fill("#102030")
+        page.locator("#source-apply").click()
+        expect(page.locator("#status")).to_have_text("New render ready")
+        _fitting_settings(page)
+        _run(page)
+        project = _save(page, tmp_path / "unwrapped.json")
+        project["version"] = version
+        project["source"]["data_url"] = wrapped_url
+        if version < 3:
+            project.pop("history")
+            project["options"].pop("source")
+            project["options"].pop("background")
+            project["result"].pop("target_digest")
+        project_path = tmp_path / f"wrapped-v{version}.json"
+        project_path.write_text(json.dumps(project), encoding="utf-8")
+
+        with page.expect_response("**/api/source/prepare") as preparation:
+            page.locator("#project-input").set_input_files(project_path)
+        assert preparation.value.status == 200
+        assert preparation.value.request.post_data_json["image"] == wrapped_url
+        expect(page.locator("#status")).to_contain_text("Restore or fork to continue")
+        expected = _matte(original, matte) if matte else original
+        assert _prepared(page).tobytes() == expected.tobytes()
+        fitted = expected.copy()
+        fitted.thumbnail((64, 64), Image.Resampling.LANCZOS)
+        expected_digest = hashlib.sha256(fitted.tobytes()).hexdigest()
+        loaded = _save(page, tmp_path / "loaded.json")
+        assert loaded["source"]["data_url"] == wrapped_url
+
+        with page.expect_response("**/api/restore") as restoration:
+            page.locator("#experiment-fork").click()
+        assert restoration.value.status == 200
+        assert restoration.value.request.post_data_json["image"] == wrapped_url
+        expect(page.locator("#status")).to_contain_text("ready to Continue")
+        restored = _save(page, tmp_path / "restored.json")
+        assert restored["result"]["restored_shape_count"] == len(project["result"]["shapes"])
+        assert restored["telemetry"]["attempts"] == 0
+        assert restored["result"]["background"] == project["result"]["background"]
+        assert restored["result"]["target_digest"] == expected_digest
+        with page.expect_request("**/api/run/stream") as continuation:
+            _run(page)
+        assert continuation.value.post_data_json["session_id"] == restoration.value.json()["session_id"]
+        saved = _save(page, tmp_path / "continued.json")
+        assert len(saved["result"]["shapes"]) > len(restored["result"]["shapes"])
+        assert saved["options"]["source"] == {"frame": 0, "matte": list(matte) if matte else None}
+        assert saved["source"]["data_url"] == wrapped_url
+        saved_payload = saved["source"]["data_url"].split(",", 1)[1]
+        assert base64.b64decode(saved_payload.replace("\r", "").replace("\n", ""), validate=True) == encoded
+        assert errors == []
+        browser.close()
 
 
 def test_native_transparent_source_metadata_mattes_and_canvas_background_roundtrip(
