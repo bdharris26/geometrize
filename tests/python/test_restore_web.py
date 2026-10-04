@@ -1,0 +1,282 @@
+from __future__ import annotations
+
+import copy
+import json
+import threading
+import urllib.request
+from http import HTTPStatus
+from types import SimpleNamespace
+from urllib.error import HTTPError
+
+import pytest
+from PIL import Image
+
+from geometrize_py import native, web
+from geometrize_py.images import image_data_url_bytes, image_to_data_url, open_image_bytes
+from geometrize_py.native import ImageSession, RunOptions, native_available
+from geometrize_py.resources import WorkBudget
+from geometrize_py.web import GeometrizeRequestHandler, GeometrizeServer, _estimate_session_bytes
+
+
+@pytest.fixture
+def restore_server():
+    server = GeometrizeServer(("127.0.0.1", 0), GeometrizeRequestHandler)
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
+    thread.start()
+    try:
+        yield server
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(5)
+
+
+def _post(server, path: str, payload: dict) -> dict:
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{server.server_port}{path}",
+        data=json.dumps(payload).encode("utf-8"), headers={"Content-Type": "application/json"}, method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=5) as response:
+        return json.load(response)
+
+
+def _payload() -> dict:
+    image = Image.new("RGBA", (32, 24), (20, 40, 60, 255))
+    image.paste((210, 140, 30, 255), (16, 0, 32, 24))
+    return {"image": image_to_data_url(image), "options": {"max_size": 32, "max_threads": 1},
+            "result": {"width": 32, "height": 24, "background": [0, 0, 0, 255], "shapes": [], "attempts": 41}}
+
+
+@pytest.mark.skipif(not native_available(), reason="native backend is not built")
+def test_restore_is_confirmed_native_prefix_then_continues_as_a_fresh_experiment(restore_server) -> None:
+    server = restore_server
+    payload = _payload()
+    image = open_image_bytes(image_data_url_bytes(payload["image"]))
+    options = RunOptions(steps=3, max_threads=1, shape_count=8, mutations=8, max_size=32,
+                         shape_types=("rectangle",), seed=123)
+    original = ImageSession.from_image(image, options)
+    prefix_pixels = [original.result().image.tobytes()]
+    for event in original.run_batch(options):
+        if event["shapes"]:
+            prefix_pixels.append(original.result().image.tobytes())
+    assert len(original.shapes) == 3
+    server.store_session("original", original)
+    original_shapes = copy.deepcopy(original.shapes)
+    payload["result"] = {"width": 32, "height": 24, "background": original.background,
+                         "shapes": original_shapes, "attempts": original.attempts, "revision": 999}
+    payload["shape_count"] = 1
+    payload["options"]["max_size"] = 64
+    confirmed = _post(server, "/api/restore", payload)
+    session_id = confirmed["session_id"]
+    assert confirmed["event"] == "restored"
+    assert session_id != "original"
+    assert confirmed["attempts"] == 0
+    assert confirmed["shape_count"] == confirmed["revision"] == confirmed["restored_shape_count"] == 1
+    assert confirmed["restore"] == {"shape_count": 1, "source_shape_count": 3,
+                                    "source_attempts": original.attempts, "attempt_policy": "reset"}
+    assert confirmed["batch_summary"] is None
+    assert open_image_bytes(image_data_url_bytes(confirmed["preview"])).tobytes() == prefix_pixels[1]
+    assert server.get_session(session_id).batch_count == 0
+    assert server.get_session("original") is original
+    assert original.shapes == original_shapes
+    assert original.result().image.tobytes() == prefix_pixels[-1]
+    assert server.active_runs == {}
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{server.server_port}/api/run/stream",
+        data=json.dumps({"session_id": session_id, "options": {**payload["options"], "steps": 1,
+                                                              "shape_count": 8, "mutations": 8}}).encode(),
+        headers={"Content-Type": "application/json"}, method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=5) as response:
+        events = [json.loads(line) for line in response]
+    assert events[0]["event"] == "start"
+    assert events[0]["attempts"] == 0
+    assert events[0]["restored_shape_count"] == 1
+    steps = [event for event in events if event["event"] == "step"]
+    assert steps[0]["attempts"] == 1
+    assert all(event["restored_shape_count"] == 1 for event in events if event["event"] != "error")
+    assert events[-1]["revision"] == events[-1]["shape_count"] == 2
+    assert original.shapes == original_shapes
+    assert server.work_budget.usage() == (0, 0)
+
+
+@pytest.mark.skipif(not native_available(), reason="native backend is not built")
+@pytest.mark.parametrize("count", [0, None])
+def test_restore_accepts_empty_prefix_and_optional_full_prefix(restore_server, count) -> None:
+    payload = _payload()
+    if count is not None:
+        payload["shape_count"] = count
+    confirmed = _post(restore_server, "/api/restore", payload)
+    assert confirmed["restored_shape_count"] == confirmed["attempts"] == confirmed["shape_count"] == 0
+    assert confirmed["revision"] == 0
+    assert confirmed["background"] == [0, 0, 0, 255]
+    assert open_image_bytes(image_data_url_bytes(confirmed["preview"])).getpixel((0, 0)) == (0, 0, 0, 255)
+    assert restore_server.get_session(confirmed["session_id"]) is not None
+    assert restore_server.work_budget.usage() == (0, 0)
+
+
+@pytest.mark.parametrize("count", [None, False, True, -1, 1, 0.5, "0", [], {}])
+def test_restore_rejects_noninteger_or_out_of_range_prefix_without_publishing_session(restore_server, count) -> None:
+    payload = _payload()
+    payload["shape_count"] = count
+    with pytest.raises(HTTPError) as error:
+        _post(restore_server, "/api/restore", payload)
+    assert error.value.code == HTTPStatus.BAD_REQUEST
+    assert json.load(error.value)["code"] == "invalid_result"
+    assert not restore_server.sessions
+    assert restore_server.work_budget.usage() == (0, 0)
+
+
+def test_restore_request_memory_is_admitted_before_reading_body(restore_server, monkeypatch) -> None:
+    restore_server.work_budget = WorkBudget(1, 32 * 1024)
+    monkeypatch.setattr(GeometrizeRequestHandler, "_read_json", lambda _self: pytest.fail("Body read before admission"))
+    with pytest.raises(HTTPError) as error:
+        _post(restore_server, "/api/restore", {})
+    assert json.load(error.value)["code"] == "memory_limit"
+    assert restore_server.work_budget.usage() == (0, 0)
+
+
+def test_restore_scene_metadata_is_admitted_before_normalization(restore_server, monkeypatch) -> None:
+    restore_server.work_budget = WorkBudget(1, 1024 * 1024)
+    monkeypatch.setattr(web, "validate_scene", lambda _raw: pytest.fail("Copied geometry before admission"))
+    with pytest.raises(HTTPError) as error:
+        _post(restore_server, "/api/restore", _payload())
+    assert json.load(error.value)["code"] == "memory_limit"
+    assert not restore_server.sessions
+    assert restore_server.work_budget.usage() == (0, 0)
+
+
+@pytest.mark.skipif(not native_available(), reason="native backend is not built")
+def test_restore_replay_scratch_is_reserved_before_image_decode_or_native_drawing(restore_server, monkeypatch) -> None:
+    restore_server.work_budget = WorkBudget(1, 8 * 1024 * 1024)
+    payload = _payload()
+    payload["result"]["shapes"] = [{"type": "polyline", "color": [0, 0, 0, 128],
+                                    "data": {"points": [[-512, -384], [512, 384]] * 500}}]
+    monkeypatch.setattr(web, "open_image_bytes", lambda _raw: pytest.fail("Image decoded before scratch admission"))
+    with pytest.raises(HTTPError) as error:
+        _post(restore_server, "/api/restore", payload)
+    assert json.load(error.value)["code"] == "memory_limit"
+    assert not restore_server.sessions
+    assert restore_server.work_budget.usage() == (0, 0)
+
+
+@pytest.mark.skipif(not native_available(), reason="native backend is not built")
+@pytest.mark.parametrize("radius", [1000, pytest.param(10**400, id="overflowing_integer"), False])
+def test_restore_rejects_hostile_geometry_before_drawing(restore_server, monkeypatch, radius) -> None:
+    payload = _payload()
+    payload["result"]["shapes"] = [{"type": "circle", "color": [0, 0, 0, 128],
+                                    "data": {"x": 16, "y": 12, "r": radius}}]
+    monkeypatch.setattr(ImageSession, "_from_validated_scene", lambda *_args: pytest.fail("Unsafe scene was replayed"))
+    with pytest.raises(HTTPError) as error:
+        _post(restore_server, "/api/restore", payload)
+    assert json.load(error.value)["code"] == "invalid_result"
+    assert not restore_server.sessions
+    assert restore_server.work_budget.usage() == (0, 0)
+
+
+@pytest.mark.skipif(not native_available(), reason="native backend is not built")
+def test_restore_mismatched_source_does_not_change_existing_session_or_leak_resources(restore_server) -> None:
+    original = ImageSession.from_image(Image.new("RGBA", (2, 2), "blue"), RunOptions())
+    restore_server.store_session("original", original)
+    payload = _payload()
+    payload["result"]["height"] = 25
+    with pytest.raises(HTTPError) as error:
+        _post(restore_server, "/api/restore", payload)
+    assert json.load(error.value)["code"] == "invalid_result"
+    assert restore_server.get_session("original") is original
+    assert list(restore_server.sessions) == ["original"]
+    assert original.result().image.getpixel((0, 0)) == (0, 0, 255, 255)
+    assert restore_server.work_budget.usage() == (0, 0)
+
+
+@pytest.mark.skipif(not native_available(), reason="native backend is not built")
+def test_restore_dynamic_work_exhaustion_preserves_parent_and_releases_admission(restore_server) -> None:
+    original = ImageSession.from_image(Image.new("RGBA", (2, 2), "blue"), RunOptions())
+    restore_server.store_session("original", original)
+    payload = _payload()
+    payload["image"] = image_to_data_url(Image.new("RGBA", (32, 32), (0, 0, 0, 255)))
+    payload["result"]["height"] = 32
+    payload["result"]["shapes"] = [
+        {"type": "rectangle", "color": [level, level, level, 255],
+         "data": {"x1": 0, "y1": 0, "x2": 0, "y2": 0}} for level in [1, 0] * 32
+    ]
+    restore_server.restore_work_limit = 8 * 32 * 32 + 4 * 64 + 32 * 32
+    with pytest.raises(HTTPError) as error:
+        _post(restore_server, "/api/restore", payload)
+    failure = json.load(error.value)
+    assert failure["code"] == "invalid_result"
+    assert "work limit" in failure["error"]
+    assert list(restore_server.sessions) == ["original"]
+    assert restore_server.get_session("original") is original
+    assert original.result().image.getpixel((0, 0)) == (0, 0, 255, 255)
+    assert restore_server.active_runs == {}
+    assert restore_server.work_budget.usage() == (0, 0)
+    # A subsequent request can use the same render slot and remains within the
+    # ceiling, confirming the failed unpublished session leaves no reservation.
+    payload["result"]["shapes"] = []
+    assert _post(restore_server, "/api/restore", payload)["restored_shape_count"] == 0
+
+
+@pytest.mark.parametrize("limit", [None, False, True, 0, -1, 1000000001, 0.5, "100"])
+def test_server_restore_work_limit_rejects_invalid_configuration(limit) -> None:
+    with pytest.raises(ValueError, match="restore_work_limit"):
+        GeometrizeServer(("127.0.0.1", 0), GeometrizeRequestHandler, restore_work_limit=limit)
+
+
+def test_server_publishes_its_lower_restore_work_limit() -> None:
+    with GeometrizeServer(("127.0.0.1", 0), GeometrizeRequestHandler, restore_work_limit=100000) as server:
+        thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
+        thread.start()
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/api/config", timeout=5) as response:
+                assert json.load(response)["restore"]["max_work"] == 100000
+        finally:
+            server.shutdown()
+            thread.join(5)
+
+
+def test_restore_at_exhausted_render_capacity_is_busy(restore_server) -> None:
+    assert restore_server.try_acquire_render_slot()
+    assert restore_server.try_acquire_render_slot()
+    try:
+        with pytest.raises(HTTPError) as error:
+            _post(restore_server, "/api/restore", _payload())
+        assert error.value.code == HTTPStatus.TOO_MANY_REQUESTS
+        assert json.load(error.value)["code"] == "renderer_busy"
+        assert not restore_server.sessions
+        assert restore_server.work_budget.usage() == (0, 0)
+    finally:
+        restore_server.release_render_slot()
+        restore_server.release_render_slot()
+
+
+def test_restore_missing_native_capability_is_actionable_503(restore_server, monkeypatch) -> None:
+    monkeypatch.setattr(native, "_native", SimpleNamespace(is_available=lambda: True))
+    with pytest.raises(HTTPError) as error:
+        _post(restore_server, "/api/restore", _payload())
+    assert error.value.code == HTTPStatus.SERVICE_UNAVAILABLE
+    payload = json.load(error.value)
+    assert payload["code"] == "native_unavailable"
+    assert "rebuild or reinstall" in payload["error"]
+    assert not restore_server.sessions
+    assert restore_server.work_budget.usage() == (0, 0)
+
+
+def test_restore_rejects_unretainable_prefix_before_native_access(restore_server, monkeypatch) -> None:
+    restore_server.max_session_bytes = 512 * 1024
+    monkeypatch.setattr(web, "require_restore_native", lambda: pytest.fail("Unretainable session reached native"))
+    with pytest.raises(HTTPError) as error:
+        _post(restore_server, "/api/restore", _payload())
+    assert json.load(error.value)["code"] == "memory_limit"
+    assert not restore_server.sessions
+    assert restore_server.work_budget.usage() == (0, 0)
+
+
+def test_cached_session_budget_counts_retained_polyline_vertices(restore_server) -> None:
+    short = SimpleNamespace(width=32, height=24, shapes=[{"type": "polyline", "data": {"points": [[0, 0]]}}])
+    long = SimpleNamespace(width=32, height=24, shapes=[{"type": "polyline", "data": {"points": [[0, 0]] * 10000}}])
+    assert _estimate_session_bytes(long) - _estimate_session_bytes(short) >= (10000 - 1) * 192
+    restore_server.max_session_bytes = _estimate_session_bytes(short)
+    restore_server.store_session("long", long)
+    assert restore_server.get_session("long") is None
+    assert restore_server._stored_session_bytes == 0
