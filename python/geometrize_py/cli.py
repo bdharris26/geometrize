@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 
 from .images import image_to_png_bytes, open_image_bytes
-from .native import RunOptions, diagnostics, run_image
+from .native import Focus, RunOptions, diagnostics, run_image
 from .render import export_dimensions, render_shapes_to_image
 from .resources import DEFAULT_ACTIVE_MEMORY_BYTES, DEFAULT_WORKER_BUDGET
 from .svg import shapes_to_svg
@@ -34,9 +34,10 @@ def main(argv: list[str] | None = None) -> int:
     if command == "run":
         try:
             _validate_distinct_paths(args)
+            options = options_from_args(args)
         except ValueError as exc:
             parser.error(str(exc))
-        return run_once(args)
+        return run_once(args, options)
     if command == "doctor":
         status = diagnostics()
         if args.json:
@@ -94,6 +95,12 @@ def add_option_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--mutations", type=int, default=RunOptions.mutations)
     parser.add_argument("--seed", type=int, default=RunOptions.seed)
     parser.add_argument("--max-threads", type=int, default=RunOptions.max_threads)
+    parser.add_argument("--focus-x", type=float, help="focus center x, normalized from 0 to 1")
+    parser.add_argument("--focus-y", type=float, help="focus center y, normalized from 0 to 1")
+    parser.add_argument(
+        "--focus-radius", type=float, help="focus radius as a fraction of the shorter image edge (0.01–1)",
+    )
+    parser.add_argument("--focus-strength", type=float, help="fraction of candidate starts biased toward focus (0–1)")
     parser.add_argument(
         "--stagnation-limit",
         type=int,
@@ -117,6 +124,16 @@ def add_option_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 def options_from_args(args: argparse.Namespace) -> RunOptions:
+    focus = None
+    if any(value is not None for value in (args.focus_x, args.focus_y, args.focus_radius, args.focus_strength)):
+        if args.focus_x is None or args.focus_y is None:
+            raise ValueError("--focus-x and --focus-y are required together when setting focus")
+        focus = {
+            "x": args.focus_x,
+            "y": args.focus_y,
+            "radius": Focus.radius if args.focus_radius is None else args.focus_radius,
+            "strength": Focus.strength if args.focus_strength is None else args.focus_strength,
+        }
     return RunOptions.from_mapping(
         {
             "steps": args.steps,
@@ -129,13 +146,14 @@ def options_from_args(args: argparse.Namespace) -> RunOptions:
             "max_size": args.max_size,
             "export_size": args.export_size,
             "stagnation_limit": args.stagnation_limit,
+            "focus": focus,
         }
     )
 
 
-def run_once(args: argparse.Namespace) -> int:
+def run_once(args: argparse.Namespace, options: RunOptions | None = None) -> int:
+    options = options or options_from_args(args)
     image = open_image_bytes(args.input.read_bytes())
-    options = options_from_args(args)
     result = run_image(image, options)
     export_width, export_height = export_dimensions(result.width, result.height, options.export_size)
     output = render_shapes_to_image(

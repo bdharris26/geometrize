@@ -2,6 +2,7 @@
 
 import { ApiError, postJson, readRunStream } from "./stream.js";
 import { Preview } from "./preview.js";
+import { FocusControls, FocusUpdates, PaintQueue } from "./focus.js";
 import { Telemetry } from "./telemetry.js";
 import { decodeImage, imageToPngDataUrl, openProjectFile, rasterDataUrl, readFileAsDataUrl } from "./project.js";
 
@@ -44,6 +45,11 @@ const STOP_LABELS = {
 let contract;
 let preview;
 let telemetry;
+let focus;
+let focusUpdates;
+let paintQueue;
+let runIsPaint = false;
+let focusAtRunStart = null;
 let sourceDataUrl = "";
 let sourceName = "";
 let sessionId = "";
@@ -135,11 +141,13 @@ function currentOptions() {
     max_threads: normalizeInteger(ui.maxThreads, "max_threads"),
     stagnation_limit: normalizeInteger(ui.stagnationLimit, "stagnation_limit"),
     max_size: maxSize,
-    export_size: exportSize
+    export_size: exportSize,
+    focus: focus.value ? { ...focus.value } : null
   };
 }
 
 function applyOptions(options) {
+  focus.replace(options.focus);
   syncPair(ui.steps, ui.stepsNumber, ui.stepsOut, options.steps);
   syncPair(ui.maxSize, ui.maxSizeNumber, ui.maxSizeOut, options.max_size);
   commitExportSize(options.export_size);
@@ -171,6 +179,8 @@ function setControls() {
   ui.settingsHelp.textContent = sessionId
     ? "Edits apply to the next batch. Working resolution is fixed until New render."
     : "Settings apply when you Run. Export resolution is used when a download is clicked.";
+  focus?.setAvailability(Boolean(sourceDataUrl), busy);
+  paintQueue?.setBusy(busy && !runIsPaint);
   for (const link of Object.values(ui.downloads)) {
     const available = Boolean(stableResult);
     link.setAttribute("aria-disabled", available ? "false" : "true");
@@ -179,6 +189,8 @@ function setControls() {
 }
 
 function clearResult() {
+  focusUpdates.end();
+  paintQueue.clear();
   sessionId = "";
   activeRunId = "";
   stableResult = null;
@@ -196,10 +208,12 @@ function clearResult() {
   ui.metrics.textContent = "";
   ui.pipeline.textContent = "0 shapes";
   phase = "idle";
+  runIsPaint = false;
   setControls();
 }
 
 function setSource(dataUrl, name) {
+  focus.reset();
   contentVersion += 1;
   runVersion += 1;
   sourceDataUrl = dataUrl;
@@ -274,6 +288,9 @@ function onRunEvent(event, version) {
   if (event.event === "start") {
     sessionId = event.session_id || sessionId;
     activeRunId = event.run_id || "";
+    if (!runIsPaint && focus.mode !== "paint") {
+      focusUpdates.begin({ sessionId, runId: activeRunId, runVersion: version, contentVersion }, focusAtRunStart);
+    }
     if (!event.continued) telemetry.reset();
     workingResult = {
       width: event.width, height: event.height, background: event.background,
@@ -315,6 +332,8 @@ function acceptSnapshot(event, eventName) {
     workingResult.shapes.length === event.shapes.length;
   sessionId = event.session_id || sessionId;
   activeRunId = "";
+  focusUpdates.end();
+  focus.setFeedback("");
   stableResult = {
     width: event.width, height: event.height, background: event.background,
     shapes: event.shapes, attempts: event.attempts || 0,
@@ -358,6 +377,8 @@ function restoreConfirmedView(confirmed) {
   if (sceneVersion !== confirmed.sceneVersion) return;
   workingResult = null;
   activeRunId = "";
+  focusUpdates.end();
+  focus.setFeedback("");
   if (stableResult) {
     preview.rebuild(stableResult.width, stableResult.height, stableResult.background, stableResult.shapes);
   } else if (confirmed.previewImage && confirmed.previewSize) {
@@ -398,7 +419,7 @@ async function recoverSnapshot(version) {
   return false;
 }
 
-async function startRun() {
+async function startRun({ paintFocus = null } = {}) {
   if (!sourceDataUrl || phase === "running" || phase === "pausing") return;
   if (phase === "recovery") {
     if (!await recoverSnapshot(runVersion)) {
@@ -411,11 +432,19 @@ async function startRun() {
     return;
   }
   const options = currentOptions();
+  if (paintFocus) {
+    options.steps = 1;
+    options.focus = { ...paintFocus };
+  }
   if (!options.shape_types.length) {
     ui.status.textContent = "Choose at least one shape";
     return;
   }
   const continuing = Boolean(sessionId);
+  const initialShapeCount = continuing ? stableResult?.shapes.length || 0 : 0;
+  runIsPaint = Boolean(paintFocus);
+  focusAtRunStart = options.focus;
+  focusUpdates.end();
   activeRunId = "";
   const payload = continuing
     ? { session_id: sessionId, options }
@@ -430,10 +459,11 @@ async function startRun() {
   telemetry.setState(continuing ? "Continuing" : "Running");
   setControls();
   let sawStart = false;
+  let terminal = null;
   try {
     for (let attempt = 0; attempt < 8; attempt += 1) {
       try {
-        await readRunStream(payload, (event) => {
+        terminal = await readRunStream(payload, (event) => {
           if (event.event === "start") sawStart = true;
           onRunEvent(event, version);
         });
@@ -446,9 +476,22 @@ async function startRun() {
         throw error;
       }
     }
+    return {
+      confirmed: Boolean(terminal),
+      added: terminal?.batch_summary?.added ?? Math.max(0, (stableResult?.shapes.length || 0) - initialShapeCount),
+      reason: stopLabel(terminal?.stop_reason, terminal?.event),
+      cancelled: ["paused", "error"].includes(terminal?.stop_reason) || terminal?.event === "paused"
+    };
   } catch (error) {
     if (version !== runVersion) return;
-    if (sessionId && sawStart && await recoverSnapshot(version)) return;
+    if (sessionId && sawStart && await recoverSnapshot(version)) {
+      return {
+        confirmed: true,
+        added: Math.max(0, (stableResult?.shapes.length || 0) - initialShapeCount),
+        reason: "Stream interrupted; result recovered",
+        cancelled: true
+      };
+    }
     restoreConfirmedView(confirmedView);
     const code = error.code || "request_failed";
     if (code === "unknown_session") sessionId = "";
@@ -460,14 +503,19 @@ async function startRun() {
       ui.status.textContent = error.message || "Render failed";
     }
     telemetry.setState("Error", lastDurationMs);
+    return { confirmed: false, message: ui.status.textContent };
   } finally {
-    if (version === runVersion) setControls();
+    if (version === runVersion) {
+      runIsPaint = false;
+      setControls();
+    }
   }
 }
 
 async function pauseRun() {
   if (phase !== "running" || !sessionId || !activeRunId) return;
   const version = runVersion;
+  paintQueue.clear();
   phase = "pausing";
   ui.status.textContent = "Pausing after the current attempt";
   telemetry.setState("Pausing", performance.now() - runStartedAt);
@@ -670,7 +718,13 @@ function bindEvents() {
     try { saveProject(); }
     catch (error) { ui.status.textContent = error.message; }
   });
-  ui.form.addEventListener("submit", (event) => { event.preventDefault(); void startRun(); });
+  ui.form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    if (phase === "running" || phase === "pausing") return;
+    if (focus.mode === "paint") focus.setMode("focus");
+    paintQueue.clear();
+    void startRun();
+  });
   ui.pause.addEventListener("click", () => { void pauseRun(); });
   ui.restart.addEventListener("click", () => {
     if (phase === "running" || phase === "pausing") return;
@@ -705,9 +759,52 @@ async function init() {
     preview = new Preview({
       sourceStage: byId("source-stage"), resultStage: byId("result-stage"),
       sourceImage: ui.sourceImage, resultImage: ui.resultImage,
-      resultCanvas: ui.resultCanvas, zoomOutput: byId("zoom-value")
+      resultCanvas: ui.resultCanvas, zoomOutput: byId("zoom-value"),
+      focusOverlay: byId("focus-overlay"),
+      onFocusMove: (point) => focus.move(point),
+      onFocusDisable: () => focus.setMode("pan"),
+      onPaint: (point) => {
+        focus.move(point);
+        paintQueue.enqueue(focus.value);
+      }
     });
     preview.clearResult();
+    focusUpdates = new FocusUpdates({
+      post: postJson,
+      onState: (state, message) => focus.setFeedback(state === "pending" ? "Updating focus…" :
+        state === "error" ? `Focus update failed: ${message}. Next batch uses the selected focus.` :
+          "Focus applies from the next attempt.")
+    });
+    paintQueue = new PaintQueue({
+      runStroke: async (paintFocus) => {
+        const outcome = await startRun({ paintFocus });
+        if (!outcome?.confirmed) throw new Error(outcome?.message || "Could not complete the stroke");
+        return outcome;
+      },
+      onState: (state, { pending, running, detail, capacity }) => {
+        const queue = pending ? ` · ${pending} queued` : "";
+        byId("paint-status").textContent = state === "full" ? `Queue full (${capacity}) · wait for a stroke` :
+          state === "error" || state === "stopped" ? `Paint stopped: ${detail}` : state === "rejected" ? `No shape added: ${detail}${queue}` :
+            state === "accepted" ? `Added one shape${queue}` : state === "running" || state === "queued" ?
+              `${running ? "Painting one shape" : "Paint ready"}${queue}` : "";
+      }
+    });
+    focus = new FocusControls({
+      toggle: byId("focus-toggle"), paint: byId("paint-toggle"), clear: byId("focus-clear"),
+      radius: byId("focus-radius"), radiusNumber: byId("focus-radius-number"),
+      strength: byId("focus-strength"), strengthNumber: byId("focus-strength-number"),
+      position: byId("focus-position"), status: byId("focus-status")
+    }, contract.focus, (value, mode) => {
+      if (mode === "paint") focusUpdates.end();
+      focusUpdates.update(value);
+      if (mode !== "paint" && !runIsPaint && activeRunId && !focusUpdates.context &&
+          (phase === "running" || phase === "pausing")) {
+        focusUpdates.begin({ sessionId, runId: activeRunId, runVersion, contentVersion }, undefined);
+      }
+      preview.setFocus(value, mode);
+      paintQueue.setEnabled(mode === "paint");
+      ui.preset.value = "custom";
+    });
     telemetry = new Telemetry({
       state: byId("telemetry-state"), acceptance: byId("telemetry-acceptance"),
       improvement: byId("telemetry-improvement"), duration: byId("telemetry-duration"),

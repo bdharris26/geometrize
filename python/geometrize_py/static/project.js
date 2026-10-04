@@ -1,5 +1,7 @@
 "use strict";
 
+import { validateFocus } from "./focus.js";
+
 function object(value, label) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     throw new Error(`Project ${label} must be an object`);
@@ -128,7 +130,7 @@ function options(raw, contract) {
     if (!known.has(type)) throw new Error(`Unsupported option shape type: ${String(type)}`);
     return type;
   }))];
-  const result = { shape_types: types };
+  const result = { shape_types: types, focus: validateFocus(input.focus, contract.focus, "Project options focus") };
   for (const key of ["steps", "alpha", "seed", "shape_count", "mutations", "max_size", "export_size", "max_threads", "stagnation_limit"]) {
     const bounds = contract.limits[key];
     const value = input[key] ?? (key === "export_size" ? input.max_size : contract.defaults[key]);
@@ -163,6 +165,9 @@ function batches(raw, contract) {
       if (Number.isSafeInteger(batch[key]) && batch[key] >= 0) result[key] = batch[key];
     }
     if (typeof batch.reason === "string") result.reason = batch.reason.slice(0, 80);
+    for (const key of ["focus", "initial_focus"]) {
+      if (key in batch) result[key] = validateFocus(batch[key], contract.focus, `Project batch ${position + 1} ${key}`);
+    }
     return result;
   });
 }

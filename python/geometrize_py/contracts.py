@@ -70,7 +70,10 @@ OPTION_DEFAULTS = {
     "max_size": 1024,
     "export_size": 1024,
     "stagnation_limit": 128,
+    "focus": None,
 }
+FOCUS_DEFAULTS = {"radius": 0.2, "strength": 0.75}
+FOCUS_LIMITS = {"x": (0.0, 1.0), "y": (0.0, 1.0), "radius": (0.01, 1.0), "strength": (0.0, 1.0)}
 
 MAX_SOURCE_DIMENSION = 16384
 MAX_SOURCE_PIXELS = 8192 * 8192
@@ -110,6 +113,10 @@ def app_contract() -> dict[str, Any]:
         ],
         "defaults": deepcopy(OPTION_DEFAULTS),
         "limits": {name: {"min": lower, "max": upper} for name, (lower, upper) in OPTION_LIMITS.items()},
+        "focus": {
+            "defaults": deepcopy(FOCUS_DEFAULTS),
+            "limits": {name: {"min": lower, "max": upper} for name, (lower, upper) in FOCUS_LIMITS.items()},
+        },
         "images": {
             "mime_types": list(RASTER_MIME_TYPES),
             "extensions": list(RASTER_EXTENSIONS),

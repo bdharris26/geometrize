@@ -6,6 +6,7 @@ import pytest
 from PIL import Image, ImageDraw
 
 from geometrize_py import cli
+from geometrize_py.native import Focus
 
 
 def test_no_args_starts_server_defaults(monkeypatch) -> None:
@@ -27,6 +28,27 @@ def test_serve_args_are_parsed() -> None:
     assert args.host == "0.0.0.0"
     assert args.port == 9000
     assert args.open is True
+
+
+def test_cli_focus_flags_have_normalized_defaults() -> None:
+    parser = cli.build_parser()
+    plain = parser.parse_args(["run", "source.png", "--output", "result.png"])
+    assert cli.options_from_args(plain).focus is None
+    args = parser.parse_args(["run", "source.png", "--output", "result.png", "--focus-x", "0.75", "--focus-y", "0.25"])
+    assert cli.options_from_args(args).focus == Focus(0.75, 0.25)
+    explicit = parser.parse_args(["run", "source.png", "--output", "result.png", "--focus-x", "0.75",
+                                 "--focus-y", "0.25", "--focus-radius", "0.1", "--focus-strength", "0"])
+    assert cli.options_from_args(explicit).focus == Focus(0.75, 0.25, 0.1, 0)
+
+
+@pytest.mark.parametrize("flags", [["--focus-x", "0.5"], ["--focus-radius", "0.2"],
+                                    ["--focus-x", "nan", "--focus-y", "0.5"],
+                                    ["--focus-x", "0.5", "--focus-y", "1.1"]])
+def test_cli_focus_errors_are_reported_before_reading_image(capsys, flags: list[str]) -> None:
+    with pytest.raises(SystemExit) as error:
+        cli.main(["run", "missing-source.png", "--output", "result.png", *flags])
+    assert error.value.code == 2
+    assert "focus" in capsys.readouterr().err
 
 
 def test_serve_resource_budgets_are_forwarded(monkeypatch) -> None:

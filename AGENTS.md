@@ -20,10 +20,10 @@ current so the next agent can find the important edges quickly.
 - Shared limits, shapes, and presets: `python/geometrize_py/contracts.py`;
   the UI loads these from `/api/config`.
 - Browser modules: `static/app.js` coordinates `preview.js`, `stream.js`,
-  `telemetry.js`, and `project.js` under `python/geometrize_py/`.
+  `telemetry.js`, `project.js`, and `focus.js` under `python/geometrize_py/`.
 - CLI entrypoints: `python/geometrize_py/cli.py`.
 - Native bridge contract: `python/geometrize_py/native.py` and
-  `python/geometrize_py/native_bindings.cpp`.
+  `python/geometrize_py/native_bindings.cpp`; placement is in `native_focus.h`.
 - Exports and resource budgets: `exporting.py`, `render.py`, `svg.py`, and
   `resources.py` under `python/geometrize_py/`.
 - Tests: `tests/python/` and `tests/browser/`.
@@ -56,5 +56,8 @@ current so the next agent can find the important edges quickly.
 - Streams require a terminal snapshot; cooperative Pause uses a server-issued
   run token. Keep exports independent of native fitting and preserve PNG pixels
   when optimizing rasterization.
+- Focus changes candidate setup only; full-image mutation, rasterization, and
+  energy stay upstream. Live focus uses a separate control lock and the active
+  run token; Paint queues ordinary one-shape batches with captured focus.
 - Keep new docs concise. The point of this port is a small native-feeling
   Python project, not a migration archive.

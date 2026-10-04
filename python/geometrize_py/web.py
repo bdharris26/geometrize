@@ -5,6 +5,7 @@ import json
 import logging
 import mimetypes
 import re
+import socket
 import threading
 import time
 import uuid
@@ -24,7 +25,7 @@ from .contracts import MAX_REQUEST_BYTES, OPTION_LIMITS, app_contract
 from .errors import APIError
 from .exporting import ExportArtifact, ExportCache, RenderScene, build_export, inspect_scene, validate_scene
 from .images import image_bytes_size, image_data_url_bytes, image_to_data_url, open_image_bytes
-from .native import ImageSession, NativeBackendUnavailable, RunOptions, native_available
+from .native import ImageSession, NativeBackendUnavailable, RunOptions, native_available, normalize_focus
 from .render import export_dimensions
 from .resources import (
     DEFAULT_ACTIVE_MEMORY_BYTES,
@@ -43,13 +44,17 @@ DEFAULT_SESSION_IDLE_SECONDS = 30 * 60
 DEFAULT_SESSION_MEMORY_BYTES = 512 * 1024 * 1024
 MAX_SESSION_ACTION_BYTES = 16 * 1024
 MAX_PAUSE_BODY_BYTES = 4 * 1024
+MAX_FOCUS_BODY_BYTES = 4 * 1024
+REJECTED_BODY_DRAIN_BYTES = 64 * 1024
+REJECTED_BODY_DRAIN_CHUNK_BYTES = 4 * 1024
+REJECTED_BODY_DRAIN_SECONDS = 0.25
 REQUEST_MEMORY_FLOOR = 64 * 1024
 JSON_EXPANSION_FACTOR = 32
 ESTIMATED_BYTES_PER_PIXEL = 16
 ESTIMATED_BYTES_PER_SHAPE = 512
 ESTIMATED_SESSION_OVERHEAD_BYTES = 64 * 1024
 LOGGER = logging.getLogger(__name__)
-SESSION_ACTION = re.compile(r"^/api/sessions/([a-zA-Z0-9_-]+)/(pause|snapshot)$")
+SESSION_ACTION = re.compile(r"^/api/sessions/([a-zA-Z0-9_-]+)/(pause|focus|snapshot)$")
 IMAGE_LITERAL = re.compile(rb'"image"\s*:\s*"(data:image/[^"\\]{0,128};base64,[A-Za-z0-9+/=]*)"')
 
 
@@ -228,6 +233,8 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
         self._request_image_bytes = 0
         self._request_body_memory = 0
         has_slot = False
+        length: int | None = None
+        body_read_started = False
         try:
             try:
                 length = self._content_length()
@@ -235,15 +242,18 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
                     raise APIError(
                         "request_too_large", "Session request body is too large", HTTPStatus.REQUEST_ENTITY_TOO_LARGE
                     )
-                # A pause is a tiny control message that must remain available
+                # Pause and focus are tiny control messages that remain available
                 # even when fitting has consumed the full CPU and memory budget.
-                if action is not None and action.group(2) == "pause":
-                    if length > MAX_PAUSE_BODY_BYTES:
+                if action is not None and action.group(2) in {"pause", "focus"}:
+                    control_limit = MAX_PAUSE_BODY_BYTES if action.group(2) == "pause" else MAX_FOCUS_BODY_BYTES
+                    if length > control_limit:
                         raise APIError(
-                            "request_too_large", "Pause request body is too large", HTTPStatus.REQUEST_ENTITY_TOO_LARGE
+                            "request_too_large", "Control request body is too large",
+                            HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
                         )
                 else:
                     self._request_lease = self._reserve_work(0, _request_memory(path, length, 0, parsed=False))
+                body_read_started = True
                 payload = self._read_json()
                 if self._request_lease is not None:
                     self._request_body_memory = _request_memory(path, length, self._request_image_bytes, parsed=True)
@@ -253,7 +263,11 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
                 self._send_error(APIError("request_timeout", "Request body timed out", HTTPStatus.REQUEST_TIMEOUT))
                 return
             except (APIError, ValueError) as exc:
-                self._send_error(exc if isinstance(exc, APIError) else APIError("invalid_request", str(exc)))
+                error = exc if isinstance(exc, APIError) else APIError("invalid_request", str(exc))
+                if body_read_started:
+                    self._send_error(error)
+                else:
+                    self._reject_before_body(error, length)
                 return
             except ConnectionError:
                 return
@@ -330,7 +344,7 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
                 raise _session_busy_error()
             if lease is None:
                 options, lease = self._reserve_fit(options, session.width, session.height)
-            session.prepare_run()
+            session.prepare_run(options)
             self._charge_request_scene({"shapes": session.shapes})
             self.geometrize_server.activate_session(session_id, session, run_id)
             activated = True
@@ -358,6 +372,7 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
                         "initial_score": session.initial_score,
                         "revision": session.revision,
                         "effective_threads": options.max_threads,
+                        "focus": options.focus.to_dict() if options.focus is not None else None,
                     }
                 )
                 with closing(session.run_reserved_batch(options)) as events:
@@ -392,6 +407,20 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
 
     def _session_action(self, session_id: str, action: str, payload: dict[str, Any]) -> None:
         session = self._session_by_id(session_id)
+        if action == "focus":
+            if set(payload) != {"run_id", "focus"}:
+                raise APIError("invalid_request", "Focus control requires only run_id and focus")
+            run_id = _required_text(payload, "run_id")
+            try:
+                focus = normalize_focus(payload["focus"])
+            except (ValueError, TypeError, OverflowError) as exc:
+                raise APIError("invalid_options", str(exc)) from exc
+            with self.geometrize_server.sessions_lock:
+                if self.geometrize_server.active_runs.get(session_id) != run_id:
+                    raise APIError("stale_run", "That run has already ended.", HTTPStatus.CONFLICT)
+                session.request_focus(focus)
+            self._send_json({"focus": focus.to_dict() if focus is not None else None, "applies": "next_attempt"})
+            return
         if action == "pause":
             with self.geometrize_server.sessions_lock:
                 active_run = self.geometrize_server.active_runs.get(session_id)
@@ -476,6 +505,7 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
         *,
         include_preview: bool = True,
     ) -> dict[str, Any]:
+        focus = session.focus
         payload: dict[str, Any] = {
             "event": "snapshot",
             "width": session.width,
@@ -489,6 +519,7 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
             "initial_score": session.initial_score,
             "stop_reason": session.stop_reason,
             "batch_summary": session.batch_summary,
+            "focus": focus.to_dict() if focus is not None else None,
         }
         if include_preview:
             payload["preview"] = image_to_data_url(session.result().image)
@@ -626,11 +657,48 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
         except (ConnectionError, TimeoutError):
             pass
 
-    def _send_json(self, payload: dict[str, Any], status: HTTPStatus = HTTPStatus.OK) -> None:
+    def _reject_before_body(self, error: APIError, unread_length: int | None) -> None:
+        """Reply before discarding bounded raw input for a graceful TCP close."""
+        self.close_connection = True
+        try:
+            self._send_json(error.payload(), error.status, close=True)
+            self.wfile.flush()
+            self.connection.shutdown(socket.SHUT_WR)
+            # Immediate close with unread/arriving bytes can reset TCP and erase
+            # the response on Windows. This is teardown, never JSON admission:
+            # no body is retained, decoded, or passed to an application action.
+            # Invalid/oversized Content-Length has no trusted body length, so
+            # the same byte cap and deadline bound its fallback cleanup.
+            remaining = REJECTED_BODY_DRAIN_BYTES
+            if unread_length is not None:
+                remaining = min(unread_length, remaining)
+            deadline = time.monotonic() + min(
+                REJECTED_BODY_DRAIN_SECONDS, self.geometrize_server.request_timeout_seconds
+            )
+            read = getattr(self.rfile, "read1", self.rfile.read)
+            while remaining > 0:
+                timeout = deadline - time.monotonic()
+                if timeout <= 0:
+                    break
+                self.connection.settimeout(timeout)
+                chunk = read(min(remaining, REJECTED_BODY_DRAIN_CHUNK_BYTES))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+        except OSError:
+            # Peer disconnect or the drain deadline ends cleanup; the handler
+            # still closes the connection and releases any request lease.
+            pass
+
+    def _send_json(
+        self, payload: dict[str, Any], status: HTTPStatus = HTTPStatus.OK, *, close: bool = False
+    ) -> None:
         body = json.dumps(payload, allow_nan=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        if close:
+            self.send_header("Connection", "close")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         self.wfile.write(body)

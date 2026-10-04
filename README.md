@@ -33,6 +33,21 @@ start a render. Advanced controls expose all nine primitives, seed, candidates,
 mutations, and a per-batch CPU limit. Changes apply to the next batch; New render
 clears the result so Run starts a fresh fit with the current settings.
 
+Enable Focus area to guide candidate starts toward a circular region. Click or
+drag the live result to move the center, and adjust radius (a fraction of the
+shorter image edge) and strength (the share of candidates started in the region). Focus can
+move or clear during a run; changes apply after the current optimizer attempt.
+Scoring still measures the full image, and shapes can extend or move outside
+the ring. Disabling focus or setting strength to zero preserves normal fitting.
+Use Shift+drag to pan the result while focusing or painting.
+
+Paint mode tries to add one accepted shape per click on the live result. It
+also works before the first render. Up to 12 pending clicks are processed in
+order with their captured focus positions. Leaving Paint clears queued clicks
+and finishes the active stroke; Pause finishes the current optimizer attempt.
+A click can add no shape when the image is already matched or no candidate
+improves the fit. Projects save focus settings and batch history.
+
 The source and live result share zoom and pan controls. Pause finishes the
 current fitting step and confirms the final counts before Continue becomes
 available. The error chart shows the initial baseline and recent improvements;
@@ -60,6 +75,10 @@ Continuing after reopening a project starts a new native fit.
   --max-size 1024 --export-size 2048
 ```
 
+Add `--focus-x 0.75 --focus-y 0.25` to bias placement around that normalized
+center. `--focus-radius` defaults to `0.2` of the shorter edge, and
+`--focus-strength` defaults to `0.75`; valid ranges are `0.01–1` and `0–1`.
+
 Use `.\.venv\Scripts\python.exe -m geometrize_py doctor` to confirm that the
 native backend can be imported, or add `--json` for structured diagnostics.
 `serve --workers 8 --active-memory-mb 512` sets the shared CPU and estimated
@@ -73,7 +92,7 @@ is a conservative admission estimate, not an operating-system memory limit.
 - `python/geometrize_py/` contains the Python package, web server, static UI,
   image helpers, SVG exporter, CLI, and native backend wrapper.
 - `python/geometrize_py/native_bindings.cpp` is the pybind11 bridge into the
-  C++ core.
+  C++ core; `native_focus.h` composes the core's placement callbacks.
 - `lib/geometrize/` is the upstream core engine submodule.
 - `tests/python/` covers the native wrapper, CLI, rendering, exports, and HTTP
   API.

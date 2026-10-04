@@ -440,7 +440,7 @@ select:focus-visible,
 
 .preview-wrap {
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr);
   gap: 10px;
   min-height: 0;
   padding: 18px 20px 12px;
@@ -469,6 +469,86 @@ select:focus-visible,
 
 .preview-toolbar span {
   margin-left: 8px;
+}
+
+.focus-controls {
+  display: grid;
+  gap: 9px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(25, 26, 28, 0.94);
+}
+
+.focus-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  align-items: center;
+}
+
+.focus-actions button {
+  min-height: 32px;
+  padding: 3px 10px;
+  font-size: 0.78rem;
+}
+
+.focus-actions button[aria-pressed="true"] {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.focus-actions output {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.focus-fields {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+}
+
+.focus-field {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 66px;
+  gap: 5px 8px;
+  align-items: center;
+}
+
+.focus-field label {
+  grid-column: 1 / -1;
+  color: var(--muted);
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
+.focus-field label span {
+  color: var(--soft);
+  font-size: 0.68rem;
+  font-weight: 500;
+}
+
+.focus-field input[type="number"] {
+  min-height: 30px;
+  padding: 3px 6px;
+  font-size: 0.78rem;
+}
+
+.focus-feedback {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 6px 12px;
+  color: var(--accent-strong);
+  font-size: 0.72rem;
+  min-height: 1em;
+}
+
+#paint-status {
+  color: var(--gold);
 }
 
 .preview-grid {
@@ -527,6 +607,16 @@ figcaption span {
   cursor: grabbing;
 }
 
+.preview-stage[data-focus-mode="focus"],
+.preview-stage[data-focus-mode="paint"] {
+  cursor: crosshair;
+}
+
+.preview-stage:focus-visible {
+  outline: 2px solid var(--gold);
+  outline-offset: 2px;
+}
+
 .preview-media {
   position: absolute;
   left: 50%;
@@ -542,6 +632,28 @@ figcaption span {
 #source-preview:not([src]),
 #result-preview:not([src]) {
   display: none;
+}
+
+.focus-overlay {
+  overflow: hidden;
+}
+
+.focus-ring {
+  fill: rgba(224, 184, 79, 0.08);
+  stroke: var(--gold);
+  stroke-width: 1.5px;
+}
+
+.focus-ring-shadow {
+  fill: none;
+  stroke: #101112;
+  stroke-width: 3.5px;
+}
+
+.focus-center {
+  fill: var(--gold);
+  stroke: #101112;
+  stroke-width: 1px;
 }
 
 .telemetry-console {
@@ -800,6 +912,7 @@ figcaption span:last-child {
 
 @media (max-width: 420px) {
   .shape-grid,
+  .focus-fields,
   .field.two,
   .range-with-input,
   .run-actions,
