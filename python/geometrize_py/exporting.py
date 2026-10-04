@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 from collections import OrderedDict
 from dataclasses import dataclass
 from threading import Lock
@@ -35,6 +36,7 @@ class RenderScene:
     shapes: list[dict[str, Any]]
     attempts: int = 0
     revision: int = 0
+    target_digest: str | None = None
 
     def fingerprint(self) -> str:
         content = json.dumps(
@@ -134,6 +136,9 @@ def validate_scene(raw: Any) -> RenderScene:
     inspect_scene(raw)
     geometry_limit = PROJECT_MAX_GEOMETRY_FACTOR * max(width, height)
     normalized = [_shape(shape, index + 1, geometry_limit) for index, shape in enumerate(raw["shapes"])]
+    digest = raw.get("target_digest")
+    if "target_digest" in raw and (not isinstance(digest, str) or re.fullmatch(r"[0-9a-fA-F]{64}", digest) is None):
+        raise APIError("invalid_result", "target_digest must be a SHA256 hexadecimal string")
     return RenderScene(
         width,
         height,
@@ -141,6 +146,7 @@ def validate_scene(raw: Any) -> RenderScene:
         normalized,
         _integer(raw.get("attempts", 0), 0, 2**53 - 1, "attempts"),
         _integer(raw.get("revision", len(normalized)), 0, 2**53 - 1, "revision"),
+        digest.lower() if digest is not None else None,
     )
 
 

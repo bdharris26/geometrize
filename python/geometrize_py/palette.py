@@ -9,6 +9,7 @@ from typing import Any
 
 from PIL import Image
 
+from .colors import RGB, normalize_rgb
 from .contracts import (
     MAX_SOURCE_DIMENSION,
     MAX_SOURCE_PIXELS,
@@ -16,8 +17,6 @@ from .contracts import (
     PALETTE_MAX_COLORS,
     PALETTE_SAMPLE_SIZE,
 )
-
-RGB = tuple[int, int, int]
 
 
 @dataclass(frozen=True)
@@ -32,12 +31,7 @@ class Palette:
             raise ValueError(f"palette.colors must contain 1 to {PALETTE_MAX_COLORS} RGB triples")
         normalized = []
         for color in self.colors:
-            if not isinstance(color, (list, tuple)) or len(color) != 3:
-                raise ValueError("Each palette color must be an RGB triple")
-            if any(isinstance(channel, bool) or not isinstance(channel, int) or not 0 <= channel <= 255
-                   for channel in color):
-                raise ValueError("Palette channels must be integers from 0 to 255")
-            rgb = tuple(color)
+            rgb = normalize_rgb(color, "Palette color")
             if rgb not in normalized:
                 normalized.append(rgb)
         try:

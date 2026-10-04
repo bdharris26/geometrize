@@ -83,7 +83,7 @@ def test_sample_continue_and_project_round_trip(server_url: str, tmp_path: Path)
 
         project = json.loads(project_path.read_text(encoding="utf-8"))
         assert project["format"] == "geometrize-project"
-        assert project["version"] == 2
+        assert project["version"] == 3
         assert project["options"]["max_size"] == 128
         assert project["options"]["export_size"] == 256
         assert project["options"]["alpha"] == 1
@@ -272,7 +272,7 @@ def test_controls_zoom_and_incomplete_stream(server_url: str) -> None:
             "name": "unsupported.tiff", "mimeType": "image/tiff", "buffer": b"TIFF",
         })
         expect(page.locator("#status")).to_have_text(
-            "Could not load image: Choose a PNG, JPEG, WebP, BMP, or GIF image"
+            "Could not load image: Choose a PNG, APNG, JPEG, WebP, BMP, or GIF image"
         )
         page.locator("#preset").select_option("quick")
         expect(page.locator("#steps-number")).to_have_value("64")

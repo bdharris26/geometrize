@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import io
 
 import pytest
@@ -10,6 +11,7 @@ from geometrize_py.images import (
     MAX_SOURCE_PIXELS,
     _validate_source_size,
     average_color,
+    image_data_url_bytes,
     image_from_data_url,
     image_to_data_url,
     open_image_bytes,
@@ -28,6 +30,28 @@ def test_image_data_url_round_trips_png() -> None:
 def test_image_data_url_rejects_non_image_payload() -> None:
     with pytest.raises(ValueError, match="base64 image data URL"):
         image_from_data_url("data:text/plain;base64,aGVsbG8=")
+
+
+@pytest.mark.parametrize("separator", ["\r", "\n", "\r\n"])
+@pytest.mark.parametrize("width", [1, 17, 76])
+def test_image_data_url_line_wrapping_preserves_every_encoded_byte(separator, width) -> None:
+    original = bytes(range(256))
+    encoded = base64.b64encode(original).decode("ascii")
+    wrapped = separator + separator.join(encoded[i:i + width] for i in range(0, len(encoded), width)) + separator
+    assert image_data_url_bytes("data:image/png;base64," + wrapped) == original
+    assert image_data_url_bytes("data:application/octet-stream;base64," + wrapped) == original
+
+
+@pytest.mark.parametrize("invalid", [" ", "\t", "\v", "\f", "!", "-", "_", "\u00a0"])
+def test_wrapped_base64_still_rejects_other_whitespace_and_invalid_characters(invalid) -> None:
+    with pytest.raises(ValueError):
+        image_data_url_bytes("data:image/png;base64,\r\nYW" + invalid + "Jj\n")
+
+
+@pytest.mark.parametrize("payload", ["\r\nA\n", "YWJ\r\n", "Y=\r\nWJj"])
+def test_wrapped_base64_still_rejects_invalid_lengths_and_padding(payload) -> None:
+    with pytest.raises(ValueError, match="valid base64"):
+        image_data_url_bytes("data:image/png;base64," + payload)
 
 
 def test_source_size_rejects_oversized_dimensions_and_pixel_counts() -> None:

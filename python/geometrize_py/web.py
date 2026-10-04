@@ -28,11 +28,13 @@ from .contracts import (
     PROJECT_MAX_SHAPES,
     PROJECT_MAX_TOTAL_POINTS,
     RESTORE_MAX_WORK,
+    SOURCE_PREVIEW_SIZE,
     app_contract,
 )
 from .errors import APIError
 from .exporting import ExportArtifact, ExportCache, RenderScene, build_export, inspect_scene, validate_scene
-from .images import image_bytes_size, image_data_url_bytes, image_to_data_url, open_image_bytes
+from .image_probe import SourceProbe, probe_source
+from .images import fit_image, image_data_url_bytes, image_to_data_url, open_image_bytes
 from .native import (
     ImageSession,
     NativeBackendUnavailable,
@@ -52,7 +54,9 @@ from .resources import (
     export_memory_bytes,
     fitting_memory_bytes,
     scene_memory_bytes,
+    source_memory_bytes,
 )
+from .source import SourceOptions, normalize_source
 
 DEFAULT_MAX_SESSIONS = 8
 DEFAULT_MAX_ACTIVE_RENDERS = 2
@@ -71,7 +75,11 @@ ESTIMATED_BYTES_PER_PIXEL = 16
 ESTIMATED_SESSION_OVERHEAD_BYTES = 64 * 1024
 LOGGER = logging.getLogger(__name__)
 SESSION_ACTION = re.compile(r"^/api/sessions/([a-zA-Z0-9_-]+)/(pause|focus|snapshot)$")
-IMAGE_LITERAL = re.compile(rb'"image"\s*:\s*"(data:image/[^"\\]{0,128};base64,[A-Za-z0-9+/=]*)"')
+# Estimate scalar-string memory, including JSON escapes for wrapped base64.
+# JSON and image decoding still validate the value; raw quotes end the span.
+IMAGE_LITERAL = re.compile(
+    rb'"image"\s*:\s*"((?i:data:(?:image/[^"\\]{0,128}|application/octet-stream);base64,)[A-Za-z0-9+/=\\]*)"'
+)
 
 
 @dataclass
@@ -284,7 +292,7 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         path = urlsplit(self.path).path
         action = SESSION_ACTION.fullmatch(path)
-        routes = {"/api/run", "/api/run/stream", "/api/export", "/api/restore", "/api/palette"}
+        routes = {"/api/run", "/api/run/stream", "/api/export", "/api/restore", "/api/palette", "/api/source/prepare"}
         if path not in routes and action is None:
             self.send_error(HTTPStatus.NOT_FOUND)
             return
@@ -311,11 +319,11 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
                             HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
                         )
                 else:
-                    self._request_lease = self._reserve_work(0, _request_memory(path, length, 0, parsed=False))
+                    self._request_lease = self._reserve_work(0, _request_memory(path, length, 0, inspected=False))
                 body_read_started = True
                 payload = self._read_json()
                 if self._request_lease is not None:
-                    self._request_body_memory = _request_memory(path, length, self._request_image_bytes, parsed=True)
+                    self._request_body_memory = _request_memory(path, length, self._request_image_bytes, inspected=True)
                     self._resize_request_memory(self._request_body_memory)
             except TimeoutError:
                 self.close_connection = True
@@ -342,6 +350,8 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
                 self._restore(payload)
             elif path == "/api/palette":
                 self._extract_palette(payload)
+            elif path == "/api/source/prepare":
+                self._prepare_source(payload)
             elif path == "/api/run/stream":
                 self._run_stream(payload)
             else:
@@ -398,6 +408,7 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
         activated = False
         if continued:
             session = self._session_by_id(session_id)
+            session.validate_source(options.source)
         else:
             session, options, lease = self._new_session(payload, options)
             session_id = uuid.uuid4().hex
@@ -438,6 +449,8 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
                         "effective_threads": options.max_threads,
                         "focus": options.focus.to_dict() if options.focus is not None else None,
                         "palette": options.palette.to_dict() if options.palette is not None else None,
+                        "source": session.source.to_dict(),
+                        "target_digest": session.target_digest,
                     }
                 )
                 with closing(session.run_reserved_batch(options)) as events:
@@ -518,26 +531,64 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
     def _new_session(
         self, payload: dict[str, Any], options: RunOptions
     ) -> tuple[ImageSession, RunOptions, ResourceLease]:
+        raw, probe, lease = self._inspect_source(payload, options.source)
         try:
-            raw = image_data_url_bytes(_required_text(payload, "image"))
-            width, height = image_bytes_size(raw)
-        except (ValueError, OSError) as exc:
+            options, lease = self._reserve_fit(
+                options, min(probe.width, options.max_size), min(probe.height, options.max_size),
+                extra_memory=source_memory_bytes(probe, len(raw)), lease=lease,
+            )
+            with closing(open_image_bytes(raw, options.source, _probe=probe)) as image:
+                session = ImageSession.from_image(image, options)
+        except (ValueError, OSError, SyntaxError) as exc:
+            self.geometrize_server.work_budget.release(lease)
+            if isinstance(exc, APIError):
+                raise
             raise APIError("invalid_image", str(exc)) from exc
-        options, lease = self._reserve_fit(
-            options,
-            min(width, options.max_size),
-            min(height, options.max_size),
-            extra_memory=width * height * 12 + len(raw) * 2,
-        )
+        except BaseException:
+            self.geometrize_server.work_budget.release(lease)
+            raise
+        return session, options, lease
+
+    def _inspect_source(
+        self, payload: dict[str, Any], source: SourceOptions,
+    ) -> tuple[bytes, SourceProbe, ResourceLease]:
+        # Reserve a worker before base64 decoding or walking potentially large
+        # containers. Atomically grow this same lease before Image.open/seek.
+        encoded = _required_text(payload, "image")
+        lease = self._reserve_work(1, 64 * 1024 + len(encoded) * 2)
         try:
-            session = ImageSession.from_image(open_image_bytes(raw), options)
+            raw = image_data_url_bytes(encoded)
+            probe = probe_source(raw, source)
         except (ValueError, OSError) as exc:
             self.geometrize_server.work_budget.release(lease)
             raise APIError("invalid_image", str(exc)) from exc
         except BaseException:
             self.geometrize_server.work_budget.release(lease)
             raise
-        return session, options, lease
+        return raw, probe, lease
+
+    def _prepare_source(self, payload: dict[str, Any]) -> None:
+        if set(payload) - {"image", "source"}:
+            raise APIError("invalid_request", "Source preparation only accepts image and source")
+        source = _source_options(payload)
+        raw, probe, lease = self._inspect_source(payload, source)
+        try:
+            preview_pixels = min(probe.width, SOURCE_PREVIEW_SIZE) * min(probe.height, SOURCE_PREVIEW_SIZE)
+            lease = self._resize_work(lease, source_memory_bytes(probe, len(raw), preview_pixels=preview_pixels))
+            try:
+                with closing(open_image_bytes(raw, source, _probe=probe)) as image:
+                    with closing(fit_image(image, SOURCE_PREVIEW_SIZE)) as preview:
+                        result = {
+                            "source": source.to_dict(), "width": image.width, "height": image.height,
+                            **image.info["geometrize_source"],
+                            "preview_data_url": image_to_data_url(preview),
+                            "preview_width": preview.width, "preview_height": preview.height,
+                        }
+            except (ValueError, OSError, SyntaxError) as exc:
+                raise APIError("invalid_image", str(exc)) from exc
+            self._send_json(result)
+        finally:
+            self.geometrize_server.work_budget.release(lease)
 
     def _restore(self, payload: dict[str, Any]) -> None:
         options = _options(payload)
@@ -560,26 +611,21 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
             )
         except (ValueError, TypeError, OverflowError) as exc:
             raise APIError("invalid_result", str(exc)) from exc
+        raw, probe, lease = self._inspect_source(payload, options.source)
         try:
-            raw = image_data_url_bytes(_required_text(payload, "image"))
-            source_width, source_height = image_bytes_size(raw)
-        except (ValueError, OSError) as exc:
-            raise APIError("invalid_image", str(exc)) from exc
-        memory = (
-            fitting_memory_bytes(scene.width, scene.height, 1)
-            + source_width * source_height * 12 + len(raw) * 2 + scratch_memory
-        )
-        lease = self._reserve_work(1, memory)
-        try:
+            memory = (fitting_memory_bytes(scene.width, scene.height, 1)
+                      + source_memory_bytes(probe, len(raw)) + scratch_memory)
+            lease = self._resize_work(lease, memory)
             try:
-                image = open_image_bytes(raw)
-            except (ValueError, OSError) as exc:
+                image = open_image_bytes(raw, options.source, _probe=probe)
+            except (ValueError, OSError, SyntaxError) as exc:
                 raise APIError("invalid_image", str(exc)) from exc
             try:
-                session = ImageSession._from_validated_scene(
-                    image, options, scene, count, native_checked=True,
-                    replay_work_limit=self.geometrize_server.restore_work_limit,
-                )
+                with closing(image):
+                    session = ImageSession._from_validated_scene(
+                        image, options, scene, count, native_checked=True,
+                        replay_work_limit=self.geometrize_server.restore_work_limit,
+                    )
             except (ValueError, TypeError, OverflowError) as exc:
                 if isinstance(exc, APIError):
                     raise
@@ -599,22 +645,21 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
             self.geometrize_server.work_budget.release(lease)
 
     def _extract_palette(self, payload: dict[str, Any]) -> None:
-        if set(payload) - {"image", "max_colors"}:
-            raise APIError("invalid_request", "Palette extraction only accepts image and max_colors")
+        if set(payload) - {"image", "max_colors", "source"}:
+            raise APIError("invalid_request", "Palette extraction only accepts image, max_colors and source")
         try:
             max_colors = normalize_max_colors(payload.get("max_colors", PALETTE_DEFAULTS["max_colors"]))
         except ValueError as exc:
             raise APIError("invalid_options", str(exc)) from exc
+        source = _source_options(payload)
+        raw, probe, lease = self._inspect_source(payload, source)
         try:
-            raw = image_data_url_bytes(_required_text(payload, "image"))
-            width, height = image_bytes_size(raw)
-        except (ValueError, OSError) as exc:
-            raise APIError("invalid_image", str(exc)) from exc
-        lease = self._reserve_work(1, palette_memory_bytes(width, height) + len(raw) * 2)
-        try:
+            lease = self._resize_work(lease, source_memory_bytes(probe, len(raw))
+                                      + palette_memory_bytes(probe.width, probe.height))
             try:
-                result = extract_palette(open_image_bytes(raw), max_colors)
-            except (ValueError, OSError) as exc:
+                with closing(open_image_bytes(raw, source, _probe=probe)) as image:
+                    result = extract_palette(image, max_colors)
+            except (ValueError, OSError, SyntaxError) as exc:
                 raise APIError("invalid_image", str(exc)) from exc
             self._send_json(result)
         finally:
@@ -627,13 +672,27 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
         height: int,
         *,
         extra_memory: int = 0,
+        lease: ResourceLease | None = None,
     ) -> tuple[RunOptions, ResourceLease]:
         server = self.geometrize_server
         workers = min(options.max_threads or server.default_workers, server.work_budget.workers)
         memory = fitting_memory_bytes(width, height, workers) + extra_memory
         if options.palette is not None and options.palette.strength > 0:
             memory += palette_fitting_memory_bytes(width, height, workers)
-        return replace(options, max_threads=workers), self._reserve_work(workers, memory)
+        reserved = (self._reserve_work(workers, memory) if lease is None
+                    else self._resize_work(lease, memory, workers=workers))
+        return replace(options, max_threads=workers), reserved
+
+    def _resize_work(self, lease: ResourceLease, memory: int, *, workers: int | None = None) -> ResourceLease:
+        budget = self.geometrize_server.work_budget
+        if memory > budget.memory_bytes:
+            raise APIError(
+                "memory_limit", "This operation exceeds the active memory budget; reduce source or frame size",
+            )
+        updated = budget.try_resize(lease, memory, workers=workers)
+        if updated is None:
+            raise _busy_error()
+        return updated
 
     def _reserve_work(self, workers: int, memory: int) -> ResourceLease:
         budget = self.geometrize_server.work_budget
@@ -670,9 +729,13 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
             "batch_summary": session.batch_summary,
             "focus": focus.to_dict() if focus is not None else None,
             "palette": session.palette.to_dict() if session.palette is not None else None,
+            "source": session.source.to_dict(),
         }
         if include_preview:
-            payload["preview"] = image_to_data_url(session.result().image)
+            with closing(session.result().image) as image:
+                payload["preview"] = image_to_data_url(image)
+        if session.target_digest is not None:
+            payload["target_digest"] = session.target_digest
         if session_id is not None:
             payload["session_id"] = session_id
         return payload
@@ -720,17 +783,8 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
         finally:
             server.work_budget.release(lease)
 
-    def _resize_work(self, lease: ResourceLease, memory: int) -> ResourceLease:
-        budget = self.geometrize_server.work_budget
-        if memory > budget.memory_bytes:
-            raise APIError("memory_limit", "This export exceeds the active memory budget; reduce export size")
-        updated = budget.try_resize(lease, memory)
-        if updated is None:
-            raise _busy_error()
-        return updated
-
     def _export_payload(self, scene: RenderScene, artifact: ExportArtifact) -> dict[str, Any]:
-        return {
+        payload = {
             "event": "export",
             "width": scene.width,
             "height": scene.height,
@@ -744,6 +798,9 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
             "preview": "data:image/png;base64," + base64.b64encode(artifact.png).decode("ascii"),
             "svg": artifact.svg,
         }
+        if scene.target_digest is not None:
+            payload["target_digest"] = scene.target_digest
+        return payload
 
     def _session_by_id(self, session_id: str) -> ImageSession:
         session = self.geometrize_server.get_session(session_id)
@@ -779,11 +836,20 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
     def _admit_json_body(self, body: bytes) -> None:
         if self._request_lease is None:
             return
-        image_routes = {"/api/run", "/api/run/stream", "/api/restore", "/api/palette"}
-        image_span = IMAGE_LITERAL.search(body) if urlsplit(self.path).path in image_routes else None
-        self._request_image_bytes = image_span.end(1) - image_span.start(1) if image_span is not None else 0
+        image_routes = {"/api/run", "/api/run/stream", "/api/restore", "/api/palette", "/api/source/prepare"}
+        path = urlsplit(self.path).path
+        image_span = IMAGE_LITERAL.search(body) if path in image_routes and body.isascii() else None
+        self._request_image_bytes = 0
+        if image_span is not None:
+            start, end = image_span.span(1)
+            # Unicode can widen the entire decoded JSON text or image scalar.
+            # An escaped quote can also truncate this match before such a suffix.
+            if not body.endswith(b"\\", start, end) and body.find(b"\\u", start, end) == -1:
+                self._request_image_bytes = end - start
+        # The scan is complete: unmatched bytes need the full JSON allowance
+        # before json.loads allocates strings or containers.
         self._resize_request_memory(
-            _request_memory(urlsplit(self.path).path, len(body), self._request_image_bytes, parsed=False)
+            _request_memory(path, len(body), self._request_image_bytes, inspected=True)
         )
 
     def _charge_request_scene(self, raw: RenderScene | dict[str, Any]) -> None:
@@ -897,6 +963,13 @@ def _options(payload: dict[str, Any]) -> RunOptions:
         raise APIError("invalid_options", str(exc)) from exc
 
 
+def _source_options(payload: dict[str, Any]) -> SourceOptions:
+    try:
+        return normalize_source(payload.get("source"))
+    except (ValueError, TypeError, OverflowError) as exc:
+        raise APIError("invalid_options", str(exc)) from exc
+
+
 def _scene_from_snapshot(snapshot: dict[str, Any]) -> RenderScene:
     return RenderScene(
         snapshot["width"],
@@ -905,11 +978,12 @@ def _scene_from_snapshot(snapshot: dict[str, Any]) -> RenderScene:
         snapshot["shapes"],
         snapshot["attempts"],
         snapshot["revision"],
+        snapshot.get("target_digest"),
     )
 
 
-def _request_memory(path: str, body_bytes: int, image_bytes: int, *, parsed: bool) -> int:
-    if path in {"/api/run", "/api/run/stream", "/api/restore", "/api/palette"}:
+def _request_memory(path: str, body_bytes: int, image_bytes: int, *, inspected: bool) -> int:
+    if path in {"/api/run", "/api/run/stream", "/api/restore", "/api/palette", "/api/source/prepare"}:
         # Encoded image data is a large string with predictable expansion;
         # other JSON can contain deeply nested Python containers and needs a
         # higher allowance before json.loads constructs them.
@@ -917,7 +991,7 @@ def _request_memory(path: str, body_bytes: int, image_bytes: int, *, parsed: boo
             return max(
                 REQUEST_MEMORY_FLOOR, 4 * image_bytes + JSON_EXPANSION_FACTOR * (body_bytes - image_bytes)
             )
-        if not parsed:
+        if not inspected:
             return max(REQUEST_MEMORY_FLOOR, 4 * body_bytes)
     return max(REQUEST_MEMORY_FLOOR, JSON_EXPANSION_FACTOR * body_bytes)
 

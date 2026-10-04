@@ -1,14 +1,18 @@
 "use strict";
 
 import { copyPalette, paletteLabel } from "./palette.js";
+import { copySource, copyRgb, sourceKey, sourceLabel, validateSource } from "./source.js";
 
 const ID = /^[a-zA-Z0-9_-]{1,64}$/;
 const copyOptions = options => ({ ...options, shape_types: [...options.shape_types],
-  focus: options.focus ? { ...options.focus } : null, palette: copyPalette(options.palette) });
+  focus: options.focus ? { ...options.focus } : null, palette: copyPalette(options.palette),
+  source: copySource(options.source), background: copyRgb(options.background) });
 const pointsIn = shapes => shapes.reduce((total, shape) => total +
   (shape?.type === "polyline" ? shape.data.points.length : 0), 0);
 const copyTelemetry = telemetry => ({ ...telemetry, batches: telemetry.batches.map(batch => ({ ...batch,
-  ...("palette" in batch ? { palette: copyPalette(batch.palette) } : {}) })) });
+  ...("palette" in batch ? { palette: copyPalette(batch.palette) } : {}),
+  ...("source" in batch ? { source: copySource(batch.source) } : {}),
+  ...("background" in batch ? { background: copyRgb(batch.background) } : {}) })) });
 const background = scene => Array.isArray(scene.background) ? scene.background : scene.background ?
   [scene.background.r, scene.background.g, scene.background.b, scene.background.a] : null;
 
@@ -66,6 +70,13 @@ export function validateHistory(state, limits) {
         (branch.result.render_height || branch.result.height) !== (parent.result.render_height || parent.result.height) ||
         JSON.stringify(background(branch.result)) !== JSON.stringify(background(parent.result)))) {
       throw new Error("Project fork scene dimensions and background must match its parent");
+    }
+    if (parent && sourceKey(validateSource(branch.options?.source)) !== sourceKey(validateSource(parent.options?.source))) {
+      throw new Error("Project fork source policy must match its parent");
+    }
+    if (parent?.result.target_digest && branch.result.target_digest &&
+        String(parent.result.target_digest).toLowerCase() !== String(branch.result.target_digest).toLowerCase()) {
+      throw new Error("Project fork target digest must match its parent");
     }
     const seen = new Set([branch.id]);
     for (let ancestor = parent; ancestor; ancestor = ids.get(ancestor.parent_id)) {
@@ -164,7 +175,7 @@ export class HistoryControls {
               "Scrub to inspect; Restore and Fork keep the original experiment.";
     const settings = active?.options;
     el.settings.textContent = settings ?
-      `${settings.shape_types.join(", ")} · alpha ${settings.alpha} · seed ${settings.seed} · ${settings.max_size}px working · ${paletteLabel(settings.palette)}` : "";
+      `${settings.shape_types.join(", ")} · alpha ${settings.alpha} · seed ${settings.seed} · ${settings.max_size}px working · ${paletteLabel(settings.palette)} · ${sourceLabel(settings.source)}` : "";
   }
 }
 

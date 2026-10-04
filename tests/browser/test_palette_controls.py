@@ -264,15 +264,19 @@ def test_palette_extraction_ignores_changed_editor_source_branch_or_restore(
         _run(page)
         if replacement == "branch":
             page.locator("#restart-button").click()
+            expect(page.locator("#status")).to_have_text("New render ready")
             page.locator("#experiment-select").select_option("experiment-1")
+            expect(page.locator("#status")).to_contain_text("Original selected")
         page.locator("#palette-extract").click()
         assert page.evaluate("paletteRequests[0].max_colors") == 8
         if replacement == "edit":
             _colors(page,"#F00")
         elif replacement == "source":
             page.locator("#sample-button").click()
+            expect(page.locator("#status")).to_have_text("Ready")
         elif replacement == "branch":
             page.locator("#experiment-select").select_option("experiment-2")
+            expect(page.locator("#experiment-select")).to_have_value("experiment-2")
         elif replacement == "failed_import":
             page.locator("#project-input").set_input_files({"name":"bad.json","mimeType":"application/json","buffer":b"{"})
             expect(page.locator("#status")).to_contain_text("Could not open project")

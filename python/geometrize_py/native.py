@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import platform
 import sys
 from collections.abc import Iterable, Iterator
+from contextlib import ExitStack
 from copy import deepcopy
 from dataclasses import dataclass
 from math import isfinite
@@ -13,6 +15,7 @@ from typing import Any
 
 from PIL import Image
 
+from .colors import RGB, normalize_optional_rgb
 from .contracts import (
     DEFAULT_SHAPES,
     FOCUS_DEFAULTS,
@@ -28,8 +31,9 @@ from .contracts import (
 )
 from .errors import APIError
 from .exporting import RenderScene, inspect_scene, validate_scene
-from .images import average_color, fit_image
+from .images import apply_matte, average_color, fit_image
 from .palette import Palette, normalize_palette
+from .source import SourceOptions, normalize_source
 
 __all__ = [
     "DEFAULT_SHAPES",
@@ -38,6 +42,7 @@ __all__ = [
     "SHAPE_TYPES",
     "Focus",
     "Palette",
+    "SourceOptions",
     "ImageSession",
     "NativeBackendUnavailable",
     "RunOptions",
@@ -120,6 +125,8 @@ class RunOptions:
     stagnation_limit: int = OPTION_DEFAULTS["stagnation_limit"]
     focus: Focus | None = None
     palette: Palette | None = None
+    source: SourceOptions = SourceOptions()
+    background: RGB | None = None
 
     def __post_init__(self) -> None:
         shape_types = self.shape_types
@@ -128,6 +135,8 @@ class RunOptions:
         object.__setattr__(self, "shape_types", normalize_shape_types(shape_types))
         object.__setattr__(self, "focus", normalize_focus(self.focus))
         object.__setattr__(self, "palette", normalize_palette(self.palette))
+        object.__setattr__(self, "source", normalize_source(self.source))
+        object.__setattr__(self, "background", normalize_optional_rgb(self.background, "background"))
         for name, (lower, upper) in OPTION_LIMITS.items():
             _validate_int_option(name, getattr(self, name), lower, upper)
 
@@ -148,6 +157,8 @@ class RunOptions:
             stagnation_limit=_clamp_option("stagnation_limit", data.get("stagnation_limit", cls.stagnation_limit)),
             focus=data.get("focus"),
             palette=data.get("palette"),
+            source=data.get("source"),
+            background=data.get("background"),
         )
 
     def to_native_dict(self) -> dict[str, Any]:
@@ -161,6 +172,8 @@ class RunOptions:
             "max_threads": effective_max_threads(self.max_threads),
             "focus": self.focus.to_dict() if self.focus is not None else None,
             "palette": self.palette.to_dict() if self.palette is not None else None,
+            "source": self.source.to_dict(),
+            "background": list(self.background) if self.background is not None else None,
         }
 
     @property
@@ -176,6 +189,7 @@ class RunResult:
     shapes: list[dict[str, Any]]
     attempts: int
     background: tuple[int, int, int, int]
+    target_digest: str | None = None
 
 
 class ImageSession:
@@ -187,10 +201,14 @@ class ImageSession:
         session: Any,
         focus: Focus | None = None,
         palette: Palette | None = None,
+        source: SourceOptions | None = None,
+        target_digest: str | None = None,
     ) -> None:
         self.width = width
         self.height = height
         self.background = background
+        self._source = normalize_source(source)
+        self._target_digest = target_digest
         self._session = session
         self.shapes: list[dict[str, Any]] = []
         self.restored_shape_count = 0
@@ -208,14 +226,25 @@ class ImageSession:
 
     @classmethod
     def from_image(cls, image: Image.Image, options: RunOptions) -> ImageSession:
+        """Fit an already selected still; frame selection belongs to byte IO."""
         backend = require_palette_native(options.palette)
-        source = fit_image(image, options.max_size).convert("RGBA")
-        width, height = source.size
-        session = backend.RunnerSession(width, height, source.tobytes(), options.to_native_dict())
-        background = getattr(session, "background", None)
-        if background is None:
-            background = average_color(source)
-        return cls(width, height, tuple(background), session, options.focus, options.palette)
+        with ExitStack() as images:
+            matted = apply_matte(image, options.source.matte)
+            if matted is not image:
+                images.callback(matted.close)
+            fitted = fit_image(matted, options.max_size)
+            images.callback(fitted.close)
+            source = fitted.convert("RGBA")
+            images.callback(source.close)
+            width, height = source.size
+            require_background_native(options.background, width * height)
+            pixels = source.tobytes()
+            digest = hashlib.sha256(pixels).hexdigest()
+            session = backend.RunnerSession(width, height, pixels, options.to_native_dict())
+            background = getattr(session, "background", None)
+            if background is None:
+                background = average_color(source)
+        return cls(width, height, tuple(background), session, options.focus, options.palette, options.source, digest)
 
     @classmethod
     def from_scene(
@@ -231,6 +260,7 @@ class ImageSession:
         future fitting; they never rescale retained geometry or resume old RNG.
         """
         if isinstance(scene, RenderScene):
+            digest = scene.target_digest
             scene = {
                 "width": scene.width,
                 "height": scene.height,
@@ -239,6 +269,8 @@ class ImageSession:
                 "attempts": scene.attempts,
                 "revision": scene.revision,
             }
+            if digest is not None:
+                scene["target_digest"] = digest
         validated = validate_scene(scene)
         count = normalize_restore_count(shape_count, len(validated.shapes))
         return cls._from_validated_scene(image, options, validated, count)
@@ -253,14 +285,29 @@ class ImageSession:
         prefix = scene.shapes[:shape_count]
         if not native_checked:
             backend.replay_memory(scene.width, scene.height, scene.background, prefix, max_work=replay_work_limit)
-        source = fit_image(image, max(scene.width, scene.height)).convert("RGBA")
-        if source.size != (scene.width, scene.height):
-            raise APIError("invalid_result", "Saved working dimensions do not match the source image fit")
-        restored = backend.restore_rgba(
-            scene.width, scene.height, source.tobytes(), options.to_native_dict(),
-            scene.background, prefix, max_work=replay_work_limit,
-        )
-        session = cls(scene.width, scene.height, scene.background, restored["session"], options.focus, options.palette)
+        with ExitStack() as images:
+            matted = apply_matte(image, options.source.matte)
+            if matted is not image:
+                images.callback(matted.close)
+            fitted = fit_image(matted, max(scene.width, scene.height))
+            images.callback(fitted.close)
+            source = fitted.convert("RGBA")
+            images.callback(source.close)
+            if source.size != (scene.width, scene.height):
+                raise APIError("invalid_result", "Saved working dimensions do not match the source image fit")
+            pixels = source.tobytes()
+            digest = hashlib.sha256(pixels).hexdigest()
+            if scene.target_digest is not None and digest != scene.target_digest:
+                raise APIError("invalid_result", "Saved target digest does not match the prepared source image")
+            native_options = options.to_native_dict()
+            # Creation background never changes the actual saved replay canvas.
+            native_options["background"] = None
+            restored = backend.restore_rgba(
+                scene.width, scene.height, pixels, native_options,
+                scene.background, prefix, max_work=replay_work_limit,
+            )
+        session = cls(scene.width, scene.height, scene.background, restored["session"], options.focus, options.palette,
+                      options.source, digest)
         session.shapes = list(restored["shapes"])
         session.restored_shape_count = shape_count
         session.revision = shape_count
@@ -285,6 +332,14 @@ class ImageSession:
         return self._palette
 
     @property
+    def source(self) -> SourceOptions:
+        return self._source
+
+    @property
+    def target_digest(self) -> str | None:
+        return self._target_digest
+
+    @property
     def focus(self) -> Focus | None:
         with self._focus_lock:
             return self._focus
@@ -303,6 +358,8 @@ class ImageSession:
 
     def prepare_run(self, options: RunOptions | None = None) -> None:
         """Clear a prior cancellation while holding the run reservation."""
+        if options is not None:
+            self.validate_source(options.source)
         if options is not None and options.palette is not None and options.palette.strength > 0:
             require_palette_native(options.palette)
         self._cancel_requested.clear()
@@ -310,6 +367,12 @@ class ImageSession:
         if options is not None:
             self.request_focus(options.focus)
             self._palette = options.palette
+
+    def validate_source(self, source: SourceOptions) -> None:
+        if source != self.source:
+            raise APIError(
+                "source_mismatch", "Source frame and matte are frozen; start a new experiment to change them", 409,
+            )
 
     def request_cancel(self) -> None:
         """Ask the active batch to stop after its current native step."""
@@ -348,6 +411,7 @@ class ImageSession:
             "initial_focus": options.focus.to_dict() if options.focus is not None else None,
             "focus": options.focus.to_dict() if options.focus is not None else None,
             "palette": options.palette.to_dict() if options.palette is not None else None,
+            "source": self.source.to_dict(),
             "start_shape_count": accepted_at_start,
             "start_attempts": attempts_at_start,
             "start_score": self.score,
@@ -429,6 +493,8 @@ class ImageSession:
                     "revision": self.revision,
                     "focus": native_options["focus"],
                     "palette": options.palette.to_dict() if options.palette is not None else None,
+                    "source": self.source.to_dict(),
+                    "target_digest": self.target_digest,
                 }
         except GeneratorExit:
             reason = "paused"
@@ -458,6 +524,7 @@ class ImageSession:
                 shapes=self.shapes.copy(),
                 attempts=self.attempts,
                 background=self.background,
+                target_digest=self.target_digest,
             )
 
 
@@ -471,6 +538,7 @@ def diagnostics() -> dict[str, Any]:
         "available": native_available(),
         "restore_available": native_available() and _restore_supported(_native),
         "palette_available": native_available() and getattr(_native, "palette_api_version", 0) == 1,
+        "background_available": native_available() and getattr(_native, "background_api_version", 0) == 1,
         "module": "geometrize_py._native",
         "module_path": str(getattr(_native, "__file__", "")) if _native else None,
         "import_error_type": type(_IMPORT_ERROR).__name__ if _IMPORT_ERROR else None,
@@ -492,6 +560,18 @@ def require_palette_native(palette: Palette | None) -> Any:
     if palette is not None and palette.strength > 0 and getattr(backend, "palette_api_version", 0) != 1:
         raise NativeBackendUnavailable(
             "Installed native backend lacks palette fitting; rebuild or reinstall geometrize-py"
+        )
+    return backend
+
+
+def require_background_native(background: RGB | None, pixels: int) -> Any:
+    backend = require_native()
+    # The old native mean uses uint32 sums. Small default canvases remain
+    # compatible, while explicit backgrounds and potentially overflowing means
+    # must never silently claim support on an older installed extension.
+    if (background is not None or pixels > (2**32 - 1) // 255) and getattr(backend, "background_api_version", 0) != 1:
+        raise NativeBackendUnavailable(
+            "Installed native backend lacks custom/large-image backgrounds; rebuild or reinstall geometrize-py"
         )
     return backend
 
@@ -538,6 +618,8 @@ def iter_image(image: Image.Image, options: RunOptions | None = None) -> Iterato
         "restored_shape_count": session.restored_shape_count,
         "focus": options.focus.to_dict() if options.focus is not None else None,
         "palette": options.palette.to_dict() if options.palette is not None else None,
+        "source": session.source.to_dict(),
+        "target_digest": session.target_digest,
     }
 
     yield from session.run_batch(options)
@@ -559,6 +641,8 @@ def iter_image(image: Image.Image, options: RunOptions | None = None) -> Iterato
         "batch_summary": session.batch_summary,
         "focus": focus.to_dict() if focus is not None else None,
         "palette": session.palette.to_dict() if session.palette is not None else None,
+        "source": session.source.to_dict(),
+        "target_digest": session.target_digest,
     }
 
 

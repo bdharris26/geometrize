@@ -1,7 +1,7 @@
 """Nonblocking reservations for active CPU and memory use.
 
-Each lease fixes its thread count for the batch. Cache memory is accounted for
-separately; this budget covers transient fitting and export allocations.
+Leases resize atomically from source inspection to decoding and fitting. Cache
+memory is accounted for separately; this budget covers transient allocations.
 """
 
 from __future__ import annotations
@@ -9,6 +9,8 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from threading import Lock
+
+from .image_probe import SourceProbe
 
 DEFAULT_WORKER_BUDGET = max(1, min(8, os.cpu_count() or 1))
 DEFAULT_ACTIVE_MEMORY_BYTES = 512 * 1024 * 1024
@@ -44,14 +46,21 @@ class WorkBudget:
             self._leases.add(lease)
             return lease
 
-    def try_resize(self, lease: ResourceLease, memory_bytes: int) -> ResourceLease | None:
+    def try_resize(
+        self, lease: ResourceLease, memory_bytes: int, *, workers: int | None = None,
+    ) -> ResourceLease | None:
         if not _valid_int(memory_bytes, 1):
             raise ValueError("Resource reservations must be positive")
         with self._lock:
             self._require_lease(lease)
-            if self._used_memory - lease.memory_bytes + memory_bytes > self.memory_bytes:
+            workers = lease.workers if workers is None else workers
+            if not _valid_int(workers, 0):
+                raise ValueError("Worker reservations cannot be negative")
+            if (self._used_memory - lease.memory_bytes + memory_bytes > self.memory_bytes
+                    or self._used_workers - lease.workers + workers > self.workers):
                 return None
-            updated = ResourceLease(lease.workers, memory_bytes)
+            updated = ResourceLease(workers, memory_bytes)
+            self._used_workers += workers - lease.workers
             self._used_memory += memory_bytes - lease.memory_bytes
             self._leases.remove(lease)
             self._leases.add(updated)
@@ -80,6 +89,15 @@ def _valid_int(value: object, lower: int) -> bool:
 def fitting_memory_bytes(width: int, height: int, workers: int) -> int:
     # Retained bitmaps, worker scratch copies, source conversion and rollback.
     return width * height * (32 + 4 * workers) + 1024 * 1024
+
+
+def source_memory_bytes(probe: SourceProbe, raw_bytes: int, *, preview_pixels: int = 0) -> int:
+    # Decoder canvas/current/previous/disposal plus detached RGBA, orientation
+    # and matte copies. WebP allocates canvases and all demux records at open.
+    pixels = probe.width * probe.height
+    composition = probe.animated or probe.mime_type in {"image/apng", "image/webp"}
+    return (pixels * (32 if composition else 16) + raw_bytes * 2 + probe.metadata_memory
+            + preview_pixels * 32 + 64 * 1024)
 
 
 def export_memory_bytes(width: int, height: int) -> int:

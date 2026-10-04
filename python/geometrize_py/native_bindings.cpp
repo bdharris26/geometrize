@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cstdint>
 #include <cmath>
@@ -221,15 +222,53 @@ py::dict shapeResultToDict(const geometrize::ShapeResult& result)
     return out;
 }
 
+std::optional<geometrize::rgba> backgroundFromDict(const py::dict& options)
+{
+    if(!options.contains("background") || options["background"].is_none()) {
+        return std::nullopt;
+    }
+    const auto raw{options["background"]};
+    if(!(py::isinstance<py::list>(raw) || py::isinstance<py::tuple>(raw)) || py::len(raw) != 3) {
+        throw std::invalid_argument("background must be an RGB triple or null");
+    }
+    const auto channels{py::cast<py::sequence>(raw)};
+    std::array<std::uint8_t, 3> rgb;
+    for(std::size_t i = 0; i < rgb.size(); ++i) {
+        rgb[i] = static_cast<std::uint8_t>(geometrize_py::replayInteger(channels[i], 0, 255, "background channel"));
+    }
+    return geometrize::rgba{rgb[0], rgb[1], rgb[2], 255};
+}
+
+std::unique_ptr<geometrize::ImageRunner> initialRunner(const geometrize::Bitmap& target,
+    const std::optional<geometrize::rgba>& background)
+{
+    auto color{background.value_or(geometrize::rgba{0, 0, 0, 255})};
+    if(!background) {
+        const auto& pixels{target.getDataRef()};
+        std::array<std::uint64_t, 3> sums{0, 0, 0};
+        for(std::size_t i = 0; i < pixels.size(); i += 4U) {
+            for(std::size_t channel = 0; channel < sums.size(); ++channel) {
+                sums[channel] += pixels[i + channel];
+            }
+        }
+        const auto count{pixels.size() / 4U};
+        color = {static_cast<std::uint8_t>(sums[0] / count), static_cast<std::uint8_t>(sums[1] / count),
+            static_cast<std::uint8_t>(sums[2] / count), 255};
+    }
+    const geometrize::Bitmap initial{target.getWidth(), target.getHeight(), color};
+    return std::make_unique<geometrize::ImageRunner>(target, initial);
+}
+
 class RunnerSession
 {
 public:
     RunnerSession(const int width, const int height, const py::bytes& rgba, const py::dict& options) :
         m_width{width},
         m_height{height},
+        m_creationBackground{backgroundFromDict(options)},
         m_pixels{bytesToPixels(width, height, rgba)},
         m_target{static_cast<std::uint32_t>(width), static_cast<std::uint32_t>(height), m_pixels},
-        m_runner{std::make_unique<geometrize::ImageRunner>(m_target)},
+        m_runner{initialRunner(m_target, m_creationBackground)},
         m_options{runnerOptionsFromDict(options)},
         m_focus{focusFromDict(options)},
         m_palette{geometrize_py::paletteFromDict(options)},
@@ -417,6 +456,7 @@ private:
 
     int m_width;
     int m_height;
+    std::optional<geometrize::rgba> m_creationBackground;
     std::vector<std::uint8_t> m_pixels;
     geometrize::Bitmap m_target;
     std::unique_ptr<geometrize::ImageRunner> m_runner;
@@ -483,6 +523,7 @@ PYBIND11_MODULE(_native, module)
     module.doc() = "Native bindings for the Geometrize image runner.";
     module.def("is_available", []() { return true; });
     module.attr("palette_api_version") = 1;
+    module.attr("background_api_version") = 1;
     module.def("run_rgba", &runRgba, py::arg("width"), py::arg("height"), py::arg("rgba"), py::arg("options"));
     module.def("replay_memory", [](const py::handle rawWidth, const py::handle rawHeight,
         const py::handle background, const py::handle shapes, const py::handle rawMaxWork) {

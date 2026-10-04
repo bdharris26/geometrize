@@ -1,6 +1,7 @@
 "use strict";
 
 import { copyPalette, paletteLabel } from "./palette.js";
+import { copySource, copyRgb, sourceLabel } from "./source.js";
 
 const HISTORY_PAGE_SIZE = 50;
 
@@ -139,6 +140,8 @@ export class Telemetry {
       if (key in summary) batch[key] = summary[key] ? { ...summary[key] } : null;
     }
     if ("palette" in summary) batch.palette = copyPalette(summary.palette);
+    if ("source" in summary) batch.source = copySource(summary.source);
+    if ("background" in summary) batch.background = copyRgb(summary.background);
     const last = this.batches.at(-1);
     const previous = !last || last.index < batch.index ? -1 : last.index === batch.index ? this.batches.length - 1 :
       this.batches.findIndex((item) => item.index === batch.index);
@@ -242,6 +245,7 @@ export class Telemetry {
       chip.className = "batch-chip";
       chip.title = `${batch.shapeTypes.map((type) => this.shapeLabels[type] || type).join(", ")}; ${batch.candidates} candidates, ${batch.mutations} mutations, alpha ${batch.alpha}, seed ${batch.seed}, ${batch.effective_threads || "auto"} workers`;
       if ("palette" in batch) chip.title += `; ${paletteLabel(batch.palette)}`;
+      if ("source" in batch) chip.title += `; ${sourceLabel(batch.source)}`;
       label.textContent = `Batch ${batch.index}`;
       added.textContent = `+${batch.added}`;
       state.textContent = batch.state;

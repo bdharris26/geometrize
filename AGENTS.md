@@ -20,7 +20,11 @@ current so the next agent can find the important edges quickly.
 - Shared limits, shapes, and presets: `python/geometrize_py/contracts.py`;
   the UI loads these from `/api/config`.
 - Browser modules: `static/app.js` coordinates `preview.js`, `stream.js`,
-  `telemetry.js`, `project.js`, `focus.js`, `palette.js`, and `history.js` under `python/geometrize_py/`.
+  `telemetry.js`, `project.js`, `focus.js`, `palette.js`, `source.js`, and
+  `history.js` under `python/geometrize_py/`.
+- Source preparation: `source.py`, `image_probe.py`, and `images.py`; probe encoded
+  bounds and reserve decoder memory before opening or seeking with Pillow.
+  `apng.py` corrects frame composition while Pillow decodes each frame's pixels.
 - CLI entrypoints: `python/geometrize_py/cli.py`.
 - Native bridge contract: `python/geometrize_py/native.py` and
   `python/geometrize_py/native_bindings.cpp`; placement is in `native_focus.h`.
@@ -62,7 +66,9 @@ current so the next agent can find the important edges quickly.
   a hold samples the latest pointer only when fitting is ready for another shape.
 - Timeline inspection is read-only; branch heads stay intact. Explicit Restore/Fork
   creates a native session with reset attempts/RNG and retained shape counts.
-  Project v2 stores the full experiment graph; live session IDs stay in memory.
+  Project v3 stores the full graph and source policy; v1/v2 keep legacy defaults.
+  Live session IDs stay in memory. Frame/matte edits create a new root; forks keep
+  the target and saved background. Verify optional target digests during replay.
 - Palette constraints apply to new shape RGB; alpha blending stays native. Off or
   zero strength must preserve the original fitting/RNG path and pixels.
 - Keep new docs concise. The point of this port is a small native-feeling

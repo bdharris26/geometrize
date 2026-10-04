@@ -2,7 +2,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from geometrize_py.resources import WorkBudget, scene_memory_bytes
+from geometrize_py.image_probe import SourceProbe
+from geometrize_py.resources import WorkBudget, scene_memory_bytes, source_memory_bytes
 
 
 def test_worker_and_memory_limits_are_independent_and_release_restores_capacity() -> None:
@@ -33,6 +34,30 @@ def test_resize_is_atomic_and_failed_resize_preserves_lease() -> None:
     with pytest.raises(ValueError):
         budget.release(lease)
     budget.release(updated)
+
+
+def test_worker_resize_is_atomic_and_failed_growth_keeps_original_reservations() -> None:
+    budget = WorkBudget(3, 100)
+    probe = budget.try_reserve(1, 20)
+    other = budget.try_reserve(1, 10)
+    assert probe is not None and other is not None
+    assert budget.try_resize(probe, 80, workers=3) is None
+    assert budget.usage() == (2, 30)
+    assert budget.try_resize(probe, 91, workers=2) is None
+    assert budget.usage() == (2, 30)
+    fitted = budget.try_resize(probe, 80, workers=2)
+    assert fitted is not None and budget.usage() == (3, 90)
+    with pytest.raises(ValueError, match="released"):
+        budget.release(probe)
+    for workers in (-1, 1.0, True):
+        with pytest.raises(ValueError, match="Worker"):
+            budget.try_resize(fitted, 80, workers=workers)
+    assert budget.usage() == (3, 90)
+    shrunk = budget.try_resize(fitted, 5, workers=0)
+    assert shrunk is not None and budget.usage() == (1, 15)
+    budget.release(other)
+    budget.release(shrunk)
+    assert budget.usage() == (0, 0)
 
 
 def test_memory_only_lease_is_available_when_workers_are_full() -> None:
@@ -66,6 +91,17 @@ def test_scene_memory_estimate_accounts_for_total_vertices() -> None:
         scene_memory_bytes(1, -1)
     with pytest.raises(ValueError):
         scene_memory_bytes(1, float("nan"))
+
+
+@pytest.mark.parametrize("mime", ["image/apng", "image/webp"])
+def test_single_frame_compositing_sources_reserve_canvas_and_patch_headroom(mime) -> None:
+    pixels = 1024 * 1024
+    single_frame = SourceProbe(1024, 1024, mime)
+    static = SourceProbe(1024, 1024, "image/png")
+    # One APNG frame can still hold canvas, PREVIOUS, decoded/converted patches;
+    # WebP allocates two canvases at open even for a single selected frame.
+    assert source_memory_bytes(single_frame, 1) >= pixels * 32
+    assert source_memory_bytes(single_frame, 1) - source_memory_bytes(static, 1) >= pixels * 16
 
 
 def test_concurrent_reservations_never_exceed_global_budget() -> None:
