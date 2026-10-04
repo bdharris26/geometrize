@@ -77,11 +77,15 @@ class GeometrizeServer(ThreadingHTTPServer):
         max_active_renders: int = DEFAULT_MAX_ACTIVE_RENDERS,
         request_timeout_seconds: float = DEFAULT_REQUEST_TIMEOUT_SECONDS,
         session_idle_seconds: float = DEFAULT_SESSION_IDLE_SECONDS,
-        max_session_bytes: int = DEFAULT_SESSION_MEMORY_BYTES,
+        max_session_bytes: int | None = None,
         worker_budget: int = DEFAULT_WORKER_BUDGET,
         active_memory_bytes: int = DEFAULT_ACTIVE_MEMORY_BYTES,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
+        if max_session_bytes is None:
+            # Explicitly raising the active budget must also allow large fits
+            # to remain resumable after their first batch finishes.
+            max_session_bytes = max(DEFAULT_SESSION_MEMORY_BYTES, active_memory_bytes // 2)
         if min(max_sessions, max_active_renders, max_session_bytes) < 1:
             raise ValueError("Session, render, and cache limits must be positive")
         if min(request_timeout_seconds, session_idle_seconds) <= 0:

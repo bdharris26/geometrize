@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 
+from .contracts import MAX_IMAGE_SIZE, MAX_WORKING_IMAGE_SIZE
 from .images import image_to_png_bytes, open_image_bytes
 from .native import Focus, RunOptions, diagnostics, run_image
 from .render import export_dimensions, render_shapes_to_image
@@ -111,7 +112,7 @@ def add_option_arguments(parser: argparse.ArgumentParser) -> None:
         "--max-size",
         type=int,
         default=RunOptions.max_size,
-        help="optimizer working resolution (longest dimension, capped at 2048)",
+        help=f"optimizer working resolution (longest dimension, capped at {MAX_WORKING_IMAGE_SIZE})",
     )
     parser.add_argument(
         "--export-size",
@@ -119,7 +120,7 @@ def add_option_arguments(parser: argparse.ArgumentParser) -> None:
         dest="export_size",
         type=int,
         default=RunOptions.export_size,
-        help="output resolution (longest dimension, capped at 4096)",
+        help=f"output resolution (longest dimension, capped at {MAX_IMAGE_SIZE})",
     )
 
 

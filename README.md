@@ -56,7 +56,8 @@ improvement stalls, or its attempt limit is reached.
 
 PNG and SVG exports are generated on demand from the current result. Changing
 export size does not add shapes or rerun fitting. Working resolution and display
-zoom are independent of export size, which is capped at 4096px. PNG rendering
+zoom are independent of export size. Both working and export resolution allow
+up to 8192px on the longest edge. PNG rendering
 preserves Pillow's rasterization and curve sampling; SVG and the live canvas use
 continuous paths and antialiasing, so curved boundaries can differ more at larger
 export sizes. The fitting engine uses its own
@@ -86,6 +87,9 @@ active-memory budgets for fitting and exports. Reservations are fixed for each
 batch; requests beyond available capacity return a retryable busy response.
 Session and encoded-export caches have separate bounds. The active-memory budget
 is a conservative admission estimate, not an operating-system memory limit.
+Large 8192px images need a larger budget; on a machine with sufficient RAM, use
+`serve --active-memory-mb 8192`. Raising this budget also increases the default
+resumable-session cache budget; the normal 512 MB configuration stays unchanged.
 
 ## Project Layout
 

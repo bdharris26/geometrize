@@ -58,11 +58,20 @@ def test_native_unavailable_error_is_importable() -> None:
 def test_run_options_keep_high_resolution_budget() -> None:
     assert RunOptions().max_size == 1024
     assert RunOptions().export_size == 1024
-    assert MAX_WORKING_IMAGE_SIZE == 2048
-    assert MAX_IMAGE_SIZE == 4096
+    assert MAX_WORKING_IMAGE_SIZE == 8192
+    assert MAX_IMAGE_SIZE == 8192
     assert RunOptions.from_mapping({"max_size": 99999}).max_size == MAX_WORKING_IMAGE_SIZE
     assert RunOptions.from_mapping({"steps": 99999}).steps == 4096
     assert RunOptions.from_mapping({"export_size": 99999}).export_size == MAX_IMAGE_SIZE
+
+
+@pytest.mark.skipif(not native_available(), reason="native backend is not built")
+def test_native_preserves_8192_working_dimension() -> None:
+    source = Image.new("RGB", (8192, 32), (80, 130, 170))
+    result = run_image(source, RunOptions(steps=1, max_size=8192, export_size=8192, max_threads=1))
+    assert result.image.size == (8192, 32)
+    assert result.width == 8192
+    assert result.height == 32
 
 
 @pytest.mark.parametrize(

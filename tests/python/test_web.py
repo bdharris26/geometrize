@@ -73,12 +73,12 @@ def test_index_supports_sample_without_required_file_input(server: GeometrizeSer
     assert "Working resolution" in html
     assert "Export resolution" in html
     assert 'id="seed" name="seed" type="number" min="0" max="2147483647" value="9001"' in html
-    assert 'id="max-size" name="max_size" type="range" min="32" max="2048" step="1" value="1024"' in html
-    assert 'id="export-size" name="export_size" type="range" min="32" max="4096" step="1" value="1024"' in html
+    assert 'id="max-size" name="max_size" type="range" min="32" max="8192" step="1" value="1024"' in html
+    assert 'id="export-size" name="export_size" type="range" min="32" max="8192" step="1" value="1024"' in html
     assert 'id="load-project-button"' in html
     assert 'id="save-project-button"' in html
-    assert 'id="max-size-number" type="number" min="32" max="2048" step="1" value="1024"' in html
-    assert 'id="export-size-number" type="number" min="32" max="4096" step="1" value="1024"' in html
+    assert 'id="max-size-number" type="number" min="32" max="8192" step="1" value="1024"' in html
+    assert 'id="export-size-number" type="number" min="32" max="8192" step="1" value="1024"' in html
     assert 'id="pause-button"' in html
     assert 'class="telemetry-console"' in html
     assert 'id="result-canvas"' in html
@@ -165,6 +165,23 @@ def test_session_cache_enforces_approximate_memory_budget(server: GeometrizeServ
     assert server.get_session("large") is None
     assert server.get_session("oversized") is None
     assert server._stored_session_bytes == 0
+
+
+@pytest.mark.parametrize(
+    ("active_mb", "explicit_cache_mb", "retained"),
+    [(512, None, False), (8192, None, True), (8192, 512, False)],
+)
+def test_large_session_cache_follows_explicit_active_budget(
+    active_mb: int, explicit_cache_mb: int | None, retained: bool
+) -> None:
+    cache = None if explicit_cache_mb is None else explicit_cache_mb * 1024 * 1024
+    with GeometrizeServer(
+        ("127.0.0.1", 0), GeometrizeRequestHandler,
+        active_memory_bytes=active_mb * 1024 * 1024, max_session_bytes=cache,
+    ) as server:
+        session = _fake_session(8192, 8192)
+        server.store_session("large", session)
+        assert (server.get_session("large") is session) is retained
 
 
 def test_render_concurrency_slots_are_bounded(server: GeometrizeServer) -> None:
@@ -410,7 +427,8 @@ def test_config_exposes_shared_contract_and_resource_budget(server: GeometrizeSe
     with urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/api/config") as response:
         contract = json.load(response)
     assert len(contract["shapes"]) == 9
-    assert contract["limits"]["export_size"] == {"min": 32, "max": 4096}
+    assert contract["limits"]["max_size"] == {"min": 32, "max": 8192}
+    assert contract["limits"]["export_size"] == {"min": 32, "max": 8192}
     assert "image/tiff" not in contract["images"]["mime_types"]
     assert contract["resources"]["worker_budget"] == server.work_budget.workers
 
@@ -676,6 +694,27 @@ def test_frozen_result_exports_at_new_size_without_fitting(server: GeometrizeSer
     assert (second["export_width"], second["export_height"]) == (128, 85)
     assert _png_size(second["preview"]) == (128, 85)
     assert not server.sessions
+    assert server.work_budget.usage() == (0, 0)
+
+
+def test_export_at_8192_preserves_memory_admission(server: GeometrizeServer) -> None:
+    from geometrize_py.resources import WorkBudget
+
+    scene = {"width": 32, "height": 32, "background": [30, 50, 70, 255], "shapes": []}
+    payload = {"result": scene, "export_size": 8192}
+    with pytest.raises(HTTPError) as error:
+        _post(server, "/api/export", payload)
+    assert json.load(error.value)["code"] == "memory_limit"
+    assert server.work_budget.usage() == (0, 0)
+    server.work_budget = WorkBudget(1, 2 * 1024 * 1024 * 1024)
+    exported = _post(server, "/api/export", payload)
+    assert _png_size(exported["preview"]) == (8192, 8192)
+    assert (exported["export_width"], exported["export_height"]) == (8192, 8192)
+    assert server.work_budget.usage() == (0, 0)
+    payload["export_size"] = 8193
+    with pytest.raises(HTTPError) as error:
+        _post(server, "/api/export", payload)
+    assert json.load(error.value)["code"] == "invalid_options"
     assert server.work_budget.usage() == (0, 0)
 
 

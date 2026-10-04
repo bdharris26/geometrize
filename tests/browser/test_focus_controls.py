@@ -511,3 +511,26 @@ def test_paint_interruption_stops_pending_clicks_and_preserves_snapshot(
         expect(page.locator("#telemetry-acceptance")).to_have_text(expected)
         expect(page.locator("#download-png")).to_have_attribute("aria-disabled", "false")
         browser.close()
+
+
+def test_both_resolution_controls_accept_8192_and_project_round_trip(server_url: str, tmp_path: Path) -> None:
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = browser.new_page(viewport={"width":1440,"height":1050})
+        page.goto(server_url, wait_until="networkidle")
+        page.get_by_role("button", name="Sample", exact=True).click()
+        for key in ["max-size","export-size"]:
+            expect(page.locator(f"#{key}")).to_have_attribute("max", "8192")
+            expect(page.locator(f"#{key}-number")).to_have_attribute("max", "8192")
+            page.locator(f"#{key}-number").fill("8192")
+            page.locator(f"#{key}-number").dispatch_event("change")
+            expect(page.locator(f"#{key}")).to_have_value("8192")
+            assert page.locator(f"#{key}-number").evaluate("input => input.validity.valid")
+        saved = _save_project(page, tmp_path / "8192.json")
+        assert saved["options"]["max_size"] == saved["options"]["export_size"] == 8192
+        page.reload(wait_until="networkidle")
+        page.locator("#project-input").set_input_files(tmp_path / "8192.json")
+        expect(page.locator("#status")).to_have_text("Project loaded — Run starts a new render")
+        expect(page.locator("#max-size-number")).to_have_value("8192")
+        expect(page.locator("#export-size-number")).to_have_value("8192")
+        browser.close()

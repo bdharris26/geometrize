@@ -30,6 +30,14 @@ def test_serve_args_are_parsed() -> None:
     assert args.open is True
 
 
+def test_cli_accepts_8192_working_and_export_resolution() -> None:
+    args = cli.build_parser().parse_args(
+        ["run", "source.png", "--output", "result.png", "--max-size", "8192", "--export-size", "8192"]
+    )
+    options = cli.options_from_args(args)
+    assert options.max_size == options.export_size == 8192
+
+
 def test_cli_focus_flags_have_normalized_defaults() -> None:
     parser = cli.build_parser()
     plain = parser.parse_args(["run", "source.png", "--output", "result.png"])

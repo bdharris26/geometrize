@@ -53,8 +53,8 @@ OPTION_LIMITS = {
     "mutations": (1, 2048),
     "seed": (0, 2**31 - 1),
     "max_threads": (0, 128),
-    "max_size": (32, 2048),
-    "export_size": (32, 4096),
+    "max_size": (32, 8192),
+    "export_size": (32, 8192),
     "stagnation_limit": (0, 4096),
 }
 MAX_WORKING_IMAGE_SIZE = OPTION_LIMITS["max_size"][1]
