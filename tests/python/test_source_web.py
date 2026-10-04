@@ -346,3 +346,33 @@ def test_stale_background_extension_reports_native_unavailable_and_releases_prep
     _error(source_server, "/api/run/stream", {"image": _url(_animation()), "options": _options()},
            "native_unavailable", 503)
     assert not source_server.sessions and source_server.work_budget.usage() == (0, 0)
+
+
+@pytest.mark.skipif(not native_available(), reason="native backend is not built")
+def test_wrapped_original_source_prepares_extracts_and_restores_identical_target_bytes(
+    source_server, monkeypatch,
+) -> None:
+    original = _animation()
+    encoded = base64.b64encode(original).decode("ascii")
+    wrapped = "data:image/apng;base64," + "\r\n".join(encoded[i:i + 17] for i in range(0, len(encoded), 17))
+    decoded = []
+    actual_open = web.open_image_bytes
+
+    def open_image(raw, *args, **kwargs):
+        decoded.append(raw)
+        return actual_open(raw, *args, **kwargs)
+
+    monkeypatch.setattr(web, "open_image_bytes", open_image)
+    prepared = _post(source_server, "/api/source/prepare", {"image": wrapped, "source": _options()["source"]})
+    assert prepared["mime_type"] == "image/apng" and prepared["frame_count"] == 3
+    colors = _post(source_server, "/api/palette", {"image": wrapped, "source": _options()["source"], "max_colors": 32})
+    assert sorted(colors["colors"]) == [[127, 128, 0], [255, 0, 0]]
+    events = _post(source_server, "/api/run/stream", {"image": wrapped, "options": _options()}, stream=True)
+    head = events[-1]
+    assert head["event"] == "complete" and head["shape_count"] == 1
+    restored = _post(source_server, "/api/restore", {"image": wrapped, "options": _options(), "result": head})
+    assert restored["target_digest"] == head["target_digest"]
+    assert restored["preview"] == head["preview"] and restored["restored_shape_count"] == 1
+    assert restored["attempts"] == 0
+    assert len(decoded) == 4 and all(raw == original for raw in decoded)
+    assert source_server.work_budget.usage() == (0, 0)

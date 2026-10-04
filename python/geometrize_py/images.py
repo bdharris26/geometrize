@@ -108,6 +108,9 @@ def image_data_url_bytes(data_url: str) -> bytes:
     if (not separator or not header.lower().startswith(("data:image/", "data:application/octet-stream;"))
             or ";base64" not in header.lower()):
         raise ValueError("Expected a base64 image data URL")
+    # Project data URLs allow CR/LF line wrapping. Remove only those characters;
+    # validate=True still rejects spaces, tabs and other malformed base64.
+    payload = payload.replace("\r", "").replace("\n", "")
     try:
         image_bytes = base64.b64decode(payload, validate=True)
     except binascii.Error as exc:
