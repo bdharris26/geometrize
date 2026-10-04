@@ -71,9 +71,13 @@ OPTION_DEFAULTS = {
     "export_size": 1024,
     "stagnation_limit": 128,
     "focus": None,
+    "palette": None,
 }
 FOCUS_DEFAULTS = {"radius": 0.2, "strength": 0.75}
 FOCUS_LIMITS = {"x": (0.0, 1.0), "y": (0.0, 1.0), "radius": (0.01, 1.0), "strength": (0.0, 1.0)}
+PALETTE_MAX_COLORS = 32
+PALETTE_SAMPLE_SIZE = 256
+PALETTE_DEFAULTS = {"max_colors": 8, "strength": 1.0, "soft_strength": 0.75}
 
 MAX_SOURCE_DIMENSION = 16384
 MAX_SOURCE_PIXELS = 8192 * 8192
@@ -121,6 +125,12 @@ def app_contract() -> dict[str, Any]:
         "focus": {
             "defaults": deepcopy(FOCUS_DEFAULTS),
             "limits": {name: {"min": lower, "max": upper} for name, (lower, upper) in FOCUS_LIMITS.items()},
+        },
+        "palette": {
+            "max_colors": PALETTE_MAX_COLORS,
+            "sample_size": PALETTE_SAMPLE_SIZE,
+            "defaults": deepcopy(PALETTE_DEFAULTS),
+            "limits": {"strength": {"min": 0.0, "max": 1.0}},
         },
         "images": {
             "mime_types": list(RASTER_MIME_TYPES),

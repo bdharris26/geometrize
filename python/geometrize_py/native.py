@@ -4,6 +4,7 @@ import os
 import platform
 import sys
 from collections.abc import Iterable, Iterator
+from copy import deepcopy
 from dataclasses import dataclass
 from math import isfinite
 from numbers import Real
@@ -28,6 +29,7 @@ from .contracts import (
 from .errors import APIError
 from .exporting import RenderScene, inspect_scene, validate_scene
 from .images import average_color, fit_image
+from .palette import Palette, normalize_palette
 
 __all__ = [
     "DEFAULT_SHAPES",
@@ -35,6 +37,7 @@ __all__ = [
     "MAX_WORKING_IMAGE_SIZE",
     "SHAPE_TYPES",
     "Focus",
+    "Palette",
     "ImageSession",
     "NativeBackendUnavailable",
     "RunOptions",
@@ -45,6 +48,7 @@ __all__ = [
     "native_available",
     "normalize_shape_types",
     "normalize_focus",
+    "normalize_palette",
     "require_native",
     "run_image",
 ]
@@ -115,6 +119,7 @@ class RunOptions:
     export_size: int = OPTION_DEFAULTS["export_size"]
     stagnation_limit: int = OPTION_DEFAULTS["stagnation_limit"]
     focus: Focus | None = None
+    palette: Palette | None = None
 
     def __post_init__(self) -> None:
         shape_types = self.shape_types
@@ -122,6 +127,7 @@ class RunOptions:
             shape_types = tuple(value.strip() for value in shape_types.split(",") if value.strip())
         object.__setattr__(self, "shape_types", normalize_shape_types(shape_types))
         object.__setattr__(self, "focus", normalize_focus(self.focus))
+        object.__setattr__(self, "palette", normalize_palette(self.palette))
         for name, (lower, upper) in OPTION_LIMITS.items():
             _validate_int_option(name, getattr(self, name), lower, upper)
 
@@ -141,6 +147,7 @@ class RunOptions:
             export_size=_clamp_option("export_size", data.get("export_size", data.get("max_size", max_size))),
             stagnation_limit=_clamp_option("stagnation_limit", data.get("stagnation_limit", cls.stagnation_limit)),
             focus=data.get("focus"),
+            palette=data.get("palette"),
         )
 
     def to_native_dict(self) -> dict[str, Any]:
@@ -153,6 +160,7 @@ class RunOptions:
             "seed": self.seed,
             "max_threads": effective_max_threads(self.max_threads),
             "focus": self.focus.to_dict() if self.focus is not None else None,
+            "palette": self.palette.to_dict() if self.palette is not None else None,
         }
 
     @property
@@ -178,6 +186,7 @@ class ImageSession:
         background: tuple[int, int, int, int],
         session: Any,
         focus: Focus | None = None,
+        palette: Palette | None = None,
     ) -> None:
         self.width = width
         self.height = height
@@ -189,6 +198,7 @@ class ImageSession:
         self._run_lock = RLock()
         self._focus_lock = Lock()
         self._focus = normalize_focus(focus)
+        self._palette = normalize_palette(palette)
         self._cancel_requested = Event()
         self.initial_score = float(getattr(session, "initial_score", 1.0))
         self._score = float(getattr(session, "score", self.initial_score))
@@ -198,14 +208,14 @@ class ImageSession:
 
     @classmethod
     def from_image(cls, image: Image.Image, options: RunOptions) -> ImageSession:
-        backend = require_native()
+        backend = require_palette_native(options.palette)
         source = fit_image(image, options.max_size).convert("RGBA")
         width, height = source.size
         session = backend.RunnerSession(width, height, source.tobytes(), options.to_native_dict())
         background = getattr(session, "background", None)
         if background is None:
             background = average_color(source)
-        return cls(width, height, tuple(background), session, options.focus)
+        return cls(width, height, tuple(background), session, options.focus, options.palette)
 
     @classmethod
     def from_scene(
@@ -239,6 +249,7 @@ class ImageSession:
         *, native_checked: bool = False, replay_work_limit: int = RESTORE_MAX_WORK,
     ) -> ImageSession:
         backend = require_restore_native()
+        require_palette_native(options.palette)
         prefix = scene.shapes[:shape_count]
         if not native_checked:
             backend.replay_memory(scene.width, scene.height, scene.background, prefix, max_work=replay_work_limit)
@@ -249,7 +260,7 @@ class ImageSession:
             scene.width, scene.height, source.tobytes(), options.to_native_dict(),
             scene.background, prefix, max_work=replay_work_limit,
         )
-        session = cls(scene.width, scene.height, scene.background, restored["session"], options.focus)
+        session = cls(scene.width, scene.height, scene.background, restored["session"], options.focus, options.palette)
         session.shapes = list(restored["shapes"])
         session.restored_shape_count = shape_count
         session.revision = shape_count
@@ -267,11 +278,11 @@ class ImageSession:
     def batch_summary(self) -> dict[str, Any] | None:
         if self._batch_summary is None:
             return None
-        summary = self._batch_summary.copy()
-        for name in ("focus", "initial_focus"):
-            if summary[name] is not None:
-                summary[name] = summary[name].copy()
-        return summary
+        return deepcopy(self._batch_summary)
+
+    @property
+    def palette(self) -> Palette | None:
+        return self._palette
 
     @property
     def focus(self) -> Focus | None:
@@ -292,10 +303,13 @@ class ImageSession:
 
     def prepare_run(self, options: RunOptions | None = None) -> None:
         """Clear a prior cancellation while holding the run reservation."""
+        if options is not None and options.palette is not None and options.palette.strength > 0:
+            require_palette_native(options.palette)
         self._cancel_requested.clear()
         self.stop_reason = None
         if options is not None:
             self.request_focus(options.focus)
+            self._palette = options.palette
 
     def request_cancel(self) -> None:
         """Ask the active batch to stop after its current native step."""
@@ -333,6 +347,7 @@ class ImageSession:
             "stagnation_limit": options.stagnation_limit,
             "initial_focus": options.focus.to_dict() if options.focus is not None else None,
             "focus": options.focus.to_dict() if options.focus is not None else None,
+            "palette": options.palette.to_dict() if options.palette is not None else None,
             "start_shape_count": accepted_at_start,
             "start_attempts": attempts_at_start,
             "start_score": self.score,
@@ -413,6 +428,7 @@ class ImageSession:
                     "initial_score": self.initial_score,
                     "revision": self.revision,
                     "focus": native_options["focus"],
+                    "palette": options.palette.to_dict() if options.palette is not None else None,
                 }
         except GeneratorExit:
             reason = "paused"
@@ -454,6 +470,7 @@ def diagnostics() -> dict[str, Any]:
     return {
         "available": native_available(),
         "restore_available": native_available() and _restore_supported(_native),
+        "palette_available": native_available() and getattr(_native, "palette_api_version", 0) == 1,
         "module": "geometrize_py._native",
         "module_path": str(getattr(_native, "__file__", "")) if _native else None,
         "import_error_type": type(_IMPORT_ERROR).__name__ if _IMPORT_ERROR else None,
@@ -468,6 +485,15 @@ def require_native() -> Any:
         detail = f": {_IMPORT_ERROR}" if _IMPORT_ERROR else ""
         raise NativeBackendUnavailable(f"Geometrize native backend is unavailable{detail}")
     return _native
+
+
+def require_palette_native(palette: Palette | None) -> Any:
+    backend = require_native()
+    if palette is not None and palette.strength > 0 and getattr(backend, "palette_api_version", 0) != 1:
+        raise NativeBackendUnavailable(
+            "Installed native backend lacks palette fitting; rebuild or reinstall geometrize-py"
+        )
+    return backend
 
 
 def _restore_supported(backend: Any) -> bool:
@@ -511,6 +537,7 @@ def iter_image(image: Image.Image, options: RunOptions | None = None) -> Iterato
         "revision": session.revision,
         "restored_shape_count": session.restored_shape_count,
         "focus": options.focus.to_dict() if options.focus is not None else None,
+        "palette": options.palette.to_dict() if options.palette is not None else None,
     }
 
     yield from session.run_batch(options)
@@ -531,6 +558,7 @@ def iter_image(image: Image.Image, options: RunOptions | None = None) -> Iterato
         "stop_reason": session.stop_reason,
         "batch_summary": session.batch_summary,
         "focus": focus.to_dict() if focus is not None else None,
+        "palette": session.palette.to_dict() if session.palette is not None else None,
     }
 
 
