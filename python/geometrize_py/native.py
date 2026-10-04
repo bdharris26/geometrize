@@ -142,24 +142,15 @@ class RunOptions:
 
     @classmethod
     def from_mapping(cls, data: dict[str, Any] | None) -> RunOptions:
-        data = data or {}
-        max_size = _clamp_option("max_size", data.get("max_size", cls.max_size))
-        return cls(
-            steps=_clamp_option("steps", data.get("steps", cls.steps)),
-            shape_types=data.get("shape_types", DEFAULT_SHAPES),
-            alpha=_clamp_option("alpha", data.get("alpha", cls.alpha)),
-            shape_count=_clamp_option("shape_count", data.get("shape_count", cls.shape_count)),
-            mutations=_clamp_option("mutations", data.get("mutations", cls.mutations)),
-            seed=_clamp_option("seed", data.get("seed", cls.seed)),
-            max_threads=_clamp_option("max_threads", data.get("max_threads", cls.max_threads)),
-            max_size=max_size,
-            export_size=_clamp_option("export_size", data.get("export_size", data.get("max_size", max_size))),
-            stagnation_limit=_clamp_option("stagnation_limit", data.get("stagnation_limit", cls.stagnation_limit)),
-            focus=data.get("focus"),
-            palette=data.get("palette"),
-            source=data.get("source"),
-            background=data.get("background"),
-        )
+        """Apply the same validation and defaults as direct Python construction."""
+        if data is None:
+            return cls()
+        if not isinstance(data, dict):
+            raise ValueError("Options must be an object")
+        unknown = data.keys() - OPTION_DEFAULTS.keys()
+        if unknown:
+            raise ValueError(f"Unknown options: {', '.join(sorted(map(str, unknown)))}")
+        return cls(**data)
 
     def to_dict(self) -> dict[str, Any]:
         """Return persisted options, retaining the requested worker setting."""
@@ -679,11 +670,6 @@ def normalize_restore_count(value: Any, available: int) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= available:
         raise APIError("invalid_result", f"shape_count must be an integer from 0 to {available}")
     return value
-
-
-def _clamp_option(name: str, value: Any) -> int:
-    lower, upper = OPTION_LIMITS[name]
-    return max(lower, min(upper, int(value)))
 
 
 def effective_max_threads(requested: int) -> int:

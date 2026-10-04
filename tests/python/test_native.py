@@ -60,9 +60,29 @@ def test_run_options_keep_high_resolution_budget() -> None:
     assert RunOptions().export_size == 1024
     assert MAX_WORKING_IMAGE_SIZE == 8192
     assert MAX_IMAGE_SIZE == 8192
-    assert RunOptions.from_mapping({"max_size": 99999}).max_size == MAX_WORKING_IMAGE_SIZE
-    assert RunOptions.from_mapping({"steps": 99999}).steps == 4096
-    assert RunOptions.from_mapping({"export_size": 99999}).export_size == MAX_IMAGE_SIZE
+    options = RunOptions.from_mapping({"max_size": 8192, "export_size": 8192, "steps": 4096})
+    assert options == RunOptions(max_size=8192, export_size=8192, steps=4096)
+
+
+@pytest.mark.parametrize("field", ["steps", "alpha", "shape_count", "mutations", "seed", "max_threads",
+                                  "max_size", "export_size", "stagnation_limit"])
+@pytest.mark.parametrize("value", [2**63, -1, True, "64", 64.5, None])
+def test_mapped_options_reject_invalid_values_without_coercion(field: str, value: object) -> None:
+    with pytest.raises(ValueError, match=field):
+        RunOptions.from_mapping({field: value})
+
+
+@pytest.mark.parametrize("value", [False, [], "", 0])
+def test_mapped_options_require_an_object(value: object) -> None:
+    with pytest.raises(ValueError, match="object"):
+        RunOptions.from_mapping(value)
+
+
+def test_mapped_options_use_constructor_defaults_and_reject_unknown_fields() -> None:
+    assert RunOptions.from_mapping(None) == RunOptions.from_mapping({}) == RunOptions()
+    assert RunOptions.from_mapping({"max_size": 32}) == RunOptions(max_size=32)
+    with pytest.raises(ValueError, match="Unknown options: shap_count"):
+        RunOptions.from_mapping({"shap_count": 64})
 
 
 @pytest.mark.skipif(not native_available(), reason="native backend is not built")
