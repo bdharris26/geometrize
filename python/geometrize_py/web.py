@@ -124,17 +124,29 @@ class GeometrizeServer(ThreadingHTTPServer):
     def release_render_slot(self) -> None:
         self._render_slots.release()
 
-    def store_session(self, session_id: str, session: ImageSession) -> None:
+    def store_session(self, session_id: str, session: ImageSession, *, require_retention: bool = False) -> None:
         with self.sessions_lock:
             now = self._clock()
+            record = _StoredSession(session, now, _estimate_session_bytes(session))
+            if require_retention:
+                protected = [
+                    stored for key, stored in self.sessions.items()
+                    if key != session_id and key in self.active_runs
+                ]
+                if (len(protected) + 1 > self.max_sessions
+                        or sum(stored.estimated_bytes for stored in protected) + record.estimated_bytes
+                        > self.max_session_bytes):
+                    raise APIError(
+                        "session_capacity", "Active sessions fill the saved session cache; wait for a run to finish",
+                        HTTPStatus.TOO_MANY_REQUESTS,
+                    )
             self._remove_expired_sessions(now)
             previous = self.sessions.pop(session_id, None)
             if previous is not None:
                 self._stored_session_bytes -= previous.estimated_bytes
-            record = _StoredSession(session, now, _estimate_session_bytes(session))
             self.sessions[session_id] = record
             self._stored_session_bytes += record.estimated_bytes
-            self._enforce_session_limits()
+            self._enforce_session_limits(session_id if require_retention else None)
 
     def get_session(self, session_id: str) -> ImageSession | None:
         with self.sessions_lock:
@@ -167,11 +179,11 @@ class GeometrizeServer(ThreadingHTTPServer):
             if session_id not in self.active_runs and now - record.last_accessed >= self.session_idle_seconds:
                 self._remove_session(session_id)
 
-    def _enforce_session_limits(self) -> None:
+    def _enforce_session_limits(self, protected_session_id: str | None = None) -> None:
         for session_id in list(self.sessions):
             if len(self.sessions) <= self.max_sessions and self._stored_session_bytes <= self.max_session_bytes:
                 break
-            if session_id not in self.active_runs:
+            if session_id not in self.active_runs and session_id != protected_session_id:
                 self._remove_session(session_id)
 
     def _remove_session(self, session_id: str) -> None:
@@ -550,7 +562,7 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
                 "source_attempts": scene.attempts,
                 "attempt_policy": "reset",
             }
-            self.geometrize_server.store_session(session_id, session)
+            self.geometrize_server.store_session(session_id, session, require_retention=True)
             self._send_json(snapshot)
         finally:
             self.geometrize_server.work_budget.release(lease)

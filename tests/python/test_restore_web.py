@@ -4,6 +4,7 @@ import copy
 import json
 import threading
 import urllib.request
+import uuid
 from http import HTTPStatus
 from types import SimpleNamespace
 from urllib.error import HTTPError
@@ -12,15 +13,31 @@ import pytest
 from PIL import Image
 
 from geometrize_py import native, web
+from geometrize_py.errors import APIError
 from geometrize_py.images import image_data_url_bytes, image_to_data_url, open_image_bytes
 from geometrize_py.native import ImageSession, RunOptions, native_available
 from geometrize_py.resources import WorkBudget
 from geometrize_py.web import GeometrizeRequestHandler, GeometrizeServer, _estimate_session_bytes
 
 
+class _RestoreServer(GeometrizeServer):
+    post_completions: dict[str, threading.Event]
+
+
+class _RestoreHandler(GeometrizeRequestHandler):
+    def do_POST(self) -> None:
+        try:
+            super().do_POST()
+        finally:
+            request_id = self.headers.get("X-Test-Request-ID")
+            if request_id:
+                self.server.post_completions[request_id].set()
+
+
 @pytest.fixture
 def restore_server():
-    server = GeometrizeServer(("127.0.0.1", 0), GeometrizeRequestHandler)
+    server = _RestoreServer(("127.0.0.1", 0), _RestoreHandler)
+    server.post_completions = {}
     thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
     thread.start()
     try:
@@ -31,13 +48,21 @@ def restore_server():
         thread.join(5)
 
 
-def _post(server, path: str, payload: dict) -> dict:
+def _post(server, path: str, payload: dict, *, stream: bool = False) -> dict | list[dict]:
+    request_id = uuid.uuid4().hex
+    completion = threading.Event()
+    server.post_completions[request_id] = completion
     request = urllib.request.Request(
         f"http://127.0.0.1:{server.server_port}{path}",
-        data=json.dumps(payload).encode("utf-8"), headers={"Content-Type": "application/json"}, method="POST",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json", "X-Test-Request-ID": request_id}, method="POST",
     )
-    with urllib.request.urlopen(request, timeout=5) as response:
-        return json.load(response)
+    try:
+        with urllib.request.urlopen(request, timeout=5) as response:
+            return [json.loads(line) for line in response] if stream else json.load(response)
+    finally:
+        assert completion.wait(5), "Server did not finish releasing request admission"
+        server.post_completions.pop(request_id)
 
 
 def _payload() -> dict:
@@ -81,14 +106,11 @@ def test_restore_is_confirmed_native_prefix_then_continues_as_a_fresh_experiment
     assert original.shapes == original_shapes
     assert original.result().image.tobytes() == prefix_pixels[-1]
     assert server.active_runs == {}
-    request = urllib.request.Request(
-        f"http://127.0.0.1:{server.server_port}/api/run/stream",
-        data=json.dumps({"session_id": session_id, "options": {**payload["options"], "steps": 1,
-                                                              "shape_count": 8, "mutations": 8}}).encode(),
-        headers={"Content-Type": "application/json"}, method="POST",
+    events = _post(
+        server, "/api/run/stream",
+        {"session_id": session_id, "options": {**payload["options"], "steps": 1, "shape_count": 8, "mutations": 8}},
+        stream=True,
     )
-    with urllib.request.urlopen(request, timeout=5) as response:
-        events = [json.loads(line) for line in response]
     assert events[0]["event"] == "start"
     assert events[0]["attempts"] == 0
     assert events[0]["restored_shape_count"] == 1
@@ -280,3 +302,84 @@ def test_cached_session_budget_counts_retained_polyline_vertices(restore_server)
     restore_server.store_session("long", long)
     assert restore_server.get_session("long") is None
     assert restore_server._stored_session_bytes == 0
+
+
+@pytest.mark.skipif(not native_available(), reason="native backend is not built")
+@pytest.mark.parametrize("capacity", ["count", "bytes"])
+def test_restore_rejects_full_active_cache_without_mutating_existing_sessions(restore_server, capacity) -> None:
+    server = restore_server
+    active = ImageSession.from_image(Image.new("RGBA", (32, 24), "blue"), RunOptions())
+    server.activate_session("active", active, "running")
+    if capacity == "count":
+        server.max_sessions = 1
+    else:
+        idle = ImageSession.from_image(Image.new("RGBA", (2, 2), "red"), RunOptions())
+        server.store_session("idle", idle)
+        # The incoming empty scene fits by itself, and the current active+idle
+        # cache fits. Active+incoming cannot fit even if idle is evicted.
+        server.max_session_bytes = 2 * _estimate_session_bytes(active) - 1
+    original_ids = list(server.sessions)
+    original_bytes = server._stored_session_bytes
+    with pytest.raises(HTTPError) as error:
+        _post(server, "/api/restore", _payload())
+    assert error.value.code == HTTPStatus.TOO_MANY_REQUESTS
+    assert json.load(error.value)["code"] == "session_capacity"
+    assert list(server.sessions) == original_ids
+    assert server._stored_session_bytes == original_bytes
+    assert server.get_session("active") is active
+    assert active.result().image.getpixel((0, 0)) == (0, 0, 255, 255)
+    assert server.active_runs == {"active": "running"}
+    assert server.work_budget.usage() == (0, 0)
+    # Capacity recovery must also recover the request/render reservations.
+    server.max_sessions = 3
+    server.max_session_bytes *= 2
+    restored = _post(server, "/api/restore", _payload())
+    assert server.get_session(restored["session_id"]) is not None
+
+
+@pytest.mark.skipif(not native_available(), reason="native backend is not built")
+@pytest.mark.parametrize("capacity", ["count", "bytes"])
+def test_restore_retains_new_session_by_evicting_idle_victim_and_can_continue(restore_server, capacity) -> None:
+    server = restore_server
+    active = ImageSession.from_image(Image.new("RGBA", (32, 24), "blue"), RunOptions())
+    idle = ImageSession.from_image(Image.new("RGBA", (32, 24), "red"), RunOptions())
+    server.activate_session("active", active, "running")
+    server.store_session("idle", idle)
+    if capacity == "count":
+        server.max_sessions = 2
+    else:
+        server.max_session_bytes = 2 * _estimate_session_bytes(active) + 8192
+    restored = _post(server, "/api/restore", _payload())
+    session_id = restored["session_id"]
+    assert list(server.sessions) == ["active", session_id]
+    assert server.get_session("active") is active
+    assert server.get_session("idle") is None
+    assert server.get_session(session_id) is not None
+    assert server._stored_session_bytes <= server.max_session_bytes
+    events = _post(
+        server, "/api/run/stream",
+        {"session_id": session_id, "options": {"steps": 1, "max_threads": 1, "shape_types": ["rectangle"],
+                                              "shape_count": 8, "mutations": 8}},
+        stream=True,
+    )
+    assert events[0]["event"] == "start"
+    assert events[0]["session_id"] == session_id
+    assert events[-1]["event"] == "complete"
+    assert events[-1]["attempts"] >= 1
+    assert not any(event["event"] == "error" for event in events)
+    assert server.get_session(session_id) is not None
+    assert server.active_runs == {"active": "running"}
+    assert server.work_budget.usage() == (0, 0)
+
+
+def test_retained_cache_insertion_rejects_oversized_replacement_atomically(restore_server) -> None:
+    server = restore_server
+    previous = SimpleNamespace(width=32, height=24, shapes=[])
+    larger = SimpleNamespace(width=64, height=48, shapes=[])
+    server.store_session("previous", previous)
+    server.max_session_bytes = _estimate_session_bytes(previous)
+    original_bytes = server._stored_session_bytes
+    with pytest.raises(APIError, match="saved session cache"):
+        server.store_session("previous", larger, require_retention=True)
+    assert server.get_session("previous") is previous
+    assert server._stored_session_bytes == original_bytes
