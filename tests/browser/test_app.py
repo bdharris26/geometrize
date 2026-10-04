@@ -83,7 +83,7 @@ def test_sample_continue_and_project_round_trip(server_url: str, tmp_path: Path)
 
         project = json.loads(project_path.read_text(encoding="utf-8"))
         assert project["format"] == "geometrize-project"
-        assert project["version"] == 2
+        assert project["version"] == 3
         assert project["options"]["max_size"] == 128
         assert project["options"]["export_size"] == 256
         assert project["options"]["alpha"] == 1

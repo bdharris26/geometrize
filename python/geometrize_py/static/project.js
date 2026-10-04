@@ -3,6 +3,7 @@
 import { validateFocus } from "./focus.js";
 import { validateHistory } from "./history.js";
 import { copyPalette, validatePalette } from "./palette.js";
+import { copySource, copyRgb, validateSource, validateRgb } from "./source.js";
 
 function object(value, label) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
@@ -133,7 +134,9 @@ function options(raw, contract) {
     return type;
   }))];
   const result = { shape_types: types, focus: validateFocus(input.focus, contract.focus, "Project options focus"),
-    palette: validatePalette(input.palette, contract.palette, "Project options palette") };
+    palette: validatePalette(input.palette, contract.palette, "Project options palette"),
+    source: validateSource(input.source, contract.source, "Project options source"),
+    background: validateRgb(input.background, "Project options background") };
   for (const key of ["steps", "alpha", "seed", "shape_count", "mutations", "max_size", "export_size", "max_threads", "stagnation_limit"]) {
     const bounds = contract.limits[key];
     const value = input[key] ?? (key === "export_size" ? input.max_size : contract.defaults[key]);
@@ -172,6 +175,8 @@ function batches(raw, contract) {
       if (key in batch) result[key] = validateFocus(batch[key], contract.focus, `Project batch ${position + 1} ${key}`);
     }
     if ("palette" in batch) result.palette = validatePalette(batch.palette, contract.palette, `Project batch ${position + 1} palette`);
+    if ("source" in batch) result.source = validateSource(batch.source, contract.source, `Project batch ${position + 1} source`);
+    if ("background" in batch) result.background = validateRgb(batch.background, `Project batch ${position + 1} background`);
     return result;
   });
 }
@@ -204,6 +209,9 @@ function scene(rawResult, rawTelemetry, contract) {
   const renderHeight = optionalDimension(result.render_height, "render height", contract);
   const longest = Math.max(renderWidth || width, renderHeight || height);
   const geometryLimit = longest ? contract.project.max_geometry_factor * longest : contract.project.max_coordinate;
+  if (result.target_digest !== undefined && (typeof result.target_digest !== "string" || !/^[a-f0-9]{64}$/i.test(result.target_digest))) {
+    throw new Error("Project target digest must be 64 hexadecimal characters");
+  }
   return {
     result: {
       preview_data_url: result.preview_data_url == null ? "" : rasterDataUrl(result.preview_data_url, "result preview", contract),
@@ -213,6 +221,7 @@ function scene(rawResult, rawTelemetry, contract) {
       render_height: renderHeight,
       background: result.background == null ? null : color(result.background, "result background"),
       restored_shape_count: integer(result.restored_shape_count ?? 0, 0, result.shapes.length, "retained shape count"),
+      ...(result.target_digest !== undefined ? { target_digest: result.target_digest.toLowerCase() } : {}),
       shapes: result.shapes.map((item, index) => shape(item, index, contract, geometryLimit))
     },
     telemetry: {
@@ -248,7 +257,8 @@ function history(raw, root, contract) {
     }
     const result = active ? root.result : object(branch.result, "experiment result");
     shapeBudgets(result.shapes, contract);
-    return { ...branch, result };
+    const validatedOptions = options(branch.options, contract);
+    return { ...branch, result, options: active ? root.options : validatedOptions };
   });
   const state = validateHistory({ active_branch: input.active_branch, view_shape_count: input.view_shape_count, branches }, contract.project);
   state.branches = state.branches.map(branch => ({
@@ -260,7 +270,8 @@ function history(raw, root, contract) {
   // The top-level options are authoritative; the active branch is an alias.
   const active = state.branches.find(branch => branch.id === state.active_branch);
   active.options = { ...root.options, shape_types: [...root.options.shape_types],
-    focus: root.options.focus ? { ...root.options.focus } : null, palette: copyPalette(root.options.palette) };
+    focus: root.options.focus ? { ...root.options.focus } : null, palette: copyPalette(root.options.palette),
+    source: copySource(root.options.source), background: copyRgb(root.options.background) };
   return state;
 }
 
@@ -268,7 +279,7 @@ export function validateProject(raw, contract) {
   if (Array.isArray(raw)) throw new Error("This is a Shapes JSON export, not a Geometrize project");
   const project = object(raw, "project");
   if (project.format !== contract.project.format) throw new Error("This JSON file is not a Geometrize project");
-  if (project.version !== 1 && project.version !== contract.project.version) {
+  if (![1, 2, 3].includes(project.version)) {
     throw new Error(`Project version ${String(project.version)} is not supported`);
   }
   if (project.version === 1 && project.history != null) throw new Error("Version 1 projects cannot contain experiments");
@@ -285,7 +296,7 @@ export function validateProject(raw, contract) {
   };
 }
 
-export async function openProjectFile(file, contract) {
+export async function openProjectFile(file, contract, { decodeSource = true } = {}) {
   if (file.size > contract.project.max_bytes) throw new Error("Project files must be 64 MB or smaller");
   let raw;
   try {
@@ -295,7 +306,7 @@ export async function openProjectFile(file, contract) {
     throw error;
   }
   const project = validateProject(raw, contract);
-  await decodeImage(project.source.data_url, "Project source image", contract);
+  if (decodeSource) await decodeImage(project.source.data_url, "Project source image", contract);
   if (project.result.preview_data_url) await decodeImage(project.result.preview_data_url, "Project result preview", contract);
   for (const branch of project.history.branches) {
     if (branch.id !== project.history.active_branch && branch.result.preview_data_url) {
@@ -303,4 +314,16 @@ export async function openProjectFile(file, contract) {
     }
   }
   return project;
+}
+
+export function projectContent(project, maxBytes) {
+  let content = JSON.stringify(project, null, 2);
+  if (new Blob([content]).size <= maxBytes) return { content, omitted: false };
+  // Geometry is authoritative. Legacy preview-only scenes still need their image.
+  const trim = result => result.background && (result.render_width || result.width) ? { ...result, preview_data_url: null } : result;
+  const lean = { ...project, result: trim(project.result), history: { ...project.history,
+    branches: project.history.branches.map(branch => branch.result ? { ...branch, result: trim(branch.result) } : branch) } };
+  content = JSON.stringify(lean, null, 2);
+  if (new Blob([content]).size > maxBytes) throw new Error("Project exceeds 64 MB after omitting generated previews; use a smaller source or remove an inactive experiment");
+  return { content, omitted: true };
 }

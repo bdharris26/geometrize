@@ -349,7 +349,7 @@ def test_session_polyline_point_cap_stops_before_an_oversized_accepted_shape(mon
 
 def test_history_contract_publishes_v2_limits_and_honest_restore_semantics() -> None:
     contract = app_contract()
-    assert contract["project"]["version"] == 2
+    assert contract["project"]["version"] == 3
     assert contract["project"]["max_branches"] == 32
     assert contract["project"]["max_history_shapes"] == 200000
     assert contract["project"]["max_history_points"] == 1000000
