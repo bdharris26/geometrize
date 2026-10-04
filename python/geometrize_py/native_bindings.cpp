@@ -6,6 +6,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <pybind11/pybind11.h>
@@ -21,6 +22,7 @@
 #include "geometrize/shape/shapetypes.h"
 #include "geometrize/shaperesult.h"
 #include "native_focus.h"
+#include "native_palette.h"
 #include "native_replay.h"
 
 namespace py = pybind11;
@@ -230,6 +232,7 @@ public:
         m_runner{std::make_unique<geometrize::ImageRunner>(m_target)},
         m_options{runnerOptionsFromDict(options)},
         m_focus{focusFromDict(options)},
+        m_palette{geometrize_py::paletteFromDict(options)},
         m_background{m_runner->getCurrent().getPixel(0, 0)},
         m_initialScore{geometrize::core::differenceFull(m_target, m_runner->getCurrent())},
         m_score{m_initialScore},
@@ -241,22 +244,64 @@ public:
         if(!options.empty()) {
             const auto nextOptions{runnerOptionsFromDict(options)};
             const auto nextFocus{focusFromDict(options)};
+            const auto nextPalette{geometrize_py::paletteFromDict(options)};
             m_options = nextOptions;
             m_focus = nextFocus;
+            m_palette = nextPalette;
         }
 
         std::vector<geometrize::ShapeResult> stepShapes;
         {
             py::gil_scoped_release release;
-            if(m_focus && m_focus->strength > 0.0) {
-                stepShapes = m_runner->step(m_options,
+            auto options{m_options};
+            options.seed += m_rngBaseOffset;
+            if(m_palette && m_palette->strength > 0.0) {
+                if(!m_exactError) {
+                    m_exactError = geometrize_py::paletteFullError(m_target, m_runner->getCurrent());
+                    const auto actualScore{geometrize_py::paletteScore(*m_exactError, m_target)};
+                    if(m_score != actualScore) {
+                        // Returning from ordinary fitting may carry rounded or
+                        // overlapping-mask partial scores. Correct the baseline
+                        // once without changing the next worker's random seed.
+                        m_runner = std::make_unique<geometrize::ImageRunner>(m_target, m_runner->getCurrent());
+                        m_rngBaseOffset = m_rngOffset;
+                        options.seed = m_options.seed + m_rngBaseOffset;
+                    }
+                    m_score = actualScore;
+                }
+                std::function<std::shared_ptr<geometrize::Shape>()> creator;
+                if(m_focus && m_focus->strength > 0.0) {
+                    creator = geometrize_py::focusedShapeCreator(m_options.shapeTypes, m_width, m_height, *m_focus);
+                } else if(m_width == 1 || m_height == 1) {
+                    creator = geometrize_py::safeShapeCreator(m_options.shapeTypes, m_width, m_height);
+                }
+                auto result{geometrize_py::paletteStep(*m_runner, options, *m_palette, creator, *m_exactError)};
+                m_rngOffset += effectiveWorkers();
+                if(result.callbackError) {
+                    std::rethrow_exception(result.callbackError);
+                }
+                if(result.replacement) {
+                    m_runner = std::move(result.replacement);
+                    m_rngBaseOffset = m_rngOffset;
+                }
+                if(!result.shapes.empty()) {
+                    *m_exactError -= static_cast<std::uint64_t>(-result.delta);
+                }
+                m_score = geometrize_py::paletteScore(*m_exactError, m_target);
+                stepShapes = std::move(result.shapes);
+            } else if(m_focus && m_focus->strength > 0.0) {
+                stepShapes = m_runner->step(options,
                     geometrize_py::focusedShapeCreator(m_options.shapeTypes, m_width, m_height, *m_focus));
             } else if(m_width == 1 || m_height == 1) {
-                stepShapes = m_runner->step(m_options,
+                stepShapes = m_runner->step(options,
                     geometrize_py::safeShapeCreator(m_options.shapeTypes, m_width, m_height));
             } else {
                 // Preserve the original factory and RNG path when disabled.
-                stepShapes = m_runner->step(m_options);
+                stepShapes = m_runner->step(options);
+            }
+            if(!m_palette || m_palette->strength == 0.0) {
+                m_rngOffset += effectiveWorkers();
+                m_exactError.reset();
             }
         }
 
@@ -349,6 +394,12 @@ public:
     }
 
 private:
+    std::uint32_t effectiveWorkers() const
+    {
+        const auto hardware{std::thread::hardware_concurrency()};
+        return m_options.maxThreads ? m_options.maxThreads : (hardware ? hardware : 4U);
+    }
+
     static std::vector<std::uint8_t> bytesToPixels(const int width, const int height, const py::bytes& rgba)
     {
         if(width <= 0 || height <= 0) {
@@ -371,6 +422,12 @@ private:
     std::unique_ptr<geometrize::ImageRunner> m_runner;
     geometrize::ImageRunnerOptions m_options;
     std::optional<geometrize_py::Focus> m_focus;
+    std::optional<geometrize_py::Palette> m_palette;
+    std::optional<std::uint64_t> m_exactError;
+    // Mirrors the upstream modulo-uint32 worker offset across rare score
+    // repairs. A fresh replay/session starts all three offsets from zero.
+    std::uint32_t m_rngOffset{0};
+    std::uint32_t m_rngBaseOffset{0};
     geometrize::rgba m_background;
     double m_initialScore;
     double m_score;
@@ -425,6 +482,7 @@ PYBIND11_MODULE(_native, module)
 {
     module.doc() = "Native bindings for the Geometrize image runner.";
     module.def("is_available", []() { return true; });
+    module.attr("palette_api_version") = 1;
     module.def("run_rgba", &runRgba, py::arg("width"), py::arg("height"), py::arg("rgba"), py::arg("options"));
     module.def("replay_memory", [](const py::handle rawWidth, const py::handle rawHeight,
         const py::handle background, const py::handle shapes, const py::handle rawMaxWork) {

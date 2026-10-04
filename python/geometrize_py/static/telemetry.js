@@ -1,5 +1,7 @@
 "use strict";
 
+import { copyPalette, paletteLabel } from "./palette.js";
+
 const HISTORY_PAGE_SIZE = 50;
 
 function fixed(value) {
@@ -136,6 +138,7 @@ export class Telemetry {
     for (const key of ["focus", "initial_focus"]) {
       if (key in summary) batch[key] = summary[key] ? { ...summary[key] } : null;
     }
+    if ("palette" in summary) batch.palette = copyPalette(summary.palette);
     const last = this.batches.at(-1);
     const previous = !last || last.index < batch.index ? -1 : last.index === batch.index ? this.batches.length - 1 :
       this.batches.findIndex((item) => item.index === batch.index);
@@ -238,6 +241,7 @@ export class Telemetry {
       const state = document.createElement("span");
       chip.className = "batch-chip";
       chip.title = `${batch.shapeTypes.map((type) => this.shapeLabels[type] || type).join(", ")}; ${batch.candidates} candidates, ${batch.mutations} mutations, alpha ${batch.alpha}, seed ${batch.seed}, ${batch.effective_threads || "auto"} workers`;
+      if ("palette" in batch) chip.title += `; ${paletteLabel(batch.palette)}`;
       label.textContent = `Batch ${batch.index}`;
       added.textContent = `+${batch.added}`;
       state.textContent = batch.state;

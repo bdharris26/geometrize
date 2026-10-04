@@ -24,6 +24,7 @@ from urllib.parse import unquote, urlsplit
 from .contracts import (
     MAX_REQUEST_BYTES,
     OPTION_LIMITS,
+    PALETTE_DEFAULTS,
     PROJECT_MAX_SHAPES,
     PROJECT_MAX_TOTAL_POINTS,
     RESTORE_MAX_WORK,
@@ -41,6 +42,7 @@ from .native import (
     normalize_restore_count,
     require_restore_native,
 )
+from .palette import extract_palette, normalize_max_colors, palette_fitting_memory_bytes, palette_memory_bytes
 from .render import export_dimensions
 from .resources import (
     DEFAULT_ACTIVE_MEMORY_BYTES,
@@ -282,7 +284,8 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         path = urlsplit(self.path).path
         action = SESSION_ACTION.fullmatch(path)
-        if path not in {"/api/run", "/api/run/stream", "/api/export", "/api/restore"} and action is None:
+        routes = {"/api/run", "/api/run/stream", "/api/export", "/api/restore", "/api/palette"}
+        if path not in routes and action is None:
             self.send_error(HTTPStatus.NOT_FOUND)
             return
         self._request_lease: ResourceLease | None = None
@@ -337,6 +340,8 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
                 self._export(payload)
             elif path == "/api/restore":
                 self._restore(payload)
+            elif path == "/api/palette":
+                self._extract_palette(payload)
             elif path == "/api/run/stream":
                 self._run_stream(payload)
             else:
@@ -432,6 +437,7 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
                         "revision": session.revision,
                         "effective_threads": options.max_threads,
                         "focus": options.focus.to_dict() if options.focus is not None else None,
+                        "palette": options.palette.to_dict() if options.palette is not None else None,
                     }
                 )
                 with closing(session.run_reserved_batch(options)) as events:
@@ -592,6 +598,28 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
         finally:
             self.geometrize_server.work_budget.release(lease)
 
+    def _extract_palette(self, payload: dict[str, Any]) -> None:
+        if set(payload) - {"image", "max_colors"}:
+            raise APIError("invalid_request", "Palette extraction only accepts image and max_colors")
+        try:
+            max_colors = normalize_max_colors(payload.get("max_colors", PALETTE_DEFAULTS["max_colors"]))
+        except ValueError as exc:
+            raise APIError("invalid_options", str(exc)) from exc
+        try:
+            raw = image_data_url_bytes(_required_text(payload, "image"))
+            width, height = image_bytes_size(raw)
+        except (ValueError, OSError) as exc:
+            raise APIError("invalid_image", str(exc)) from exc
+        lease = self._reserve_work(1, palette_memory_bytes(width, height) + len(raw) * 2)
+        try:
+            try:
+                result = extract_palette(open_image_bytes(raw), max_colors)
+            except (ValueError, OSError) as exc:
+                raise APIError("invalid_image", str(exc)) from exc
+            self._send_json(result)
+        finally:
+            self.geometrize_server.work_budget.release(lease)
+
     def _reserve_fit(
         self,
         options: RunOptions,
@@ -603,6 +631,8 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
         server = self.geometrize_server
         workers = min(options.max_threads or server.default_workers, server.work_budget.workers)
         memory = fitting_memory_bytes(width, height, workers) + extra_memory
+        if options.palette is not None and options.palette.strength > 0:
+            memory += palette_fitting_memory_bytes(width, height, workers)
         return replace(options, max_threads=workers), self._reserve_work(workers, memory)
 
     def _reserve_work(self, workers: int, memory: int) -> ResourceLease:
@@ -639,6 +669,7 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
             "stop_reason": session.stop_reason,
             "batch_summary": session.batch_summary,
             "focus": focus.to_dict() if focus is not None else None,
+            "palette": session.palette.to_dict() if session.palette is not None else None,
         }
         if include_preview:
             payload["preview"] = image_to_data_url(session.result().image)
@@ -748,7 +779,7 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
     def _admit_json_body(self, body: bytes) -> None:
         if self._request_lease is None:
             return
-        image_routes = {"/api/run", "/api/run/stream", "/api/restore"}
+        image_routes = {"/api/run", "/api/run/stream", "/api/restore", "/api/palette"}
         image_span = IMAGE_LITERAL.search(body) if urlsplit(self.path).path in image_routes else None
         self._request_image_bytes = image_span.end(1) - image_span.start(1) if image_span is not None else 0
         self._resize_request_memory(
@@ -878,7 +909,7 @@ def _scene_from_snapshot(snapshot: dict[str, Any]) -> RenderScene:
 
 
 def _request_memory(path: str, body_bytes: int, image_bytes: int, *, parsed: bool) -> int:
-    if path in {"/api/run", "/api/run/stream", "/api/restore"}:
+    if path in {"/api/run", "/api/run/stream", "/api/restore", "/api/palette"}:
         # Encoded image data is a large string with predictable expansion;
         # other JSON can contain deeply nested Python containers and needs a
         # higher allowance before json.loads constructs them.

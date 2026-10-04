@@ -29,6 +29,9 @@ def server_url() -> Iterator[str]:
 
 
 def _module(page: Page, filename: str) -> None:
+    if page.url.startswith("http"):
+        page.evaluate("async filename => Object.assign(window, await import('/static/' + filename))", filename)
+        return
     page.evaluate("""async source => {
       const url = URL.createObjectURL(new Blob([source], {type: 'text/javascript'}));
       try { Object.assign(window, await import(url)); }

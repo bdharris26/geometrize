@@ -2,6 +2,7 @@
 
 import { validateFocus } from "./focus.js";
 import { validateHistory } from "./history.js";
+import { copyPalette, validatePalette } from "./palette.js";
 
 function object(value, label) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
@@ -131,7 +132,8 @@ function options(raw, contract) {
     if (!known.has(type)) throw new Error(`Unsupported option shape type: ${String(type)}`);
     return type;
   }))];
-  const result = { shape_types: types, focus: validateFocus(input.focus, contract.focus, "Project options focus") };
+  const result = { shape_types: types, focus: validateFocus(input.focus, contract.focus, "Project options focus"),
+    palette: validatePalette(input.palette, contract.palette, "Project options palette") };
   for (const key of ["steps", "alpha", "seed", "shape_count", "mutations", "max_size", "export_size", "max_threads", "stagnation_limit"]) {
     const bounds = contract.limits[key];
     const value = input[key] ?? (key === "export_size" ? input.max_size : contract.defaults[key]);
@@ -169,6 +171,7 @@ function batches(raw, contract) {
     for (const key of ["focus", "initial_focus"]) {
       if (key in batch) result[key] = validateFocus(batch[key], contract.focus, `Project batch ${position + 1} ${key}`);
     }
+    if ("palette" in batch) result.palette = validatePalette(batch.palette, contract.palette, `Project batch ${position + 1} palette`);
     return result;
   });
 }
@@ -254,6 +257,10 @@ function history(raw, root, contract) {
     ...(branch.id === input.active_branch ? { result: root.result, telemetry: root.telemetry } :
       scene(branch.result, branch.telemetry, contract))
   }));
+  // The top-level options are authoritative; the active branch is an alias.
+  const active = state.branches.find(branch => branch.id === state.active_branch);
+  active.options = { ...root.options, shape_types: [...root.options.shape_types],
+    focus: root.options.focus ? { ...root.options.focus } : null, palette: copyPalette(root.options.palette) };
   return state;
 }
 
