@@ -20,6 +20,7 @@ from PIL import Image, ImageDraw
 
 from geometrize_py.contracts import MAX_REQUEST_BYTES
 from geometrize_py.images import image_to_data_url
+from geometrize_py.json_memory import JSON_EXPANSION_FACTOR
 from geometrize_py.native import Focus, ImageSession, RunOptions, native_available
 from geometrize_py.web import GeometrizeRequestHandler, GeometrizeServer, _estimate_session_bytes, _safe_static_path
 
@@ -112,6 +113,23 @@ def test_run_endpoint_rejects_non_object_json(server: GeometrizeServer) -> None:
     payload = json.loads(error.value.read().decode("utf-8"))
     assert payload == {"error": "Expected a JSON object", "code": "invalid_request"}
     assert server.work_budget.usage() == (0, 0)
+
+
+@pytest.mark.parametrize("path", ["/api/run", "/api/run/stream", "/api/restore"])
+@pytest.mark.parametrize("options", [{"steps": 0}, {"max_size": 6}, {"alpha": True}, {"seed": "42"},
+                                     {"shape_count": 1.5}, {"unexpected": 1}, []])
+def test_invalid_options_are_rejected_before_image_or_native_allocation(
+    server: GeometrizeServer, monkeypatch, path: str, options,
+) -> None:
+    from geometrize_py import web
+
+    monkeypatch.setattr(web, "image_data_url_bytes", lambda *_args: pytest.fail("invalid options decoded an image"))
+    monkeypatch.setattr(web, "require_restore_native", lambda: pytest.fail("invalid options allocated native replay"))
+    monkeypatch.setattr(ImageSession, "from_image", lambda *_args: pytest.fail("invalid options allocated fitting"))
+    with pytest.raises(HTTPError) as error:
+        _post(server, path, {"image": "data:image/png;base64,YWJj", "options": options, "result": {}})
+    assert error.value.code == HTTPStatus.BAD_REQUEST
+    assert json.load(error.value)["code"] == "invalid_options" and server.work_budget.usage() == (0, 0)
 
 
 def test_session_cache_expires_only_after_idle_deadline(server: GeometrizeServer) -> None:
@@ -298,7 +316,7 @@ def test_run_endpoint_returns_rendered_image(server: GeometrizeServer) -> None:
                 "shape_types": ["ellipse"],
                 "shape_count": 5,
                 "mutations": 5,
-                "max_size": 6,
+                "max_size": 32,
                 "export_size": 64,
             },
         }
@@ -337,7 +355,7 @@ def test_stream_endpoint_returns_progress_events(server: GeometrizeServer) -> No
                 "shape_types": ["ellipse"],
                 "shape_count": 5,
                 "mutations": 5,
-                "max_size": 6,
+                "max_size": 32,
                 "export_size": 64,
             },
         },
@@ -682,7 +700,7 @@ def test_wrapped_image_prepares_under_string_budget_with_original_bytes(
     encoded = separator.join(encoded[i:i + 17] for i in range(0, len(encoded), 17))
     body = json.dumps({"image": header + encoded}).encode()
     server.work_budget = WorkBudget(1, 1536 * 1024)
-    assert len(body) * web.JSON_EXPANSION_FACTOR > server.work_budget.memory_bytes
+    assert len(body) * JSON_EXPANSION_FACTOR > server.work_budget.memory_bytes
     decoded = []
     actual_open = web.open_image_bytes
 

@@ -35,6 +35,7 @@ from .errors import APIError
 from .exporting import ExportArtifact, ExportCache, RenderScene, build_export, inspect_scene, validate_scene
 from .image_probe import SourceProbe, probe_source
 from .images import fit_image, image_data_url_bytes, image_to_data_url, open_image_bytes
+from .json_memory import json_memory_bytes, json_read_memory
 from .native import (
     ImageSession,
     NativeBackendUnavailable,
@@ -69,17 +70,11 @@ MAX_FOCUS_BODY_BYTES = 4 * 1024
 REJECTED_BODY_DRAIN_BYTES = 64 * 1024
 REJECTED_BODY_DRAIN_CHUNK_BYTES = 4 * 1024
 REJECTED_BODY_DRAIN_SECONDS = 0.25
-REQUEST_MEMORY_FLOOR = 64 * 1024
-JSON_EXPANSION_FACTOR = 32
 ESTIMATED_BYTES_PER_PIXEL = 16
 ESTIMATED_SESSION_OVERHEAD_BYTES = 64 * 1024
 LOGGER = logging.getLogger(__name__)
 SESSION_ACTION = re.compile(r"^/api/sessions/([a-zA-Z0-9_-]+)/(pause|focus|snapshot)$")
-# Estimate scalar-string memory, including JSON escapes for wrapped base64.
-# JSON and image decoding still validate the value; raw quotes end the span.
-IMAGE_LITERAL = re.compile(
-    rb'"image"\s*:\s*"((?i:data:(?:image/[^"\\]{0,128}|application/octet-stream);base64,)[A-Za-z0-9+/=\\]*)"'
-)
+IMAGE_ROUTES = {"/api/run", "/api/run/stream", "/api/restore", "/api/palette", "/api/source/prepare"}
 
 
 @dataclass
@@ -297,7 +292,6 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
             self.send_error(HTTPStatus.NOT_FOUND)
             return
         self._request_lease: ResourceLease | None = None
-        self._request_image_bytes = 0
         self._request_body_memory = 0
         has_slot = False
         length: int | None = None
@@ -319,12 +313,11 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
                             HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
                         )
                 else:
-                    self._request_lease = self._reserve_work(0, _request_memory(path, length, 0, inspected=False))
+                    self._request_lease = self._reserve_work(
+                        0, json_read_memory(length, image_strings=path in IMAGE_ROUTES)
+                    )
                 body_read_started = True
                 payload = self._read_json()
-                if self._request_lease is not None:
-                    self._request_body_memory = _request_memory(path, length, self._request_image_bytes, inspected=True)
-                    self._resize_request_memory(self._request_body_memory)
             except TimeoutError:
                 self.close_connection = True
                 self._send_error(APIError("request_timeout", "Request body timed out", HTTPStatus.REQUEST_TIMEOUT))
@@ -836,21 +829,9 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
     def _admit_json_body(self, body: bytes) -> None:
         if self._request_lease is None:
             return
-        image_routes = {"/api/run", "/api/run/stream", "/api/restore", "/api/palette", "/api/source/prepare"}
         path = urlsplit(self.path).path
-        image_span = IMAGE_LITERAL.search(body) if path in image_routes and body.isascii() else None
-        self._request_image_bytes = 0
-        if image_span is not None:
-            start, end = image_span.span(1)
-            # Unicode can widen the entire decoded JSON text or image scalar.
-            # An escaped quote can also truncate this match before such a suffix.
-            if not body.endswith(b"\\", start, end) and body.find(b"\\u", start, end) == -1:
-                self._request_image_bytes = end - start
-        # The scan is complete: unmatched bytes need the full JSON allowance
-        # before json.loads allocates strings or containers.
-        self._resize_request_memory(
-            _request_memory(path, len(body), self._request_image_bytes, inspected=True)
-        )
+        self._request_body_memory = json_memory_bytes(body, image_fields=(b"image",) if path in IMAGE_ROUTES else ())
+        self._resize_request_memory(self._request_body_memory)
 
     def _charge_request_scene(self, raw: RenderScene | dict[str, Any]) -> None:
         if self._request_lease is not None:
@@ -980,20 +961,6 @@ def _scene_from_snapshot(snapshot: dict[str, Any]) -> RenderScene:
         snapshot["revision"],
         snapshot.get("target_digest"),
     )
-
-
-def _request_memory(path: str, body_bytes: int, image_bytes: int, *, inspected: bool) -> int:
-    if path in {"/api/run", "/api/run/stream", "/api/restore", "/api/palette", "/api/source/prepare"}:
-        # Encoded image data is a large string with predictable expansion;
-        # other JSON can contain deeply nested Python containers and needs a
-        # higher allowance before json.loads constructs them.
-        if image_bytes:
-            return max(
-                REQUEST_MEMORY_FLOOR, 4 * image_bytes + JSON_EXPANSION_FACTOR * (body_bytes - image_bytes)
-            )
-        if not inspected:
-            return max(REQUEST_MEMORY_FLOOR, 4 * body_bytes)
-    return max(REQUEST_MEMORY_FLOOR, JSON_EXPANSION_FACTOR * body_bytes)
 
 
 def _reject_json_constant(value: str) -> None:

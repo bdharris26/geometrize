@@ -9,8 +9,8 @@ from pathlib import Path
 from typing import Any
 
 from .contracts import OPTION_LIMITS, PALETTE_DEFAULTS, PALETTE_MAX_COLORS
-from .native import Focus, RunOptions
-from .palette import Palette, normalize_max_colors
+from .native import Focus, RunOptions, normalize_focus
+from .palette import Palette, normalize_max_colors, normalize_palette
 from .resources import DEFAULT_ACTIVE_MEMORY_BYTES, DEFAULT_WORKER_BUDGET
 
 
@@ -173,12 +173,12 @@ def validate_arguments(args: argparse.Namespace) -> None:
 
 def options_from_args(
     args: argparse.Namespace,
-    inherited: RunOptions | None = None,
+    inherited: RunOptions | dict[str, Any] | None = None,
     *,
     palette_value: Any = None,
     allow_inherited_palette: bool = False,
 ) -> RunOptions:
-    values = inherited.to_dict() if inherited is not None else {}
+    values = inherited.to_dict() if isinstance(inherited, RunOptions) else dict(inherited or {})
     fork = args.command == "project"
     for name in (*OPTION_LIMITS, "shape_types"):
         if hasattr(args, name) and not (fork and name == "steps" and args.steps == 0):
@@ -196,7 +196,7 @@ def options_from_args(
     elif any(value is not None for value in focus_flags.values()):
         if focus_flags["x"] is None or focus_flags["y"] is None:
             raise ValueError("--focus-x and --focus-y are required together when setting focus")
-        previous = inherited.focus if inherited is not None else None
+        previous = normalize_focus(values.get("focus"))
         values["focus"] = {
             key: value if value is not None else getattr(previous or Focus(0.5, 0.5), key)
             for key, value in focus_flags.items()
@@ -215,7 +215,7 @@ def options_from_args(
         file_palette = Palette(colors, file_strength)
         values["palette"] = Palette(file_palette.colors, file_palette.strength if strength is None else strength)
     elif strength is not None and not source:
-        previous = inherited.palette if inherited is not None else None
+        previous = normalize_palette(values.get("palette"))
         if previous is None and not allow_inherited_palette:
             raise ValueError("--palette-strength/--palette-mode needs colors or an inherited palette")
         if previous is not None:

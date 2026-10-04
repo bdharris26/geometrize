@@ -13,7 +13,6 @@ from .cli_options import (
     branch_id,
     experiment_name,
     nonnegative,
-    options_from_args,
     seeds,
     validate_arguments,
 )
@@ -158,10 +157,3 @@ def _doctor(args: argparse.Namespace) -> int:
             print(f"import error ({status['import_error_type']}): {status['import_error']}")
             print('Rebuild in this Python environment with: python -m pip install -e ".[dev]"')
     return 0 if status["available"] else 1
-
-
-def run_once(args: argparse.Namespace, options: RunOptions | None = None) -> int:
-    """Compatibility entrypoint; the ordinary command uses the same job path."""
-    reads, writes = cli_jobs.command_paths(args)
-    cli_jobs.preflight_paths(reads, writes)
-    return cli_jobs.run_job(args, options or options_from_args(args), reads, writes)[0]

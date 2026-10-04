@@ -6,6 +6,7 @@ import pytest
 from PIL import Image, ImageDraw
 
 from geometrize_py import cli
+from geometrize_py.cli_options import options_from_args
 from geometrize_py.native import Focus
 
 
@@ -34,24 +35,44 @@ def test_cli_accepts_8192_working_and_export_resolution() -> None:
     args = cli.build_parser().parse_args(
         ["run", "source.png", "--output", "result.png", "--max-size", "8192", "--export-size", "8192"]
     )
-    options = cli.options_from_args(args)
+    options = options_from_args(args)
     assert options.max_size == options.export_size == 8192
 
 
 def test_cli_focus_flags_have_normalized_defaults() -> None:
     parser = cli.build_parser()
     plain = parser.parse_args(["run", "source.png", "--output", "result.png"])
-    assert cli.options_from_args(plain).focus is None
+    assert options_from_args(plain).focus is None
     args = parser.parse_args(["run", "source.png", "--output", "result.png", "--focus-x", "0.75", "--focus-y", "0.25"])
-    assert cli.options_from_args(args).focus == Focus(0.75, 0.25)
-    explicit = parser.parse_args(["run", "source.png", "--output", "result.png", "--focus-x", "0.75",
-                                 "--focus-y", "0.25", "--focus-radius", "0.1", "--focus-strength", "0"])
-    assert cli.options_from_args(explicit).focus == Focus(0.75, 0.25, 0.1, 0)
+    assert options_from_args(args).focus == Focus(0.75, 0.25)
+    explicit = parser.parse_args(
+        [
+            "run",
+            "source.png",
+            "--output",
+            "result.png",
+            "--focus-x",
+            "0.75",
+            "--focus-y",
+            "0.25",
+            "--focus-radius",
+            "0.1",
+            "--focus-strength",
+            "0",
+        ]
+    )
+    assert options_from_args(explicit).focus == Focus(0.75, 0.25, 0.1, 0)
 
 
-@pytest.mark.parametrize("flags", [["--focus-x", "0.5"], ["--focus-radius", "0.2"],
-                                    ["--focus-x", "nan", "--focus-y", "0.5"],
-                                    ["--focus-x", "0.5", "--focus-y", "1.1"]])
+@pytest.mark.parametrize(
+    "flags",
+    [
+        ["--focus-x", "0.5"],
+        ["--focus-radius", "0.2"],
+        ["--focus-x", "nan", "--focus-y", "0.5"],
+        ["--focus-x", "0.5", "--focus-y", "1.1"],
+    ],
+)
 def test_cli_focus_errors_are_reported_before_reading_image(capsys, flags: list[str]) -> None:
     with pytest.raises(SystemExit) as error:
         cli.main(["run", "missing-source.png", "--output", "result.png", *flags])

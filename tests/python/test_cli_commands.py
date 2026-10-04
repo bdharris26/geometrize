@@ -136,22 +136,36 @@ def test_soft_zero_cli_preserves_seeded_pixels_and_geometry(tmp_path: Path) -> N
     assert json.loads((tmp_path / "off.json").read_text()) == json.loads((tmp_path / "soft0.json").read_text())
 
 
-def test_exact_palette_and_compatibility_run_once_honor_supplied_options(tmp_path: Path) -> None:
+def test_exact_palette_and_export_size_use_command_options(tmp_path: Path) -> None:
     source = tmp_path / "source.png"
     _image(source)
-    args = cli.build_parser().parse_args(
-        ["run", str(source), "--output", str(tmp_path / "result.png"), "--json", str(tmp_path / "shapes.json")]
+    assert (
+        cli.main(
+            [
+                "run",
+                str(source),
+                "--output",
+                str(tmp_path / "result.png"),
+                "--json",
+                str(tmp_path / "shapes.json"),
+                "--steps",
+                "1",
+                "--shape-count",
+                "8",
+                "--mutations",
+                "8",
+                "--max-threads",
+                "1",
+                "--max-size",
+                "32",
+                "--export-size",
+                "64",
+                "--palette",
+                "#000,#fff",
+            ]
+        )
+        == 0
     )
-    options = native.RunOptions(
-        steps=1,
-        shape_count=8,
-        mutations=8,
-        max_threads=1,
-        max_size=32,
-        export_size=64,
-        palette={"colors": [[0, 0, 0], [255, 255, 255]]},
-    )
-    assert cli.run_once(args, options) == 0
     shapes = json.loads((tmp_path / "shapes.json").read_text())
     assert len(shapes) == 1
     assert all(
@@ -208,7 +222,7 @@ def test_source_helpers_and_palette_file_share_selected_frame_matte_and_original
         assert saved["result"]["target_digest"] == hashlib.sha256(target.tobytes()).hexdigest()
 
 
-def test_project_inspect_and_prefix_export_are_native_free_and_use_legacy_render_grid(
+def test_project_inspect_and_prefix_export_are_native_free_and_use_saved_render_grid(
     saved: tuple[Path, Path, dict],
     tmp_path: Path,
     monkeypatch,
@@ -220,6 +234,9 @@ def test_project_inspect_and_prefix_export_are_native_free_and_use_legacy_render
     path.write_text(json.dumps(project), encoding="utf-8")
     original = path.read_bytes()
     monkeypatch.setattr(native, "_native", None)
+    from geometrize_py import project as project_api
+
+    monkeypatch.setattr(project_api, "project_branch", lambda *_args: pytest.fail("inspection must not copy geometry"))
     capsys.readouterr()
     assert cli.main(["project", "inspect", str(path), "--json"]) == 0
     report = json.loads(capsys.readouterr().out)
@@ -263,6 +280,28 @@ def test_project_inspect_and_prefix_export_are_native_free_and_use_legacy_render
         == 0
     )
     assert len(json.loads((tmp_path / "head.json").read_text())) == 2
+
+
+def test_inspection_still_validates_geometry_without_native_or_branch_copies(saved, monkeypatch, capsys) -> None:
+    _source, path, project = saved
+    project["result"]["shapes"][0]["type"] = "unsupported-shape"
+    path.write_text(json.dumps(project), encoding="utf-8")
+    monkeypatch.setattr(native, "_native", None)
+    capsys.readouterr()
+    assert cli.main(["project", "inspect", str(path), "--json"]) == 1
+    result = capsys.readouterr()
+    assert "unsupported" in result.err and result.out == ""
+
+
+@pytest.mark.parametrize("version", [1, 2])
+def test_obsolete_project_versions_fail_without_replacing_outputs(saved, tmp_path: Path, version: int) -> None:
+    _source, path, project = saved
+    project["version"] = version
+    path.write_text(json.dumps(project), encoding="utf-8")
+    output = tmp_path / "unchanged.png"
+    output.write_bytes(b"original output")
+    assert cli.main(["project", "export", str(path), "--output", str(output)]) == 1
+    assert output.read_bytes() == b"original output"
 
 
 def test_replay_only_fork_keeps_inherited_options_and_fresh_counters(
@@ -369,13 +408,11 @@ def test_fork_explicit_overrides_clear_constraints_and_accept_new_shapes(saved, 
     assert child["telemetry"]["batches"][0]["added"] == 1
 
 
-def test_legacy_empty_shape_types_require_explicit_override_before_replay(saved, tmp_path: Path) -> None:
+def test_current_project_empty_shape_selection_requires_override_before_replay(saved, tmp_path: Path) -> None:
     _source, path, project = saved
-    project["version"] = 1
-    project.pop("history")
     project["options"]["shape_types"] = []
     path.write_text(json.dumps(project), encoding="utf-8")
-    output = tmp_path / "legacy-fork.json"
+    output = tmp_path / "selected-shapes-fork.json"
     assert cli.main(["project", "fork", str(path), "--output", str(output)]) == 1
     assert not output.exists()
     assert cli.main(["project", "fork", str(path), "--output", str(output), "--shape-types", "rectangle"]) == 0

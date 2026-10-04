@@ -24,34 +24,15 @@ from .contracts import OPTION_LIMITS, PROJECT_MAX_BYTES, PROJECT_MAX_HISTORY_POI
 from .exporting import RenderScene, build_export, inspect_scene
 from .image_probe import probe_source
 from .images import image_data_url_bytes, open_image_bytes
+from .json_memory import JSON_MEMORY_FLOOR, json_memory_bytes, json_read_memory
 from .native import ImageSession, RunOptions, require_restore_native
 from .palette import extract_palette, palette_fitting_memory_bytes, palette_memory_bytes
 from .render import export_dimensions
 from .resources import WorkBudget, export_memory_bytes, fitting_memory_bytes, scene_memory_bytes, source_memory_bytes
 from .source import SourceOptions
 
-MEMORY_FLOOR = 64 * 1024
 PALETTE_FILE_BYTES = 16 * 1024
 MAX_BATCH_JOBS = 4096
-# Use a single payload class: repeated escaped-CRLF groups allocate a regex
-# state stack before admission. The span guards below reject Unicode widening
-# and a quote endpoint escaped by a trailing backslash, without copying spans.
-_IMAGE_SCALAR = re.compile(
-    rb'"(?:data_url|preview_data_url)"\s*:\s*"'
-    rb"(data:(?:image/[a-z0-9.+-]+|application/octet-stream);base64,"
-    rb'[a-z0-9+/=\\]*)"',
-    re.IGNORECASE,
-)
-
-
-def json_memory_bytes(raw: bytes) -> int:
-    scalar_bytes = 0
-    if raw.isascii():
-        for match in _IMAGE_SCALAR.finditer(raw):
-            start, end = match.span(1)
-            if raw[end - 1] != 92 and raw.find(b"\\u", start, end) < 0:
-                scalar_bytes += end - start
-    return max(MEMORY_FLOOR, scalar_bytes * 4 + (len(raw) - scalar_bytes) * 32)
 
 
 class Admission:
@@ -60,7 +41,7 @@ class Admission:
     def __init__(self, workers: int, memory_mb: int, *, retained: int = 0) -> None:
         self.budget = WorkBudget(workers, memory_mb * 1024 * 1024)
         self.retained = retained
-        self.lease = self.budget.try_reserve(0, MEMORY_FLOOR)
+        self.lease = self.budget.try_reserve(0, JSON_MEMORY_FLOOR)
         if self.lease is None:
             raise ValueError("Active memory budget is too small")
 
@@ -76,7 +57,7 @@ class Admission:
         self.budget.release(self.lease)
 
     def use(self, scratch: int, *, workers: int = 0) -> None:
-        memory = self.retained + scratch + MEMORY_FLOOR
+        memory = self.retained + scratch + JSON_MEMORY_FLOOR
         if memory > self.budget.memory_bytes:
             raise ValueError("Operation exceeds active memory budget; increase --active-memory-mb or reduce the work")
         lease = self.budget.try_resize(self.lease, memory, workers=workers)
@@ -92,11 +73,18 @@ class Admission:
         self.use(0)
         return raw
 
-    def read_json(self, path: Path, loader: Callable[[bytes], Any] = json.loads, limit: int = PROJECT_MAX_BYTES) -> Any:
+    def read_json(
+        self,
+        path: Path,
+        loader: Callable[[bytes], Any] = json.loads,
+        limit: int = PROJECT_MAX_BYTES,
+        *,
+        image_fields: tuple[bytes, ...] = (),
+    ) -> Any:
         size = _file_size(path, limit)
-        self.use(size * 4)
+        self.use(json_read_memory(size, image_strings=True))
         raw = _read_bounded(path, size)
-        memory = json_memory_bytes(raw)
+        memory = json_memory_bytes(raw, image_fields=image_fields)
         self.use(memory)
         # Admit before decode/parse; keep the allowance while the normalized
         # graph is alive, including its original source and geometry copies.
@@ -273,17 +261,12 @@ def command_paths(args: Any) -> tuple[list[tuple[str, Path]], list[tuple[str, Pa
         writes.append(("manifest", args.manifest or args.output_dir / "manifest.json"))
     else:
         reads = [("input", args.input)]
-        keys = (
-            ("output", "svg", "json", "project")
-            if args.command == "run"
-            else (
-                ("output", "svg", "json")
-                if args.command == "project" and args.project_command == "export"
-                else ("output",)
-                if args.command == "palette" or args.command == "project" and args.project_command == "fork"
-                else ()
-            )
-        )
+        if args.command == "run":
+            keys = ("output", "svg", "json", "project")
+        elif args.command == "project" and args.project_command == "export":
+            keys = ("output", "svg", "json")
+        else:
+            keys = ("output",)
         writes = [(f"{key.upper()} output", getattr(args, key)) for key in keys if getattr(args, key, None) is not None]
     palette_file = getattr(args, "palette_file", None)
     if palette_file is not None:
@@ -293,7 +276,8 @@ def command_paths(args: Any) -> tuple[list[tuple[str, Path]], list[tuple[str, Pa
 
 def execute(args: Any, reads: list[tuple[str, Path]], writes: list[tuple[str, Path]]) -> int:
     if args.command == "run":
-        return run_job(args, options_from_args(args), reads, writes)[0]
+        run_job(args, reads, writes)
+        return 0
     if args.command == "batch":
         return _batch(args, reads, writes)
     with Admission(args.workers, args.active_memory_mb) as admission:
@@ -302,7 +286,7 @@ def execute(args: Any, reads: list[tuple[str, Path]], writes: list[tuple[str, Pa
         return _source_command(args, admission, reads, writes)
 
 
-def _palette_file(args: Any, admission: Admission, inherited: RunOptions | None = None) -> RunOptions:
+def _resolve_options(args: Any, admission: Admission, inherited: dict[str, Any] | None = None) -> RunOptions:
     value = None
     if args.palette_file is not None:
         value = admission.read_json(args.palette_file, _json_loads, PALETTE_FILE_BYTES)
@@ -398,11 +382,11 @@ def _artifacts(
 
 
 def run_job(
-    args: Any, options: RunOptions, reads: list[tuple[str, Path]], writes: list[tuple[str, Path]], *, retained: int = 0
-) -> tuple[int, dict[str, Any]]:
+    args: Any, reads: list[tuple[str, Path]], writes: list[tuple[str, Path]], *, retained: int = 0
+) -> dict[str, Any]:
     started = time.monotonic()
     with Admission(args.workers, args.active_memory_mb, retained=retained) as admission:
-        options = replace(options, palette=_palette_file(args, admission, options).palette)
+        options = _resolve_options(args, admission)
         raw = admission.read_bytes(args.input)
         if args.project is not None and ((len(raw) + 2) // 3 * 4 + 4096) > PROJECT_MAX_BYTES:
             raise ValueError("Original source cannot fit in a 64 MiB project")
@@ -462,7 +446,7 @@ def run_job(
         except BaseException as exc:
             exc.committed = committed
             raise
-        return 0, summary
+        return summary
 
 
 def _batch(args: Any, reads: list[tuple[str, Path]], writes: list[tuple[str, Path]]) -> int:
@@ -510,7 +494,7 @@ def _batch(args: Any, reads: list[tuple[str, Path]], writes: list[tuple[str, Pat
                 entry["state"] = "running"
                 save_manifest()
                 try:
-                    _code, summary = run_job(job, options_from_args(job), reads, writes, retained=retained)
+                    summary = run_job(job, reads, writes, retained=retained)
                     entry.update(summary, state="complete")
                 except (OSError, ValueError, RuntimeError, SyntaxError, RecursionError) as exc:
                     failed = True
@@ -565,13 +549,7 @@ def _source_command(
 
 
 def _graph_memory(project: dict[str, Any]) -> int:
-    shapes = points = 0
-    for branch in project["history"]["branches"]:
-        result = project["result"] if branch["id"] == project["history"]["active_branch"] else branch["result"]
-        count, vertices = inspect_scene(result)
-        shapes += count
-        points += vertices
-    return scene_memory_bytes(shapes, points)
+    return scene_memory_bytes(*_graph_counts(project))
 
 
 def _project_command(
@@ -581,15 +559,14 @@ def _project_command(
         dumps_project,
         fork_project,
         loads_project,
-        project_branch,
         project_scene,
         replace_branch_snapshot,
     )
 
-    project = admission.read_json(args.input, loads_project)
+    project = admission.read_json(args.input, loads_project, image_fields=(b"data_url", b"preview_data_url"))
     graph_memory = _graph_memory(project)
-    admission.use(graph_memory * 3)
     if args.project_command == "inspect":
+        admission.use(graph_memory)
         report = {
             "version": project["version"],
             "source": {key: value for key, value in project["source"].items() if key != "data_url"},
@@ -598,16 +575,17 @@ def _project_command(
             "branches": [],
         }
         for record in project["history"]["branches"]:
-            branch = project_branch(project, record["id"])
-            scene = branch["result"]
+            active = record["id"] == project["history"]["active_branch"]
+            scene = project["result"] if active else record["result"]
+            telemetry = project["telemetry"] if active else record["telemetry"]
             report["branches"].append(
-                {key: branch[key] for key in ("id", "name", "parent_id", "fork_shape_count", "options")}
+                {key: record[key] for key in ("id", "name", "parent_id", "fork_shape_count", "options")}
                 | {
                     "shape_count": len(scene["shapes"]),
                     "restored_shape_count": scene["restored_shape_count"],
                     "width": scene["render_width"] or scene["width"],
                     "height": scene["render_height"] or scene["height"],
-                    "attempts": branch["telemetry"]["attempts"],
+                    "attempts": telemetry["attempts"],
                     "target_digest": scene.get("target_digest"),
                     "geometry_available": scene["background"] is not None
                     and bool((scene["render_width"] or scene["width"]) and (scene["render_height"] or scene["height"])),
@@ -623,18 +601,18 @@ def _project_command(
                     f"{branch['id']}: {branch['name']} · {branch['shape_count']} shapes · {branch['attempts']} attempts"
                 )
         return 0
-    branch = project_branch(project, args.branch)
-    scene = project_scene(project, branch["id"], args.at_shape)
+    admission.use(graph_memory * 3)
+    branch_id = args.branch or project["history"]["active_branch"]
+    scene = project_scene(project, branch_id, args.at_shape)
+    branch = next(record for record in project["history"]["branches"] if record["id"] == branch_id)
     if args.project_command == "export":
         export_size = args.export_size if args.export_size is not None else branch["options"]["export_size"]
         artifacts = _artifacts(args, scene, admission, export_size, held_memory=graph_memory)
         publish(artifacts, recheck=lambda: preflight_paths(reads, writes))
         print(f"wrote {args.output} with {len(scene.shapes)} shapes")
         return 0
-    inherited = RunOptions(
-        **{**branch["options"], **({"shape_types": args.shape_types} if hasattr(args, "shape_types") else {})}
-    )
-    options = _palette_file(args, admission, inherited)
+    inherited = branch["options"]
+    options = _resolve_options(args, admission, inherited)
     name = args.name if args.name is not None else _fork_name(project, branch["name"])
     admission.use(graph_memory * 4)
     child = fork_project(

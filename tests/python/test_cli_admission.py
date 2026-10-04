@@ -7,14 +7,15 @@ from pathlib import Path
 
 import pytest
 
-from geometrize_py.cli_jobs import Admission, PublicationError, json_memory_bytes, preflight_paths, publish
+from geometrize_py.cli_jobs import Admission, PublicationError, preflight_paths, publish
+from geometrize_py.json_memory import json_memory_bytes
 
 
 def test_wrapped_scalar_admission_is_linear_and_does_not_build_a_regex_stack() -> None:
     url = "DATA:IMAGE/PNG;BASE64," + "AAAA\r\n" * 150_000
     raw = json.dumps({"source": {"data_url": url}, "preview_data_url": url}).encode()
     tracemalloc.start()
-    charge = json_memory_bytes(raw)
+    charge = json_memory_bytes(raw, image_fields=(b"data_url", b"preview_data_url"))
     _current, peak = tracemalloc.get_traced_memory()
     tracemalloc.stop()
     assert len(raw) * 4 <= charge < len(raw) * 5
@@ -31,7 +32,7 @@ def test_wrapped_scalar_admission_is_linear_and_does_not_build_a_regex_stack() -
 )
 def test_unicode_and_escaped_quote_candidates_receive_generic_admission(raw: bytes) -> None:
     raw = raw.replace(b"AAAA", b"A" * 20_000)
-    assert json_memory_bytes(raw) == len(raw) * 32
+    assert json_memory_bytes(raw, image_fields=(b"data_url",)) == len(raw) * 32
 
 
 def test_json_parse_is_admitted_before_loader_and_unicode_fallback(tmp_path: Path) -> None:
