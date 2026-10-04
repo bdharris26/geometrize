@@ -161,6 +161,17 @@ class RunOptions:
             background=data.get("background"),
         )
 
+    def to_dict(self) -> dict[str, Any]:
+        """Return persisted options, retaining the requested worker setting."""
+        return {
+            **{name: getattr(self, name) for name in OPTION_LIMITS},
+            "shape_types": list(self.shape_types),
+            "focus": self.focus.to_dict() if self.focus is not None else None,
+            "palette": self.palette.to_dict() if self.palette is not None else None,
+            "source": self.source.to_dict(),
+            "background": list(self.background) if self.background is not None else None,
+        }
+
     def to_native_dict(self) -> dict[str, Any]:
         return {
             "steps": self.steps,

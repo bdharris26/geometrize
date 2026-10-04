@@ -2,195 +2,166 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
+import sys
 from pathlib import Path
 
-from .contracts import MAX_IMAGE_SIZE, MAX_WORKING_IMAGE_SIZE
-from .images import image_to_png_bytes, open_image_bytes
-from .native import Focus, RunOptions, diagnostics, run_image
-from .render import export_dimensions, render_shapes_to_image
-from .resources import DEFAULT_ACTIVE_MEMORY_BYTES, DEFAULT_WORKER_BUDGET
-from .svg import shapes_to_svg
+from . import cli_jobs
+from .cli_options import (
+    add_option_arguments,
+    add_resources,
+    add_source_arguments,
+    branch_id,
+    experiment_name,
+    nonnegative,
+    options_from_args,
+    seeds,
+    validate_arguments,
+)
+from .native import RunOptions, diagnostics
 from .web import run_server
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    command = args.command
-    if command is None:
+    if args.command is None:
         run_server("127.0.0.1", 7860, False)
         return 0
-    if command == "serve":
-        if args.workers < 1 or args.active_memory_mb < 1:
-            parser.error("Worker and active memory budgets must be positive")
-        run_server(
-            args.host,
-            args.port,
-            args.open,
-            worker_budget=args.workers,
-            active_memory_bytes=args.active_memory_mb * 1024 * 1024,
-        )
-        return 0
-    if command == "run":
+    if args.command == "doctor":
+        return _doctor(args)
+    try:
+        validate_arguments(args)
+    except ValueError as exc:
+        parser.error(str(exc))
+    try:
+        if args.command == "serve":
+            run_server(
+                args.host,
+                args.port,
+                args.open,
+                worker_budget=args.workers,
+                active_memory_bytes=args.active_memory_mb * 1024 * 1024,
+            )
+            return 0
         try:
-            _validate_distinct_paths(args)
-            options = options_from_args(args)
+            reads, writes = cli_jobs.command_paths(args)
+            cli_jobs.preflight_paths(reads, writes)
         except ValueError as exc:
             parser.error(str(exc))
-        return run_once(args, options)
-    if command == "doctor":
-        status = diagnostics()
-        if args.json:
-            print(json.dumps(status, indent=2))
-        else:
-            print(f"native backend: {'available' if status['available'] else 'unavailable'}")
-            print(f"Python {status['python']} on {status['platform']}")
-            if status["module_path"]:
-                print(f"extension: {status['module_path']}")
-            if status["import_error"]:
-                print(f"import error ({status['import_error_type']}): {status['import_error']}")
-                print('Rebuild in this Python environment with: python -m pip install -e ".[dev]"')
-        return 0 if status["available"] else 1
-    parser.error(f"Unknown command: {command}")
-    return 2
+        return cli_jobs.execute(args, reads, writes)
+    except (OSError, ValueError, RuntimeError, SyntaxError, RecursionError) as exc:
+        print(f"geometrize: {exc}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        print("geometrize: interrupted", file=sys.stderr)
+        return 130
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="geometrize",
-        description="Run the Python Geometrize UI or headless renderer.",
+        prog="geometrize", description="Geometrize UI, headless jobs, and saved experiments."
     )
-    subparsers = parser.add_subparsers(dest="command")
-
-    serve = subparsers.add_parser("serve", help="start the browser UI")
+    commands = parser.add_subparsers(dest="command")
+    serve = commands.add_parser("serve", help="start the browser UI")
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=7860)
     serve.add_argument("--open", action="store_true", help="open the UI in the default browser")
-    serve.add_argument("--workers", type=int, default=DEFAULT_WORKER_BUDGET, help="total fitting worker budget")
-    serve.add_argument(
-        "--active-memory-mb",
-        type=int,
-        default=DEFAULT_ACTIVE_MEMORY_BYTES // (1024 * 1024),
-        help="memory budget for active image decoding, fitting, and export work",
-    )
+    add_resources(serve)
 
-    run = subparsers.add_parser("run", help="render an image once from the command line")
+    run = commands.add_parser("run", help="fit one source image")
     run.add_argument("input", type=Path)
-    run.add_argument("--output", type=Path, required=True, help="PNG output path")
-    run.add_argument("--svg", type=Path, help="optional SVG output path")
-    run.add_argument("--json", type=Path, help="optional shape JSON output path")
+    _outputs(run, project=True)
     add_option_arguments(run)
+    add_resources(run)
 
-    doctor = subparsers.add_parser("doctor", help="check the native backend")
-    doctor.add_argument("--json", action="store_true", help="print structured native import diagnostics")
-    doctor.set_defaults(command="doctor")
-    return parser
+    batch = commands.add_parser("batch", help="fit ordered inputs × seeds serially")
+    batch.add_argument("inputs", nargs="+", type=Path)
+    batch.add_argument("--seeds", type=seeds, default=[RunOptions.seed], help="comma-separated seeds, in order")
+    batch.add_argument("--output-dir", type=Path, required=True)
+    batch.add_argument("--manifest", type=Path, help="default: OUTPUT_DIR/manifest.json")
+    for extension in ("svg", "json", "project"):
+        batch.add_argument("--" + extension, action="store_true", help=f"also save each job's {extension} output")
+    add_option_arguments(batch, batch=True)
+    add_resources(batch)
 
-
-def add_option_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--steps", type=int, default=RunOptions.steps)
-    parser.add_argument("--shape-types", default=",".join(RunOptions.shape_types))
-    parser.add_argument("--alpha", type=int, default=RunOptions.alpha)
-    parser.add_argument("--shape-count", type=int, default=RunOptions.shape_count)
-    parser.add_argument("--mutations", type=int, default=RunOptions.mutations)
-    parser.add_argument("--seed", type=int, default=RunOptions.seed)
-    parser.add_argument("--max-threads", type=int, default=RunOptions.max_threads)
-    parser.add_argument("--focus-x", type=float, help="focus center x, normalized from 0 to 1")
-    parser.add_argument("--focus-y", type=float, help="focus center y, normalized from 0 to 1")
-    parser.add_argument(
-        "--focus-radius", type=float, help="focus radius as a fraction of the shorter image edge (0.01–1)",
+    project = commands.add_parser("project", help="inspect, export, or fork saved experiments")
+    project_commands = project.add_subparsers(dest="project_command", required=True)
+    inspect = project_commands.add_parser("inspect", help="inspect settings and branches without native fitting")
+    inspect.add_argument("input", type=Path)
+    inspect.add_argument("--json", action="store_true", help="print structured inspection")
+    add_resources(inspect)
+    export = project_commands.add_parser(
+        "export", help="export a full head or an explicit prefix without native fitting"
     )
-    parser.add_argument("--focus-strength", type=float, help="fraction of candidate starts biased toward focus (0–1)")
-    parser.add_argument(
-        "--stagnation-limit",
-        type=int,
-        default=RunOptions.stagnation_limit,
-        help="stop after this many consecutive rejected attempts; 0 disables this cutoff",
-    )
-    parser.add_argument(
-        "--max-size",
-        type=int,
-        default=RunOptions.max_size,
-        help=f"optimizer working resolution (longest dimension, capped at {MAX_WORKING_IMAGE_SIZE})",
-    )
-    parser.add_argument(
+    export.add_argument("input", type=Path)
+    _branch(export)
+    _outputs(export)
+    export.add_argument(
         "--export-size",
         "--longest-dimension",
         dest="export_size",
         type=int,
-        default=RunOptions.export_size,
-        help=f"output resolution (longest dimension, capped at {MAX_IMAGE_SIZE})",
+        help="default: the experiment's saved export size",
     )
+    add_resources(export)
+    fork = project_commands.add_parser("fork", help="replay into a fresh child; optionally fit new shapes")
+    fork.add_argument("input", type=Path)
+    fork.add_argument("--output", type=Path, required=True, help="new project path; the input is preserved")
+    fork.add_argument("--name", type=experiment_name, help="unique child name; default: EXPERIMENT fork")
+    _branch(fork)
+    add_option_arguments(fork, fork=True)
+    add_resources(fork)
+
+    source = commands.add_parser("source", help="inspect an admitted still or animation source")
+    source_commands = source.add_subparsers(dest="source_command", required=True)
+    source_inspect = source_commands.add_parser("inspect")
+    source_inspect.add_argument("input", type=Path)
+    add_source_arguments(source_inspect)
+    add_resources(source_inspect)
+    palette = commands.add_parser("palette", help="extract repeatable palette colors from the chosen source")
+    palette_commands = palette.add_subparsers(dest="palette_command", required=True)
+    extraction = palette_commands.add_parser("extract")
+    extraction.add_argument("input", type=Path)
+    extraction.add_argument("--max-colors", type=int, default=8)
+    extraction.add_argument("--output", type=Path, help="write JSON instead of printing it")
+    add_source_arguments(extraction)
+    add_resources(extraction)
+
+    doctor = commands.add_parser("doctor", help="check the native backend")
+    doctor.add_argument("--json", action="store_true", help="print native import diagnostics")
+    return parser
 
 
-def options_from_args(args: argparse.Namespace) -> RunOptions:
-    focus = None
-    if any(value is not None for value in (args.focus_x, args.focus_y, args.focus_radius, args.focus_strength)):
-        if args.focus_x is None or args.focus_y is None:
-            raise ValueError("--focus-x and --focus-y are required together when setting focus")
-        focus = {
-            "x": args.focus_x,
-            "y": args.focus_y,
-            "radius": Focus.radius if args.focus_radius is None else args.focus_radius,
-            "strength": Focus.strength if args.focus_strength is None else args.focus_strength,
-        }
-    return RunOptions.from_mapping(
-        {
-            "steps": args.steps,
-            "shape_types": args.shape_types,
-            "alpha": args.alpha,
-            "shape_count": args.shape_count,
-            "mutations": args.mutations,
-            "seed": args.seed,
-            "max_threads": args.max_threads,
-            "max_size": args.max_size,
-            "export_size": args.export_size,
-            "stagnation_limit": args.stagnation_limit,
-            "focus": focus,
-        }
-    )
+def _outputs(parser: argparse.ArgumentParser, *, project: bool = False) -> None:
+    parser.add_argument("--output", type=Path, required=True, help="PNG output path")
+    parser.add_argument("--svg", type=Path, help="optional SVG output path")
+    parser.add_argument("--json", type=Path, help="optional shape JSON output path")
+    if project:
+        parser.add_argument("--project", type=Path, help="optional project with original source and confirmed result")
+
+
+def _branch(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--branch", type=branch_id, help="experiment id; default: active experiment")
+    parser.add_argument("--at-shape", type=nonnegative, help="prefix length; default: full experiment head")
+
+
+def _doctor(args: argparse.Namespace) -> int:
+    status = diagnostics()
+    if args.json:
+        print(json.dumps(status, indent=2))
+    else:
+        print(f"native backend: {'available' if status['available'] else 'unavailable'}")
+        print(f"Python {status['python']} on {status['platform']}")
+        if status["module_path"]:
+            print(f"extension: {status['module_path']}")
+        if status["import_error"]:
+            print(f"import error ({status['import_error_type']}): {status['import_error']}")
+            print('Rebuild in this Python environment with: python -m pip install -e ".[dev]"')
+    return 0 if status["available"] else 1
 
 
 def run_once(args: argparse.Namespace, options: RunOptions | None = None) -> int:
-    options = options or options_from_args(args)
-    image = open_image_bytes(args.input.read_bytes())
-    result = run_image(image, options)
-    export_width, export_height = export_dimensions(result.width, result.height, options.export_size)
-    output = render_shapes_to_image(
-        result.shapes,
-        result.width,
-        result.height,
-        result.background,
-        export_width,
-        export_height,
-    )
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_bytes(image_to_png_bytes(output))
-    if args.svg:
-        svg = shapes_to_svg(result.shapes, result.width, result.height, result.background, export_width, export_height)
-        args.svg.parent.mkdir(parents=True, exist_ok=True)
-        args.svg.write_text(svg, encoding="utf-8")
-    if args.json:
-        args.json.parent.mkdir(parents=True, exist_ok=True)
-        args.json.write_text(json.dumps(result.shapes, indent=2), encoding="utf-8")
-    print(f"wrote {args.output} with {len(result.shapes)} shapes")
-    return 0
-
-
-def _validate_distinct_paths(args: argparse.Namespace) -> None:
-    paths = [
-        ("input", args.input),
-        ("PNG output", args.output),
-        ("SVG output", args.svg),
-        ("JSON output", args.json),
-    ]
-    seen: dict[str, str] = {}
-    for label, path in paths:
-        if path is None:
-            continue
-        key = os.path.normcase(str(path.resolve()))
-        previous = seen.get(key)
-        if previous is not None:
-            raise ValueError(f"{label} path must differ from the {previous} path")
-        seen[key] = label
+    """Compatibility entrypoint; the ordinary command uses the same job path."""
+    reads, writes = cli_jobs.command_paths(args)
+    cli_jobs.preflight_paths(reads, writes)
+    return cli_jobs.run_job(args, options or options_from_args(args), reads, writes)[0]

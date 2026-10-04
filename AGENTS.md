@@ -25,7 +25,10 @@ current so the next agent can find the important edges quickly.
 - Source preparation: `source.py`, `image_probe.py`, and `images.py`; probe encoded
   bounds and reserve decoder memory before opening or seeking with Pillow.
   `apng.py` corrects frame composition while Pillow decodes each frame's pixels.
-- CLI entrypoints: `python/geometrize_py/cli.py`.
+- CLI entrypoints: `cli.py`; strict flags in `cli_options.py`, admitted jobs and
+  atomic output publication in `cli_jobs.py` under `python/geometrize_py/`.
+- Python project contracts: `project.py`; inspect/export are native-free, while
+  forks replay the saved grid/background/target before optional fitting.
 - Native bridge contract: `python/geometrize_py/native.py` and
   `python/geometrize_py/native_bindings.cpp`; placement is in `native_focus.h`.
 - Exports and resource budgets: `exporting.py`, `render.py`, `svg.py`, and

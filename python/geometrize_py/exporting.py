@@ -133,9 +133,7 @@ def validate_scene(raw: Any) -> RenderScene:
     width = _integer(raw.get("width"), 1, MAX_SOURCE_DIMENSION, "result width")
     height = _integer(raw.get("height"), 1, MAX_SOURCE_DIMENSION, "result height")
     background = _color(raw.get("background"), "result background")
-    inspect_scene(raw)
-    geometry_limit = PROJECT_MAX_GEOMETRY_FACTOR * max(width, height)
-    normalized = [_shape(shape, index + 1, geometry_limit) for index, shape in enumerate(raw["shapes"])]
+    normalized = validate_shapes(raw.get("shapes"), width, height)
     digest = raw.get("target_digest")
     if "target_digest" in raw and (not isinstance(digest, str) or re.fullmatch(r"[0-9a-fA-F]{64}", digest) is None):
         raise APIError("invalid_result", "target_digest must be a SHA256 hexadecimal string")
@@ -148,6 +146,16 @@ def validate_scene(raw: Any) -> RenderScene:
         _integer(raw.get("revision", len(normalized)), 0, 2**53 - 1, "revision"),
         digest.lower() if digest is not None else None,
     )
+
+
+def validate_shapes(shapes: Any, width: int = 0, height: int = 0) -> list[dict[str, Any]]:
+    """Canonicalize bounded geometry, including legacy heads without a canvas."""
+    width = _integer(width, 0, MAX_SOURCE_DIMENSION, "result width")
+    height = _integer(height, 0, MAX_SOURCE_DIMENSION, "result height")
+    inspect_scene({"shapes": shapes})
+    longest = max(width, height)
+    geometry_limit = PROJECT_MAX_GEOMETRY_FACTOR * longest if longest else PROJECT_MAX_COORDINATE
+    return [_shape(shape, index + 1, geometry_limit) for index, shape in enumerate(shapes)]
 
 
 def _shape(raw: Any, index: int, geometry_limit: float) -> dict[str, Any]:
