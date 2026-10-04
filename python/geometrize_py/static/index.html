@@ -34,7 +34,7 @@
             <button id="load-project-button" class="secondary" type="button">Open project</button>
             <button id="save-project-button" class="secondary" type="button" disabled>Save project</button>
           </div>
-          <p id="project-help">Project JSON restores the source, result, options, and run history. Run starts fresh; saved geometry can still be exported.</p>
+          <p id="project-help">Project JSON keeps the source, experiments, settings, and full history. Restore or fork a saved head to continue fitting.</p>
         </fieldset>
 
         <div class="field">
@@ -138,6 +138,35 @@
           </div>
           <p id="focus-help" class="settings-help">Focus: click or drag the result; arrows adjust the area. Paint: click once, or hold to add shapes one at a time at the pointer. Release stops the hold after the current shape. Pause stops after the current attempt. Shift+drag pans. Placement is biased toward the area; refinement and full-image error can move shapes outside it.</p>
           <div class="focus-feedback"><span id="focus-status" role="status">Load an image to focus or paint.</span><span id="paint-status" role="status"></span></div>
+        </section>
+        <section class="reconstruction-controls" aria-label="Reconstruction timeline and experiments" aria-describedby="history-help">
+          <div class="experiment-row">
+            <label for="experiment-select">Experiment</label>
+            <select id="experiment-select" disabled></select>
+            <button id="experiment-fork" class="secondary" type="button" disabled>Fork experiment</button>
+            <details class="experiment-management">
+              <summary>Name / remove</summary>
+              <div class="experiment-management-fields">
+                <label for="experiment-name">Experiment name</label>
+                <input id="experiment-name" type="text" maxlength="80" disabled>
+                <button id="experiment-rename" class="secondary" type="button" disabled>Rename</button>
+                <label for="experiment-remove-choice">Inactive experiment</label>
+                <select id="experiment-remove-choice" aria-describedby="experiment-remove-help" disabled></select>
+                <button id="experiment-remove" class="secondary" type="button" aria-describedby="experiment-remove-help" disabled>Remove</button>
+                <span id="experiment-remove-help" class="settings-help">Only inactive experiments can be removed.</span>
+              </div>
+            </details>
+          </div>
+          <div class="timeline-row">
+            <label for="history-slider">Shape</label>
+            <input id="history-slider" type="range" min="0" max="0" step="1" value="0" disabled>
+            <input id="history-count" type="number" min="0" max="0" step="1" value="0" aria-label="Inspected shape count" disabled>
+            <output id="history-position">0 / 0</output>
+            <button id="history-head" class="secondary" type="button" disabled>Head</button>
+            <button id="history-restore" class="secondary" type="button" disabled>Restore head</button>
+          </div>
+          <p id="history-help" class="settings-help">Scrub to inspect; Restore and Fork keep the original experiment.</p>
+          <span id="experiment-settings" class="settings-help"></span>
         </section>
         <div class="preview-grid">
           <figure class="preview-panel">

@@ -85,6 +85,9 @@ export class Preview {
     this.paintPoint = null;
     this.focus = null;
     this.focusMode = "pan";
+    this.interactionEnabled = true;
+    this.prefixScene = null;
+    this.prefixCount = 0;
     this.blankResult = false;
     this.sourceSize = null;
     this.resultSize = null;
@@ -105,7 +108,7 @@ export class Preview {
       }, { passive: false });
       stage.addEventListener("pointerdown", (event) => {
         if (event.button !== 0 || (stage === resultStage && this.paintPointerId !== null)) return;
-        if (stage === resultStage && this.focus && !event.shiftKey) {
+        if (stage === resultStage && this.interactionEnabled && this.focus && !event.shiftKey) {
           const point = this.resultPoint(event.clientX, event.clientY);
           if (!point) return;
           event.preventDefault();
@@ -164,7 +167,7 @@ export class Preview {
       if (document.hidden) this.stopPaintGesture();
     });
     resultStage.addEventListener("keydown", (event) => {
-      if (!this.focus || !this.resultSize) return;
+      if (!this.interactionEnabled || !this.focus || !this.resultSize) return;
       if (event.key === "Escape") {
         event.preventDefault();
         this.onFocusDisable();
@@ -188,14 +191,21 @@ export class Preview {
     this.focus = value ? { ...value } : null;
     this.focusMode = mode;
     this.paintBehavior = paintBehavior;
-    this.resultStage.dataset.focusMode = mode;
-    this.resultStage.setAttribute("aria-label", mode === "paint" ?
+    this.resultStage.dataset.focusMode = this.interactionEnabled ? mode : "pan";
+    this.resultStage.setAttribute("aria-label", !this.interactionEnabled ? "Read-only result. Drag to pan." : mode === "paint" ?
       `Live result. ${paintBehavior === "hold" ? "Hold to paint; release to stop" : "Click to add one shape"}; Shift drag to pan.` :
       mode === "focus" ? "Live result. Click or drag to move focus; arrow keys adjust it; Shift drag to pan." :
         "Live result. Drag to pan.");
     if (mode !== "paint" && this.blankResult) this.clearResult();
     this.ensurePaintTarget();
     this.layout();
+  }
+
+  setInteractionEnabled(enabled) {
+    if (this.interactionEnabled === enabled) return;
+    if (!enabled) this.stopPaintGesture();
+    this.interactionEnabled = enabled;
+    this.setFocus(this.focus, this.focusMode, this.paintBehavior);
   }
 
   stopPaintGesture() {
@@ -269,7 +279,7 @@ export class Preview {
 
   layoutFocus(visible) {
     if (!this.focusOverlay) return;
-    const shown = this.focus && this.resultSize && !visible.hidden;
+    const shown = this.interactionEnabled && this.focus && this.resultSize && !visible.hidden;
     this.focusOverlay.toggleAttribute("hidden", !shown);
     if (!shown) return;
     const { width, height } = this.resultSize;
@@ -300,6 +310,8 @@ export class Preview {
 
   clearResult() {
     this.stopPaintGesture();
+    this.prefixScene = null;
+    this.prefixCount = 0;
     this.blankResult = false;
     this.resultSize = null;
     this.resultImage.removeAttribute("src");
@@ -312,6 +324,8 @@ export class Preview {
   }
 
   beginResult(width, height, background) {
+    this.prefixScene = null;
+    this.prefixCount = 0;
     this.blankResult = false;
     this.resultSize = { width, height };
     this.canvasScale = Math.min(1, LIVE_CANVAS_MAX / Math.max(width, height));
@@ -334,7 +348,18 @@ export class Preview {
     shapes.forEach((shape) => this.draw(shape));
   }
 
+  showPrefix(scene, count) {
+    if (this.prefixScene !== scene || count < this.prefixCount) {
+      this.beginResult(scene.width, scene.height, scene.background);
+      this.prefixScene = scene;
+    }
+    for (let index = this.prefixCount; index < count; index += 1) this.draw(scene.shapes[index]);
+    this.prefixCount = count;
+  }
+
   showImage(dataUrl, width, height) {
+    this.prefixScene = null;
+    this.prefixCount = 0;
     this.blankResult = false;
     this.resultSize = { width, height };
     this.resultImage.src = dataUrl;

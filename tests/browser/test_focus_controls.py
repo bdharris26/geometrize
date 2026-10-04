@@ -425,7 +425,7 @@ def test_project_focus_legacy_validation_and_overlay_free_exports(server_url: st
         contract = page.request.get(f"{server_url}/api/config").json()
         options = {key:value for key,value in contract["defaults"].items() if key != "focus"}
         project = {
-            "format":contract["project"]["format"],"version":contract["project"]["version"],
+            "format":contract["project"]["format"],"version":1,
             "source":{"name":"wide.png","data_url":"data:image/png;base64," + base64.b64encode(_image()).decode()},
             "options":options,
             "result":{"width":320,"height":100,"render_width":320,"render_height":100,
@@ -435,7 +435,9 @@ def test_project_focus_legacy_validation_and_overlay_free_exports(server_url: st
         path = tmp_path / "legacy.json"
         path.write_text(json.dumps(project), encoding="utf-8")
         page.locator("#project-input").set_input_files(path)
-        expect(page.locator("#status")).to_have_text("Project loaded — Run starts a new render")
+        expect(page.locator("#status")).to_have_text("Project loaded — Restore or fork to continue")
+        page.get_by_role("button", name="Restore head", exact=True).click()
+        expect(page.locator("#run-button")).to_have_text("Continue")
         expect(page.locator("#focus-toggle")).to_have_attribute("aria-pressed", "false")
         assert _save_project(page, tmp_path / "legacy-resaved.json")["options"]["focus"] is None
         baseline = page.locator("#result-canvas").evaluate("canvas => canvas.toDataURL()")
@@ -449,6 +451,8 @@ def test_project_focus_legacy_validation_and_overlay_free_exports(server_url: st
         assert saved["options"]["focus"]["radius"] == 0.35
         page.locator("#project-input").set_input_files(tmp_path / "focused.json")
         expect(page.locator("#focus-radius-number")).to_have_value("35")
+        page.get_by_role("button", name="Restore head", exact=True).click()
+        expect(page.locator("#run-button")).to_have_text("Continue")
         expect(page.locator("#focus-overlay")).to_be_visible()
         assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
         exports: list[dict] = []
@@ -800,7 +804,7 @@ def test_long_project_history_uses_fixed_space_and_round_trips_all_batches(
         path = tmp_path / "long-history.json"
         path.write_text(json.dumps(project), encoding="utf-8")
         page.locator("#project-input").set_input_files(path)
-        expect(page.locator("#status")).to_have_text("Project loaded — Run starts a new render")
+        expect(page.locator("#status")).to_have_text("Project loaded — Restore or fork to continue")
         expect(page.locator("#batch-history .batch-chip")).to_have_count(50)
         expect(page.locator("#batch-history-summary")).to_have_text("1 shapes · 2,000 batches")
         expect(page.locator("#batch-history-window")).to_have_text("Latest · 1951–2000 of 2,000 batches")
