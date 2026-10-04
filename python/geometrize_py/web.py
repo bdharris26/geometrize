@@ -21,7 +21,14 @@ from pathlib import PurePosixPath
 from typing import Any, cast
 from urllib.parse import unquote, urlsplit
 
-from .contracts import MAX_REQUEST_BYTES, OPTION_LIMITS, RESTORE_MAX_WORK, app_contract
+from .contracts import (
+    MAX_REQUEST_BYTES,
+    OPTION_LIMITS,
+    PROJECT_MAX_SHAPES,
+    PROJECT_MAX_TOTAL_POINTS,
+    RESTORE_MAX_WORK,
+    app_contract,
+)
 from .errors import APIError
 from .exporting import ExportArtifact, ExportCache, RenderScene, build_export, inspect_scene, validate_scene
 from .images import image_bytes_size, image_data_url_bytes, image_to_data_url, open_image_bytes
@@ -106,6 +113,7 @@ class GeometrizeServer(ThreadingHTTPServer):
         self.sessions: OrderedDict[str, _StoredSession] = OrderedDict()
         self.sessions_lock = threading.RLock()
         self.active_runs: dict[str, str] = {}
+        self._active_session_bytes: dict[str, int] = {}
         self._render_slots = threading.BoundedSemaphore(max_active_renders)
         self.max_sessions = max_sessions
         self.max_active_renders = max_active_renders
@@ -127,7 +135,8 @@ class GeometrizeServer(ThreadingHTTPServer):
     def store_session(self, session_id: str, session: ImageSession, *, require_retention: bool = False) -> None:
         with self.sessions_lock:
             now = self._clock()
-            record = _StoredSession(session, now, _estimate_session_bytes(session))
+            estimated = max(_estimate_session_bytes(session), self._active_session_bytes.get(session_id, 0))
+            record = _StoredSession(session, now, estimated)
             if require_retention:
                 protected = [
                     stored for key, stored in self.sessions.items()
@@ -159,14 +168,30 @@ class GeometrizeServer(ThreadingHTTPServer):
             self.sessions.move_to_end(session_id)
             return record.session
 
-    def activate_session(self, session_id: str, session: ImageSession, run_id: str) -> None:
+    def activate_session(self, session_id: str, session: ImageSession, run_id: str, *, options: RunOptions) -> None:
         with self.sessions_lock:
+            projected = _projected_session_bytes(session, options)
+            previous_run = self.active_runs.get(session_id)
+            previous_projection = self._active_session_bytes.get(session_id)
             self.active_runs[session_id] = run_id
-            self.store_session(session_id, session)
+            self._active_session_bytes[session_id] = projected
+            try:
+                self.store_session(session_id, session)
+            except BaseException:
+                if previous_run is None:
+                    self.active_runs.pop(session_id, None)
+                else:
+                    self.active_runs[session_id] = previous_run
+                if previous_projection is None:
+                    self._active_session_bytes.pop(session_id, None)
+                else:
+                    self._active_session_bytes[session_id] = previous_projection
+                raise
 
     def finish_session(self, session_id: str, session: ImageSession) -> None:
         with self.sessions_lock:
             self.active_runs.pop(session_id, None)
+            self._active_session_bytes.pop(session_id, None)
             self.store_session(session_id, session)
 
     def service_actions(self) -> None:
@@ -379,7 +404,7 @@ class GeometrizeRequestHandler(BaseHTTPRequestHandler):
                 options, lease = self._reserve_fit(options, session.width, session.height)
             session.prepare_run(options)
             self._charge_request_scene({"shapes": session.shapes})
-            self.geometrize_server.activate_session(session_id, session, run_id)
+            self.geometrize_server.activate_session(session_id, session, run_id, options=options)
             activated = True
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
@@ -895,6 +920,15 @@ def _safe_static_path(name: str) -> PurePosixPath | None:
 def _estimate_session_bytes(session: ImageSession) -> int:
     count, points = inspect_scene({"shapes": session.shapes})
     return _retained_session_bytes(session.width, session.height, count, points)
+
+
+def _projected_session_bytes(session: ImageSession, options: RunOptions) -> int:
+    count, points = inspect_scene({"shapes": session.shapes})
+    added = min(options.steps, max(0, PROJECT_MAX_SHAPES - count))
+    added_points = min(4 * added, max(0, PROJECT_MAX_TOTAL_POINTS - points)) if "polyline" in options.shape_types else 0
+    # Active batches accept at most `steps` shapes. Charge their possible new
+    # geometry until finish, so cache admission cannot depend on live progress.
+    return _retained_session_bytes(session.width, session.height, count + added, points + added_points)
 
 
 def _retained_session_bytes(width: int, height: int, shape_count: int, point_count: int) -> int:

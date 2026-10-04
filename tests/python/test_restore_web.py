@@ -5,6 +5,7 @@ import json
 import threading
 import urllib.request
 import uuid
+from contextlib import contextmanager
 from http import HTTPStatus
 from types import SimpleNamespace
 from urllib.error import HTTPError
@@ -48,7 +49,8 @@ def restore_server():
         thread.join(5)
 
 
-def _post(server, path: str, payload: dict, *, stream: bool = False) -> dict | list[dict]:
+@contextmanager
+def _response(server, path: str, payload: dict):
     request_id = uuid.uuid4().hex
     completion = threading.Event()
     server.post_completions[request_id] = completion
@@ -59,10 +61,15 @@ def _post(server, path: str, payload: dict, *, stream: bool = False) -> dict | l
     )
     try:
         with urllib.request.urlopen(request, timeout=5) as response:
-            return [json.loads(line) for line in response] if stream else json.load(response)
+            yield response
     finally:
         assert completion.wait(5), "Server did not finish releasing request admission"
         server.post_completions.pop(request_id)
+
+
+def _post(server, path: str, payload: dict, *, stream: bool = False) -> dict | list[dict]:
+    with _response(server, path, payload) as response:
+        return [json.loads(line) for line in response] if stream else json.load(response)
 
 
 def _payload() -> dict:
@@ -309,7 +316,7 @@ def test_cached_session_budget_counts_retained_polyline_vertices(restore_server)
 def test_restore_rejects_full_active_cache_without_mutating_existing_sessions(restore_server, capacity) -> None:
     server = restore_server
     active = ImageSession.from_image(Image.new("RGBA", (32, 24), "blue"), RunOptions())
-    server.activate_session("active", active, "running")
+    server.activate_session("active", active, "running", options=RunOptions(steps=1, shape_types=("rectangle",)))
     if capacity == "count":
         server.max_sessions = 1
     else:
@@ -343,7 +350,7 @@ def test_restore_retains_new_session_by_evicting_idle_victim_and_can_continue(re
     server = restore_server
     active = ImageSession.from_image(Image.new("RGBA", (32, 24), "blue"), RunOptions())
     idle = ImageSession.from_image(Image.new("RGBA", (32, 24), "red"), RunOptions())
-    server.activate_session("active", active, "running")
+    server.activate_session("active", active, "running", options=RunOptions(steps=1, shape_types=("rectangle",)))
     server.store_session("idle", idle)
     if capacity == "count":
         server.max_sessions = 2
@@ -383,3 +390,183 @@ def test_retained_cache_insertion_rejects_oversized_replacement_atomically(resto
         server.store_session("previous", larger, require_retention=True)
     assert server.get_session("previous") is previous
     assert server._stored_session_bytes == original_bytes
+
+
+class _ControlledRunner:
+    initial_score = 0.5
+    score = 0.5
+    attempts = 0
+
+    def __init__(self, *, fail: bool = False):
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.fail = fail
+        self.shape = {"type": "polyline", "color": [20, 40, 60, 128],
+                      "data": {"points": [[0, 0], [1, 1], [2, 2], [3, 3]]}}
+
+    def step(self, _options):
+        self.entered.set()
+        assert self.release.wait(5)
+        if self.fail:
+            raise RuntimeError("Controlled optimizer failure")
+        self.attempts += 1
+        self.score *= 0.9
+        return {"attempt": self.attempts, "shapes": [copy.deepcopy(self.shape)]}
+
+    def current_rgba(self):
+        return bytes((0, 0, 0, 255)) * 32 * 24
+
+
+@pytest.mark.skipif(not native_available(), reason="native backend is not built")
+@pytest.mark.parametrize("capacity", ["projected_growth_fits", "full_growth_does_not_fit"])
+def test_restore_admission_accounts_for_future_active_growth_before_finish(restore_server, capacity) -> None:
+    server = restore_server
+    runner = _ControlledRunner()
+    active = ImageSession(32, 24, (0, 0, 0, 255), runner)
+    server.store_session("active", active)
+    future = SimpleNamespace(width=32, height=24, shapes=[runner.shape] * 4)
+    partial = SimpleNamespace(width=32, height=24, shapes=[runner.shape])
+    incoming = SimpleNamespace(width=32, height=24, shapes=[])
+    budget = _estimate_session_bytes(future if capacity == "projected_growth_fits" else partial)
+    server.max_session_bytes = budget + _estimate_session_bytes(incoming)
+    body = {"session_id": "active", "options": {"steps": 4, "shape_types": ["polyline"], "max_threads": 1}}
+    try:
+        with _response(server, "/api/run/stream", body) as response:
+            start = json.loads(response.readline())
+            assert runner.entered.wait(5)
+            assert active.shapes == []
+            assert server.sessions["active"].estimated_bytes == _estimate_session_bytes(future)
+            usage = server.work_budget.usage()
+            if capacity == "projected_growth_fits":
+                restored = _post(server, "/api/restore", _payload())
+            else:
+                with pytest.raises(HTTPError) as error:
+                    _post(server, "/api/restore", _payload())
+                assert error.value.code == HTTPStatus.TOO_MANY_REQUESTS
+                assert json.load(error.value)["code"] == "session_capacity"
+                assert list(server.sessions) == ["active"]
+                assert server.work_budget.usage() == usage
+                _post(server, "/api/sessions/active/pause", {"run_id": start["run_id"]})
+            runner.release.set()
+            events = [json.loads(line) for line in response]
+        assert events[-1]["event"] == ("complete" if capacity == "projected_growth_fits" else "paused")
+        assert len(active.shapes) == (4 if capacity == "projected_growth_fits" else 1)
+        assert not server.active_runs
+        assert not server._active_session_bytes
+        assert server.sessions["active"].estimated_bytes == _estimate_session_bytes(active)
+        assert server._stored_session_bytes == sum(record.estimated_bytes for record in server.sessions.values())
+        assert server._stored_session_bytes <= server.max_session_bytes
+        if capacity == "full_growth_does_not_fit":
+            # Pause released three unused shape reservations. The restore now
+            # fits alongside the one accepted stroke, with the same byte limit.
+            restored = _post(server, "/api/restore", _payload())
+        assert server.get_session(restored["session_id"]) is not None
+        continued = _post(server, "/api/run/stream", {"session_id": restored["session_id"], "options": {
+            "steps": 1, "shape_types": ["rectangle"], "shape_count": 8, "mutations": 8, "max_threads": 1,
+        }}, stream=True)
+        assert continued[0]["continued"] is True
+        assert continued[-1]["event"] == "complete"
+        assert not any(event["event"] == "error" for event in continued)
+        assert server.work_budget.usage() == (0, 0)
+    finally:
+        runner.release.set()
+
+
+@pytest.mark.skipif(not native_available(), reason="native backend is not built")
+@pytest.mark.parametrize("ending", ["error", "disconnect"])
+def test_stream_releases_unused_cache_growth_after_error_or_disconnect(restore_server, monkeypatch, ending) -> None:
+    server = restore_server
+    runner = _ControlledRunner(fail=ending == "error")
+    session = ImageSession(32, 24, (0, 0, 0, 255), runner)
+    server.store_session("active", session)
+    if ending == "disconnect":
+        write_event = GeometrizeRequestHandler._write_stream_event
+
+        def disconnect_on_step(handler, event):
+            if event["event"] == "step":
+                raise BrokenPipeError("Controlled closed stream")
+            write_event(handler, event)
+
+        monkeypatch.setattr(GeometrizeRequestHandler, "_write_stream_event", disconnect_on_step)
+    try:
+        with _response(server, "/api/run/stream", {"session_id": "active", "options": {
+            "steps": 4, "shape_types": ["polyline"], "max_threads": 1,
+        }}) as response:
+            assert json.loads(response.readline())["event"] == "start"
+            assert runner.entered.wait(5)
+            assert server._stored_session_bytes > _estimate_session_bytes(session)
+            runner.release.set()
+            events = [json.loads(line) for line in response]
+        if ending == "error":
+            assert events[-1]["event"] == "error"
+        else:
+            assert events == []
+        assert len(session.shapes) == (0 if ending == "error" else 1)
+        assert server.get_session("active") is session
+        assert not server.active_runs
+        assert not server._active_session_bytes
+        assert server._stored_session_bytes == _estimate_session_bytes(session)
+        assert server.work_budget.usage() == (0, 0)
+        assert session.try_acquire_run()
+        session.release_run()
+    finally:
+        runner.release.set()
+
+
+@pytest.mark.skipif(not native_available(), reason="native backend is not built")
+def test_failed_activation_rolls_back_cache_projection_and_releases_run(restore_server, monkeypatch) -> None:
+    server = restore_server
+    session = ImageSession(32, 24, (0, 0, 0, 255), _ControlledRunner())
+    server.store_session("active", session)
+    original_bytes = server._stored_session_bytes
+
+    def reject_store(*_args, **_kwargs):
+        assert "active" in server._active_session_bytes
+        raise APIError("session_capacity", "Controlled activation failure")
+
+    monkeypatch.setattr(server, "store_session", reject_store)
+    with pytest.raises(HTTPError) as error:
+        _post(server, "/api/run/stream", {"session_id": "active", "options": {
+            "steps": 4, "shape_types": ["polyline"], "max_threads": 1,
+        }})
+    assert json.load(error.value)["code"] == "session_capacity"
+    assert not server.active_runs
+    assert not server._active_session_bytes
+    assert server.get_session("active") is session
+    assert server._stored_session_bytes == original_bytes
+    assert server.work_budget.usage() == (0, 0)
+    assert session.try_acquire_run()
+    session.release_run()
+
+
+def test_active_cache_projection_survives_refresh_and_is_released_at_finish(restore_server) -> None:
+    server = restore_server
+    shape = _ControlledRunner().shape
+    session = SimpleNamespace(width=32, height=24, shapes=[])
+    future = SimpleNamespace(width=32, height=24, shapes=[shape] * 4)
+    server.activate_session("active", session, "run", options=RunOptions(steps=4, shape_types=("polyline",)))
+    projected = _estimate_session_bytes(future)
+    assert server._stored_session_bytes == projected
+    session.shapes.append(shape)
+    server.store_session("active", session)
+    assert server._stored_session_bytes == projected
+    server.finish_session("active", session)
+    assert not server._active_session_bytes
+    assert server._stored_session_bytes == _estimate_session_bytes(session) < projected
+
+
+def test_projected_cache_growth_respects_global_caps_without_reducing_mixed_shape_count(monkeypatch) -> None:
+    monkeypatch.setattr(web, "PROJECT_MAX_SHAPES", 3)
+    monkeypatch.setattr(web, "PROJECT_MAX_TOTAL_POINTS", 8)
+    current = {"type": "polyline", "data": {"points": [[0, 0]] * 7}}
+    rectangle = {"type": "rectangle", "data": {}}
+    final_point = {"type": "polyline", "data": {"points": [[0, 0]]}}
+    session = SimpleNamespace(width=32, height=24, shapes=[current])
+    future = SimpleNamespace(width=32, height=24, shapes=[current, rectangle, final_point])
+    assert web._projected_session_bytes(session, RunOptions(steps=10, shape_types=("polyline", "rectangle"))) == (
+        _estimate_session_bytes(future)
+    )
+    session.shapes = [current, rectangle, final_point]
+    assert web._projected_session_bytes(session, RunOptions(steps=10, shape_types=("polyline",))) == (
+        _estimate_session_bytes(session)
+    )
