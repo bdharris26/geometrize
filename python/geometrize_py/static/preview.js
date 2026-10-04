@@ -64,7 +64,8 @@ function drawShape(context, shape) {
 
 export class Preview {
   constructor({ sourceStage, resultStage, sourceImage, resultImage, resultCanvas, zoomOutput,
-    focusOverlay = null, onFocusMove = () => {}, onFocusDisable = () => {}, onPaint = () => {} }) {
+    focusOverlay = null, onFocusMove = () => {}, onFocusDisable = () => {}, onPaint = () => {},
+    onPaintHoldStart = () => {}, onPaintHoldMove = () => {}, onPaintHoldStop = () => {} }) {
     this.sourceStage = sourceStage;
     this.resultStage = resultStage;
     this.sourceImage = sourceImage;
@@ -75,6 +76,13 @@ export class Preview {
     this.onFocusMove = onFocusMove;
     this.onFocusDisable = onFocusDisable;
     this.onPaint = onPaint;
+    this.onPaintHoldStart = onPaintHoldStart;
+    this.onPaintHoldMove = onPaintHoldMove;
+    this.onPaintHoldStop = onPaintHoldStop;
+    this.paintBehavior = "click";
+    this.paintPointerId = null;
+    this.paintPointerPosition = null;
+    this.paintPoint = null;
     this.focus = null;
     this.focusMode = "pan";
     this.blankResult = false;
@@ -96,7 +104,7 @@ export class Preview {
         this.setZoom(this.zoom * (event.deltaY < 0 ? 1.15 : 1 / 1.15));
       }, { passive: false });
       stage.addEventListener("pointerdown", (event) => {
-        if (event.button !== 0) return;
+        if (event.button !== 0 || (stage === resultStage && this.paintPointerId !== null)) return;
         if (stage === resultStage && this.focus && !event.shiftKey) {
           const point = this.resultPoint(event.clientX, event.clientY);
           if (!point) return;
@@ -104,7 +112,13 @@ export class Preview {
           stage.focus({ preventScroll: true });
           stage.setPointerCapture(event.pointerId);
           stage.dataset.gesture = this.focusMode;
-          if (this.focusMode === "paint") this.onPaint(point);
+          if (this.focusMode === "paint" && this.paintBehavior === "hold") {
+            stage.dataset.gesture = "hold";
+            this.paintPointerId = event.pointerId;
+            this.paintPointerPosition = { x: event.clientX, y: event.clientY };
+            this.paintPoint = point;
+            this.onPaintHoldStart(point);
+          } else if (this.focusMode === "paint") this.onPaint(point);
           else this.onFocusMove(point);
           return;
         }
@@ -116,6 +130,11 @@ export class Preview {
       });
       stage.addEventListener("pointermove", (event) => {
         if (!stage.hasPointerCapture(event.pointerId)) return;
+        if (stage === resultStage && event.pointerId === this.paintPointerId) {
+          this.paintPointerPosition = { x: event.clientX, y: event.clientY };
+          this.updateHoldPoint();
+          return;
+        }
         if (stage.dataset.gesture !== "pan") {
           if (stage.dataset.gesture === "focus" && this.focusMode === "focus") {
             const point = this.resultPoint(event.clientX, event.clientY);
@@ -132,13 +151,18 @@ export class Preview {
         this.layout();
       });
       const release = (event) => {
+        if (event.pointerId === this.paintPointerId) this.stopPaintGesture();
         if (stage.hasPointerCapture(event.pointerId)) stage.releasePointerCapture(event.pointerId);
         delete stage.dataset.gesture;
       };
       stage.addEventListener("pointerup", release);
       stage.addEventListener("pointercancel", release);
-      stage.addEventListener("lostpointercapture", () => { delete stage.dataset.gesture; });
+      stage.addEventListener("lostpointercapture", release);
     }
+    window.addEventListener("blur", () => this.stopPaintGesture());
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) this.stopPaintGesture();
+    });
     resultStage.addEventListener("keydown", (event) => {
       if (!this.focus || !this.resultSize) return;
       if (event.key === "Escape") {
@@ -159,16 +183,43 @@ export class Preview {
     this.layout();
   }
 
-  setFocus(value, mode = value ? "focus" : "pan") {
+  setFocus(value, mode = value ? "focus" : "pan", paintBehavior = "click") {
+    if (mode !== this.focusMode || paintBehavior !== this.paintBehavior) this.stopPaintGesture();
     this.focus = value ? { ...value } : null;
     this.focusMode = mode;
+    this.paintBehavior = paintBehavior;
     this.resultStage.dataset.focusMode = mode;
-    this.resultStage.setAttribute("aria-label", mode === "paint" ? "Live result. Click to add one shape; Shift drag to pan." :
+    this.resultStage.setAttribute("aria-label", mode === "paint" ?
+      `Live result. ${paintBehavior === "hold" ? "Hold to paint; release to stop" : "Click to add one shape"}; Shift drag to pan.` :
       mode === "focus" ? "Live result. Click or drag to move focus; arrow keys adjust it; Shift drag to pan." :
         "Live result. Drag to pan.");
     if (mode !== "paint" && this.blankResult) this.clearResult();
     this.ensurePaintTarget();
     this.layout();
+  }
+
+  stopPaintGesture() {
+    if (this.paintPointerId === null) return;
+    const pointerId = this.paintPointerId;
+    this.paintPointerId = null;
+    this.paintPointerPosition = null;
+    this.paintPoint = null;
+    delete this.resultStage.dataset.gesture;
+    if (this.resultStage.hasPointerCapture(pointerId)) this.resultStage.releasePointerCapture(pointerId);
+    this.onPaintHoldStop();
+  }
+
+  paintGestureActive() {
+    return this.paintPointerId !== null && this.resultStage.hasPointerCapture(this.paintPointerId);
+  }
+
+  updateHoldPoint() {
+    if (!this.paintPointerPosition) return;
+    const point = this.resultPoint(this.paintPointerPosition.x, this.paintPointerPosition.y);
+    if ((!point && !this.paintPoint) || (point && this.paintPoint &&
+        Math.abs(point.x - this.paintPoint.x) < 1e-9 && Math.abs(point.y - this.paintPoint.y) < 1e-9)) return;
+    this.paintPoint = point;
+    this.onPaintHoldMove(point);
   }
 
   ensurePaintTarget() {
@@ -182,8 +233,10 @@ export class Preview {
     const media = this.resultCanvas.hidden ? this.resultImage : this.resultCanvas;
     if (media.hidden) return null;
     const box = media.getBoundingClientRect();
+    const stage = this.resultStage.getBoundingClientRect();
     if (box.width <= 0 || box.height <= 0 || clientX < box.left || clientX > box.right ||
-        clientY < box.top || clientY > box.bottom) return null;
+        clientY < box.top || clientY > box.bottom || clientX < stage.left || clientX > stage.right ||
+        clientY < stage.top || clientY > stage.bottom) return null;
     return { x: (clientX - box.left) / box.width, y: (clientY - box.top) / box.height };
   }
 
@@ -199,6 +252,7 @@ export class Preview {
   }
 
   setSource(dataUrl) {
+    this.stopPaintGesture();
     this.sourceSize = null;
     this.sourceImage.src = dataUrl;
     this.fit();
@@ -210,6 +264,7 @@ export class Preview {
     const visible = this.resultCanvas.hidden ? this.resultImage : this.resultCanvas;
     this.place(this.resultStage, visible, this.resultSize);
     this.layoutFocus(visible);
+    this.updateHoldPoint();
   }
 
   layoutFocus(visible) {
@@ -244,6 +299,7 @@ export class Preview {
   }
 
   clearResult() {
+    this.stopPaintGesture();
     this.blankResult = false;
     this.resultSize = null;
     this.resultImage.removeAttribute("src");

@@ -43,6 +43,7 @@ def _image() -> bytes:
 
 
 def _click_fraction(page: Page, x: float, y: float) -> None:
+    page.locator("#result-canvas").scroll_into_view_if_needed()
     box = page.locator("#result-canvas").bounding_box()
     assert box
     page.mouse.click(box["x"] + x * box["width"], box["y"] + y * box["height"])
@@ -510,6 +511,225 @@ def test_paint_interruption_stops_pending_clicks_and_preserves_snapshot(
         expected = "1 accepted / 1 attempts" if broken else "0 accepted / 1 attempts"
         expect(page.locator("#telemetry-acceptance")).to_have_text(expected)
         expect(page.locator("#download-png")).to_have_attribute("aria-disabled", "false")
+        browser.close()
+
+
+def _move_fraction(page: Page, x: float, y: float) -> None:
+    box = page.locator("#result-canvas").bounding_box()
+    assert box
+    page.mouse.move(box["x"] + x * box["width"], box["y"] + y * box["height"])
+
+
+def _prepare_hold(page: Page, server_url: str) -> None:
+    page.goto(server_url, wait_until="networkidle")
+    _mock_runs(page)
+    page.locator("#image-input").set_input_files({"name":"wide.png","mimeType":"image/png","buffer":_image()})
+    expect(page.locator("#status")).to_have_text("Ready")
+    page.get_by_role("combobox", name="Paint behavior", exact=True).select_option("hold")
+    page.get_by_role("button", name="Paint", exact=True).click()
+    expect(page.locator("#result-canvas")).to_be_visible()
+    page.locator("#result-stage").evaluate("""stage => stage.addEventListener('pointerdown', event => {
+      window.holdPointerId = event.pointerId;
+    })""")
+
+
+def test_hold_scheduler_keeps_one_latest_target_and_no_click_backlog() -> None:
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = browser.new_page()
+        _module(page, "focus.js")
+        result = page.evaluate("""async () => {
+          const calls = [], states = [], deferred = [];
+          const tick = () => new Promise(resolve => setTimeout(resolve, 0));
+          const focus = x => ({x, y:0.5, radius:0.2, strength:0.75});
+          const queue = new PaintQueue({onState:(state, detail) => states.push([state,detail]),
+            runStroke:value => {calls.push(value); return new Promise(resolve => deferred.push(resolve));}});
+          queue.setEnabled(true); queue.setBehavior('hold');
+          const target = focus(0.1); queue.startHold(target); target.x = 1;
+          for (let i = 0; i < 100; i++) queue.moveHold(focus(0.2 + i / 200));
+          queue.updateHoldSettings({radius:0.35,strength:0.9});
+          await tick();
+          const initial = {calls:calls.length,pending:queue.pending.length};
+          deferred[0]({added:1}); await tick();
+          queue.moveHold(null); deferred[1]({added:1}); await tick();
+          const outside = {calls:calls.length,held:queue.held,running:queue.running};
+          queue.moveHold(focus(0.8)); await tick();
+          queue.stopHold(); const releasing = states.at(-1);
+          deferred[2]({added:1}); await tick();
+          const released = states.at(-1);
+          queue.moveHold(focus(0.9)); await tick();
+          return {calls,initial,outside,releasing,released,held:queue.held,pending:queue.pending.length};
+        }""")
+        assert result["initial"] == {"calls":1,"pending":0}
+        assert result["outside"] == {"calls":2,"held":True,"running":False}
+        assert len(result["calls"]) == 3
+        assert result["calls"][0]["x"] == 0.1
+        assert result["calls"][1] == pytest.approx({"x":0.695,"y":0.5,"radius":0.35,"strength":0.9})
+        assert result["calls"][2]["x"] == 0.8
+        assert result["releasing"][0] == result["released"][0] == "released"
+        assert result["releasing"][1]["running"] is True
+        assert result["released"][1]["running"] is False
+        assert result["held"] is False
+        assert result["pending"] == 0
+        browser.close()
+
+
+def test_hold_paints_latest_pointer_then_settles_release_and_preserves_pan(server_url: str) -> None:
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = browser.new_page(viewport={"width":1440,"height":1050})
+        errors: list[str] = []
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        _prepare_hold(page, server_url)
+        transform = page.locator("#result-canvas").evaluate("canvas => canvas.style.transform")
+        _move_fraction(page, 0.2, 0.25)
+        page.mouse.down()
+        page.wait_for_function("runRequests.length === 1")
+        for x in [0.4, 0.6, 0.8]:
+            _move_fraction(page, x, 0.75)
+        page.locator("#focus-strength-number").fill("90")
+        page.locator("#focus-strength-number").dispatch_event("change")
+        assert page.evaluate("runRequests.length") == 1
+        assert page.evaluate("focusRequests.length") == 0
+        assert page.locator("#result-canvas").evaluate("canvas => canvas.style.transform") == transform
+        page.evaluate("finishStroke()")
+        page.wait_for_function("runRequests.length === 2")
+        requests = page.evaluate("runRequests")
+        assert [request["options"]["steps"] for request in requests] == [1, 1]
+        assert [request["options"]["focus"]["x"] for request in requests] == pytest.approx([0.2, 0.8])
+        assert [request["options"]["focus"]["y"] for request in requests] == pytest.approx([0.25, 0.75])
+        assert [request["options"]["focus"]["strength"] for request in requests] == [0.75, 0.9]
+        page.mouse.up()
+        expect(page.locator("#paint-status")).to_have_text("Released · finishing current shape")
+        page.evaluate("finishStroke()")
+        expect(page.locator("#paint-status")).to_have_text("Hold released")
+        expect(page.locator("#telemetry-acceptance")).to_have_text("2 accepted / 2 attempts")
+        assert page.evaluate("runRequests.length") == 2
+        page.keyboard.down("Shift")
+        _move_fraction(page, 0.5, 0.5)
+        page.mouse.down()
+        box = page.locator("#result-canvas").bounding_box()
+        assert box
+        page.mouse.move(box["x"] + box["width"] / 2 + 12, box["y"] + box["height"] / 2 + 8)
+        page.mouse.up()
+        page.keyboard.up("Shift")
+        assert page.locator("#result-canvas").evaluate("canvas => canvas.style.transform") != transform
+        _move_fraction(page, 0.5, 0.5)
+        page.mouse.wheel(0, -100)
+        expect(page.locator("#zoom-value")).to_have_text("115%")
+        assert page.evaluate("runRequests.length") == 2
+        assert errors == []
+        browser.close()
+
+
+@pytest.mark.parametrize("stop", ["cancel","capture","blur","hidden","focus","behavior","clear","pause"])
+def test_hold_lifecycle_stops_future_strokes(server_url: str, stop: str) -> None:
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = browser.new_page(viewport={"width":1440,"height":1050})
+        _prepare_hold(page, server_url)
+        page.route("**/api/sessions/paint-session/pause", lambda route: route.fulfill(
+            status=200, content_type="application/json", body=json.dumps({"run_id":"stroke-1"}),
+        ))
+        _move_fraction(page, 0.2, 0.3)
+        page.mouse.down()
+        expect(page.locator("#pause-button")).to_be_enabled()
+        if stop == "cancel":
+            page.evaluate("""() => document.querySelector('#result-stage').dispatchEvent(
+              new PointerEvent('pointercancel', {pointerId:holdPointerId}))""")
+        elif stop == "capture":
+            page.evaluate("document.querySelector('#result-stage').releasePointerCapture(holdPointerId)")
+        elif stop == "blur":
+            page.evaluate("window.dispatchEvent(new Event('blur'))")
+        elif stop == "hidden":
+            page.evaluate("""() => {
+              Object.defineProperty(document,'hidden',{configurable:true,value:true});
+              document.dispatchEvent(new Event('visibilitychange'));
+            }""")
+        elif stop == "focus":
+            page.locator("#focus-toggle").dispatch_event("click")
+        elif stop == "behavior":
+            page.locator("#paint-behavior").select_option("click")
+        elif stop == "clear":
+            page.locator("#focus-clear").dispatch_event("click")
+        else:
+            page.locator("#pause-button").dispatch_event("click")
+            expect(page.locator("#telemetry-state")).to_have_text("Pausing")
+        page.evaluate("reason => finishStroke(reason)", "paused" if stop == "pause" else "target_reached")
+        expect(page.locator("#run-button")).to_have_text("Continue")
+        assert page.locator("#result-stage").get_attribute("data-gesture") is None
+        _move_fraction(page, 0.8, 0.7)
+        page.mouse.up()
+        assert page.evaluate("runRequests.length") == 1
+        expected = "0 accepted / 1 attempts" if stop == "pause" else "1 accepted / 1 attempts"
+        expect(page.locator("#telemetry-acceptance")).to_have_text(expected)
+        browser.close()
+
+
+@pytest.mark.parametrize("reason,broken", [
+    ("no_further_improvement",False),("adequate_fit",False),("paused",False),
+    ("error",False),("target_reached",True),
+])
+def test_unproductive_or_interrupted_hold_requires_a_new_press(server_url: str, reason: str, broken: bool) -> None:
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = browser.new_page(viewport={"width":1440,"height":1050})
+        _prepare_hold(page, server_url)
+        page.route("**/api/sessions/paint-session/snapshot", lambda route: route.fulfill(
+            status=200, content_type="application/json", body=json.dumps(page.evaluate("lastSnapshot")),
+        ))
+        _move_fraction(page, 0.2, 0.3)
+        page.mouse.down()
+        expect(page.locator("#pause-button")).to_be_enabled()
+        page.evaluate("([reason,broken]) => finishStroke(reason,broken)", [reason,broken])
+        expect(page.locator("#paint-status")).to_contain_text("stopped:")
+        expect(page.locator("#run-button")).to_have_text("Continue")
+        _move_fraction(page, 0.8, 0.7)
+        assert page.locator("#result-stage").get_attribute("data-gesture") is None
+        assert page.evaluate("runRequests.length") == 1
+        page.mouse.up()
+        page.mouse.down()
+        page.wait_for_function("runRequests.length === 2")
+        page.mouse.up()
+        page.evaluate("finishStroke()")
+        expect(page.locator("#paint-status")).to_have_text("Hold released")
+        assert page.evaluate("runRequests.length") == 2
+        browser.close()
+
+
+@pytest.mark.parametrize("replacement", ["source","project"])
+def test_hold_suspends_outside_media_and_replacement_clears_it(
+    server_url: str, tmp_path: Path, replacement: str
+) -> None:
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = browser.new_page(viewport={"width":1440,"height":1050})
+        _prepare_hold(page, server_url)
+        saved = tmp_path / "before-hold.json"
+        _save_project(page, saved)
+        _move_fraction(page, 0.2, 0.3)
+        page.mouse.down()
+        expect(page.locator("#pause-button")).to_be_enabled()
+        stage = page.locator("#result-stage").bounding_box()
+        assert stage
+        page.mouse.move(stage["x"] + 10, stage["y"] + 5)
+        expect(page.locator("#paint-status")).to_have_text("Move over the result to keep painting")
+        page.evaluate("finishStroke()")
+        expect(page.locator("#run-button")).to_have_text("Continue")
+        assert page.evaluate("runRequests.length") == 1
+        if replacement == "source":
+            page.locator("#image-input").set_input_files({
+                "name":"replacement.png","mimeType":"image/png","buffer":_image(),
+            })
+            expect(page.locator("#status")).to_have_text("Ready")
+        else:
+            page.locator("#project-input").set_input_files(saved)
+            expect(page.locator("#status")).to_have_text("Project loaded — Run starts a new render")
+        expect(page.locator("#paint-toggle")).to_have_attribute("aria-pressed", "false")
+        assert page.locator("#result-stage").get_attribute("data-gesture") is None
+        page.mouse.move(stage["x"] + stage["width"] / 2, stage["y"] + stage["height"] / 2)
+        page.mouse.up()
+        assert page.evaluate("runRequests.length") == 1
         browser.close()
 
 

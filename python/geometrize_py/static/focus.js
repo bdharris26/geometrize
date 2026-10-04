@@ -86,18 +86,24 @@ export class FocusUpdates {
   }
 }
 
-// A stroke retains its click position even if later clicks move the indicator.
-// Turning Paint off discards pending strokes; the current one-shape stroke finishes.
+// Clicks keep their captured targets. A hold keeps only its latest target and
+// starts another stroke when fitting finishes, so no timer can build a backlog.
+// Stopping discards future work; the current one-shape stroke finishes.
 export class PaintQueue {
-  constructor({ runStroke, onState = () => {}, capacity = 12 }) {
+  constructor({ runStroke, onState = () => {}, canHold = () => true, capacity = 12 }) {
     this.runStroke = runStroke;
     this.onState = onState;
+    this.canHold = canHold;
     this.capacity = capacity;
     this.enabled = false;
     this.busy = false;
     this.running = false;
     this.pending = [];
     this.generation = 0;
+    this.behavior = "click";
+    this.held = false;
+    this.holdTarget = null;
+    this.releaseGeneration = null;
   }
 
   setEnabled(value) {
@@ -112,14 +118,23 @@ export class PaintQueue {
     if (!value) void this.drain();
   }
 
+  setBehavior(value) {
+    if (this.behavior === value) return;
+    this.behavior = value;
+    this.clear();
+  }
+
   clear() {
     this.generation += 1;
     this.pending = [];
+    this.held = false;
+    this.holdTarget = null;
+    this.releaseGeneration = null;
     this.report("cleared");
   }
 
   enqueue(focus) {
-    if (!this.enabled) return false;
+    if (!this.enabled || this.behavior !== "click") return false;
     if (this.pending.length >= this.capacity) {
       this.report("full");
       return false;
@@ -130,8 +145,42 @@ export class PaintQueue {
     return true;
   }
 
+  startHold(focus) {
+    if (!this.enabled || this.behavior !== "hold") return;
+    this.generation += 1;
+    this.pending = [];
+    this.held = true;
+    this.holdTarget = copy(focus);
+    this.releaseGeneration = null;
+    this.report("holding");
+    void this.drain();
+  }
+
+  moveHold(focus) {
+    if (!this.held) return;
+    const wasInside = Boolean(this.holdTarget);
+    this.holdTarget = copy(focus);
+    if (!focus && wasInside) this.report("waiting");
+    void this.drain();
+  }
+
+  updateHoldSettings(focus) {
+    if (!this.holdTarget || !focus) return;
+    this.holdTarget = { ...this.holdTarget, radius: focus.radius, strength: focus.strength };
+  }
+
+  stopHold() {
+    if (!this.held) return;
+    this.generation += 1;
+    this.held = false;
+    this.holdTarget = null;
+    this.releaseGeneration = this.running ? this.generation : null;
+    this.report("released");
+  }
+
   report(state, detail = "") {
-    this.onState(state, { pending: this.pending.length, running: this.running, detail, capacity: this.capacity });
+    this.onState(state, { pending: this.pending.length, running: this.running,
+      holding: this.held, detail, capacity: this.capacity });
   }
 
   async drain() {
@@ -139,32 +188,55 @@ export class PaintQueue {
     const generation = this.generation;
     this.running = true;
     try {
-      while (this.enabled && !this.busy && generation === this.generation && this.pending.length) {
-        const focus = this.pending.shift();
+      while (this.enabled && !this.busy && generation === this.generation &&
+          (this.pending.length || (this.held && this.holdTarget))) {
+        if (this.held && !this.canHold()) {
+          this.stopHold();
+          break;
+        }
+        const holding = this.held;
+        const focus = holding ? copy(this.holdTarget) : this.pending.shift();
         this.report("running");
         try {
           const result = await this.runStroke(focus);
-          if (generation !== this.generation) break;
+          if (generation !== this.generation && this.releaseGeneration !== this.generation) break;
           if (result.cancelled) {
             this.pending = [];
+            this.held = false;
+            this.holdTarget = null;
+            this.releaseGeneration = null;
             this.report("stopped", result.reason || "Stroke interrupted");
             break;
           }
+          if (generation !== this.generation) break;
           if (result.added > 0) this.report("accepted");
           else {
             // An adequate fit or exhausted attempts are a completed stroke,
             // not an instruction to repeatedly submit the same click.
+            if (holding) {
+              this.held = false;
+              this.holdTarget = null;
+              this.report("hold_stopped", result.reason || "No further improvement");
+              break;
+            }
             this.report("rejected", result.reason || "No further improvement");
           }
         } catch (error) {
-          if (generation !== this.generation) break;
+          if (generation !== this.generation && this.releaseGeneration !== this.generation) break;
           this.pending = [];
+          this.held = false;
+          this.holdTarget = null;
+          this.releaseGeneration = null;
           this.report("error", error.message || "Stroke failed");
           break;
         }
       }
     } finally {
       this.running = false;
+      if (this.releaseGeneration === this.generation) {
+        this.releaseGeneration = null;
+        this.report("released");
+      }
       if (generation !== this.generation) void this.drain();
     }
   }
@@ -176,6 +248,7 @@ export class FocusControls {
     this.definition = definition;
     this.onChange = onChange;
     this.mode = "pan";
+    this.paintBehavior = "click";
     this.value = null;
     this.remembered = null;
     this.available = false;
@@ -192,6 +265,10 @@ export class FocusControls {
     elements.toggle.addEventListener("click", () => this.setMode(this.mode === "focus" ? "pan" : "focus"));
     elements.paint.addEventListener("click", () => this.setMode(this.mode === "paint" ? "pan" : "paint"));
     elements.clear.addEventListener("click", () => this.reset());
+    elements.behavior.addEventListener("change", () => {
+      this.paintBehavior = elements.behavior.value;
+      this.changed();
+    });
     this.render();
   }
 
@@ -202,7 +279,7 @@ export class FocusControls {
   changed() {
     this.feedback = "";
     this.render();
-    this.onChange(copy(this.value), this.mode);
+    this.onChange(copy(this.value), this.mode, this.paintBehavior);
   }
 
   setMode(mode) {
@@ -256,6 +333,8 @@ export class FocusControls {
     const value = this.value || this.remembered || this.defaults();
     this.el.toggle.disabled = !this.available;
     this.el.paint.disabled = !this.available;
+    this.el.behavior.disabled = !this.available;
+    this.el.behavior.value = this.paintBehavior;
     this.el.toggle.setAttribute("aria-pressed", String(this.mode === "focus"));
     this.el.paint.setAttribute("aria-pressed", String(this.mode === "paint"));
     this.el.clear.disabled = !this.available || (!this.value && !this.remembered);
@@ -269,7 +348,8 @@ export class FocusControls {
     this.el.position.textContent = this.value
       ? `Center ${Math.round(value.x * 100)}% / ${Math.round(value.y * 100)}%` : "Full image";
     this.el.status.textContent = this.feedback || (!this.available ? "Load an image to focus or paint." :
-      this.mode === "pan" ? "Off · drag previews to pan" : this.mode === "paint" ? "Click the result to add one shape." :
+      this.mode === "pan" ? "Off · drag previews to pan" : this.mode === "paint" ?
+        (this.paintBehavior === "hold" ? "Hold on the result to paint; release to stop." : "Click the result to add one shape.") :
         this.running ? "Focus changes apply to future attempts." : "Focus applies to the next batch.");
   }
 }

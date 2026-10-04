@@ -58,6 +58,7 @@ current so the next agent can find the important edges quickly.
   when optimizing rasterization.
 - Focus changes candidate setup only; full-image mutation, rasterization, and
   energy stay upstream. Live focus uses a separate control lock and the active
-  run token; Paint queues ordinary one-shape batches with captured focus.
+  run token; Paint uses ordinary one-shape batches. Clicks capture their focus;
+  a hold samples the latest pointer only when fitting is ready for another shape.
 - Keep new docs concise. The point of this port is a small native-feeling
   Python project, not a migration archive.

@@ -505,6 +505,19 @@ select:focus-visible,
   font-size: 0.72rem;
 }
 
+.paint-behavior-label {
+  color: var(--muted);
+  font-size: 0.72rem;
+  margin-left: 5px;
+}
+
+#paint-behavior {
+  inline-size: auto;
+  min-height: 32px;
+  padding: 3px 8px;
+  font-size: 0.76rem;
+}
+
 .focus-fields {
   display: grid;
   grid-template-columns: 1fr 1fr;

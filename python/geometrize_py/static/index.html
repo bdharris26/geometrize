@@ -116,6 +116,11 @@
           <div class="focus-actions">
             <button id="focus-toggle" class="secondary" type="button" aria-pressed="false" disabled>Focus area</button>
             <button id="paint-toggle" class="secondary" type="button" aria-pressed="false" disabled>Paint</button>
+            <label class="paint-behavior-label" for="paint-behavior">Paint behavior</label>
+            <select id="paint-behavior" aria-label="Paint behavior" disabled>
+              <option value="click">Click once</option>
+              <option value="hold">Hold to paint</option>
+            </select>
             <button id="focus-clear" class="secondary" type="button" disabled>Clear focus</button>
             <output id="focus-position">Full image</output>
           </div>
@@ -131,7 +136,7 @@
               <input id="focus-strength-number" type="number" min="0" max="100" step="0.1" value="75" aria-label="Focus strength percent of candidates" disabled>
             </div>
           </div>
-          <p id="focus-help" class="settings-help">Focus: click or drag the result to move the area; arrows adjust it. Paint: each click tries to add one shape; turning it off discards queued clicks after the current stroke. Pause stops after the current attempt. Shift+drag pans. Placement is biased toward the area; refinement and full-image error can move shapes outside it.</p>
+          <p id="focus-help" class="settings-help">Focus: click or drag the result; arrows adjust the area. Paint: click once, or hold to add shapes one at a time at the pointer. Release stops the hold after the current shape. Pause stops after the current attempt. Shift+drag pans. Placement is biased toward the area; refinement and full-image error can move shapes outside it.</p>
           <div class="focus-feedback"><span id="focus-status" role="status">Load an image to focus or paint.</span><span id="paint-status" role="status"></span></div>
         </section>
         <div class="preview-grid">

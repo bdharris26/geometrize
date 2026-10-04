@@ -41,12 +41,13 @@ Scoring still measures the full image, and shapes can extend or move outside
 the ring. Disabling focus or setting strength to zero preserves normal fitting.
 Use Shift+drag to pan the result while focusing or painting.
 
-Paint mode tries to add one accepted shape per click on the live result. It
-also works before the first render. Up to 12 pending clicks are processed in
-order with their captured focus positions. Leaving Paint clears queued clicks
-and finishes the active stroke; Pause finishes the current optimizer attempt.
-A click can add no shape when the image is already matched or no candidate
-improves the fit. Projects save focus settings and batch history.
+Paint offers Click once and Hold to paint, including before the first render.
+Click once queues up to 12 clicks with their captured focus positions. Holding
+fits one shape at a time at the latest pointer position; releasing finishes the
+active shape and stops further work. Leaving Paint clears pending work; Pause
+finishes the current optimizer attempt. Holds also stop on an interruption or
+when no candidate improves the fit. A click can add no shape when the image is
+already matched. Projects save focus settings and the complete batch history.
 
 The source and live result share zoom and pan controls. Pause finishes the
 current fitting step and confirms the final counts before Continue becomes

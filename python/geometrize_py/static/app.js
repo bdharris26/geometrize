@@ -515,6 +515,7 @@ async function startRun({ paintFocus = null } = {}) {
 async function pauseRun() {
   if (phase !== "running" || !sessionId || !activeRunId) return;
   const version = runVersion;
+  preview.stopPaintGesture();
   paintQueue.clear();
   phase = "pausing";
   ui.status.textContent = "Pausing after the current attempt";
@@ -766,7 +767,16 @@ async function init() {
       onPaint: (point) => {
         focus.move(point);
         paintQueue.enqueue(focus.value);
-      }
+      },
+      onPaintHoldStart: (point) => {
+        focus.move(point);
+        paintQueue.startHold(focus.value);
+      },
+      onPaintHoldMove: (point) => {
+        if (point) focus.move(point);
+        paintQueue.moveHold(point ? focus.value : null);
+      },
+      onPaintHoldStop: () => paintQueue.stopHold()
     });
     preview.clearResult();
     focusUpdates = new FocusUpdates({
@@ -776,33 +786,42 @@ async function init() {
           "Focus applies from the next attempt.")
     });
     paintQueue = new PaintQueue({
+      canHold: () => preview.paintGestureActive(),
       runStroke: async (paintFocus) => {
         const outcome = await startRun({ paintFocus });
         if (!outcome?.confirmed) throw new Error(outcome?.message || "Could not complete the stroke");
         return outcome;
       },
-      onState: (state, { pending, running, detail, capacity }) => {
+      onState: (state, { pending, running, holding, detail, capacity }) => {
+        if (["error", "stopped", "hold_stopped", "released"].includes(state)) preview.stopPaintGesture();
         const queue = pending ? ` · ${pending} queued` : "";
         byId("paint-status").textContent = state === "full" ? `Queue full (${capacity}) · wait for a stroke` :
           state === "error" || state === "stopped" ? `Paint stopped: ${detail}` : state === "rejected" ? `No shape added: ${detail}${queue}` :
-            state === "accepted" ? `Added one shape${queue}` : state === "running" || state === "queued" ?
-              `${running ? "Painting one shape" : "Paint ready"}${queue}` : "";
+            state === "hold_stopped" ? `Hold stopped: no shape added · ${detail}` :
+              state === "waiting" ? "Move over the result to keep painting" :
+                state === "released" ? (running ? "Released · finishing current shape" : "Hold released") :
+                  holding ? "Painting while held · one shape at a time" :
+                    state === "accepted" ? `Added one shape${queue}` : state === "running" || state === "queued" ?
+                      `${running ? "Painting one shape" : "Paint ready"}${queue}` : "";
       }
     });
     focus = new FocusControls({
       toggle: byId("focus-toggle"), paint: byId("paint-toggle"), clear: byId("focus-clear"),
+      behavior: byId("paint-behavior"),
       radius: byId("focus-radius"), radiusNumber: byId("focus-radius-number"),
       strength: byId("focus-strength"), strengthNumber: byId("focus-strength-number"),
       position: byId("focus-position"), status: byId("focus-status")
-    }, contract.focus, (value, mode) => {
+    }, contract.focus, (value, mode, paintBehavior) => {
       if (mode === "paint") focusUpdates.end();
       focusUpdates.update(value);
       if (mode !== "paint" && !runIsPaint && activeRunId && !focusUpdates.context &&
           (phase === "running" || phase === "pausing")) {
         focusUpdates.begin({ sessionId, runId: activeRunId, runVersion, contentVersion }, undefined);
       }
-      preview.setFocus(value, mode);
+      preview.setFocus(value, mode, paintBehavior);
+      paintQueue.setBehavior(paintBehavior);
       paintQueue.setEnabled(mode === "paint");
+      paintQueue.updateHoldSettings(value);
       ui.preset.value = "custom";
     });
     telemetry = new Telemetry({
