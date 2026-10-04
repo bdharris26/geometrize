@@ -27,7 +27,7 @@ py -3 -m venv .venv
 .\.venv\Scripts\python.exe -m geometrize_py serve --host 127.0.0.1 --port 7860
 ```
 
-Open `http://127.0.0.1:7860`, choose a PNG, JPEG, WebP, BMP, or GIF, and choose
+Open `http://127.0.0.1:7860`, choose a PNG/APNG, JPEG, WebP, BMP, or GIF, and choose
 Quick sketch, Balanced, or Fine detail. Set the number of shapes to add, then
 start a render. Advanced controls expose all nine primitives, seed, candidates,
 mutations, and a per-batch CPU limit. Changes apply to the next batch; New render
@@ -60,6 +60,20 @@ Switch between retained experiments to compare them, and use Name / remove to
 rename one or remove an inactive experiment after its children have been removed.
 Working resolution stays fixed to each experiment's scene until New render.
 
+Source controls select a still frame and the matte behind transparent pixels.
+New uploads use the first frame and a white matte; choose Black, Custom, or Keep
+transparency as needed. Animated sources show their selected frame and retain
+the original file for later selections. Frames use zero-based indexes; APNG's
+default image, when present, is index 0. Discovery is limited to the first 256
+frames, and selection also has a bounded decoding-work budget.
+Sources with oversized metadata or legacy PNG "Raw profile type exif" text are
+rejected before decoding; standard EXIF orientation is supported.
+The starting background is separate: Average, White, Black, or a custom opaque
+color initializes the reconstruction without changing the source. Apply to new
+render commits frame, matte, and background edits together, retaining the previous
+experiment. Continue and forks keep their existing target and canvas. Palette
+extraction uses the selected, matted source shown in the preview.
+
 Palette controls constrain the RGB colors of new shapes. Enter hex colors and
 choose Use colors, or Extract source with a maximum of 1 to 32 colors. Extraction
 uses a small sample, ignores fully transparent pixels, and can return fewer colors
@@ -84,9 +98,12 @@ continuous paths and antialiasing, so curved boundaries can differ more at large
 export sizes. The fitting engine uses its own
 scanline and blending rules for the error score. Project JSON saves the source,
 every experiment's full head and settings, complete batch history, and the selected
-prefix. Version 2 projects accept older version 1 files as a single Original
-experiment. Live sessions can Continue after switching back; reopened or expired
-sessions require an explicit Restore or Fork before fitting. A project supports
+prefix. The app accepts project versions 1, 2, and 3. Older projects keep their
+first-frame and transparency behavior; version 1 becomes a single Original
+experiment. New projects retain source policies and a fingerprint of each fitted
+target, so restore detects a changed target. Live sessions can Continue after
+switching back; reopened or expired sessions require an explicit Restore or Fork
+before fitting. A project supports
 32 experiments, 200,000 retained shapes, and 1,000,000 polyline points in total.
 Legacy preview-only results use New render to start fitting while retaining the preview.
 
