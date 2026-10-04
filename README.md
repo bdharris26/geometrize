@@ -114,6 +114,7 @@ Legacy preview-only results use New render to start fitting while retaining the 
   --output build\logo.png `
   --svg build\logo.svg `
   --json build\logo.json `
+  --project build\logo.geometrize.json `
   --steps 128 --shape-types ellipse,rotated_rectangle,triangle `
   --max-size 1024 --export-size 2048
 ```
@@ -121,6 +122,63 @@ Legacy preview-only results use New render to start fitting while retaining the 
 Add `--focus-x 0.75 --focus-y 0.25` to bias placement around that normalized
 center. `--focus-radius` defaults to `0.2` of the shorter edge, and
 `--focus-strength` defaults to `0.75`; valid ranges are `0.01–1` and `0–1`.
+
+Use `--frame 1` to choose an animated source frame, `--matte white` or a hex
+color to fill transparent pixels, and `--background black` or a hex color to
+set the starting canvas. CLI defaults preserve frame 0, source transparency,
+and the average background. `--palette "#E0B84F,#58C3A8"` constrains new shapes;
+`--extract-palette 8` extracts source colors, and `--palette-file palette.json`
+reads RGB colors saved by `palette extract`. These choices are mutually exclusive.
+`--palette-strength 1` uses exact colors; a lower value applies a softer preference.
+
+`--steps` requests accepted shapes; `--shape-count` controls candidate starts per
+attempt, and `--mutations` controls how long refinement continues without
+improvement. A run can stop early when the target is matched, improvement stalls,
+or a limit is reached.
+`--max-threads` sets the per-job fitting limit within the total `--workers` budget.
+
+Run several inputs or seed experiments serially:
+
+```powershell
+.\.venv\Scripts\python.exe -m geometrize_py batch screenshots\logo.png `
+  --output-dir build\sketches --seeds 11,22,33 --project --svg `
+  --steps 64 --max-size 512 --export-size 1024
+```
+
+PNG files use indexed names so inputs with matching basenames stay distinct.
+The output directory's `manifest.json` records settings, results, errors, and
+published artifacts; `--manifest` chooses another path. Independent jobs continue
+after failures, and the command returns a nonzero status if any job fails. Output
+paths are checked before fitting and each artifact is replaced atomically; a
+multi-file job can publish some artifacts before a later write fails.
+Ctrl+C stops later jobs and records the interrupted job and any published outputs
+in the manifest when that file can still be written.
+
+Inspect and export saved geometry, or create a retained experiment from a prefix:
+
+```powershell
+.\.venv\Scripts\python.exe -m geometrize_py project inspect build\logo.geometrize.json --json
+.\.venv\Scripts\python.exe -m geometrize_py project export build\logo.geometrize.json `
+  --at-shape 64 --output build\prefix.png --svg build\prefix.svg --export-size 2048
+.\.venv\Scripts\python.exe -m geometrize_py project fork build\logo.geometrize.json `
+  --at-shape 64 --seed 42 --steps 128 --name "Detail experiment" `
+  --output build\detail.geometrize.json
+```
+
+`--branch` selects an experiment ID reported by inspection. Omit `--at-shape` to
+use its full head. Inspection and geometry export work without the native
+backend; preview-only legacy results remain inspectable. Forking replays into a
+fresh native session, retains the parent, and resets fitting attempts. Its default
+is replay only (`--steps 0`); positive steps add new shapes. Omitted settings inherit
+from the selected experiment. Frame, matte, background, and working resolution
+stay fixed; `--focus-off` and `--palette-off` clear inherited fitting constraints.
+
+`source inspect INPUT` reports selected-frame metadata. `palette extract INPUT
+--max-colors 8 --output palette.json` saves reusable colors. Both accept `--frame`
+and `--matte` and work without native fitting. Invalid numeric flags are rejected
+instead of silently clamped. Rendering, source helpers, and project commands accept
+`--workers` and `--active-memory-mb`; large images or projects may need a larger
+budget, for example `--active-memory-mb 8192` on a machine with sufficient RAM.
 
 Use `.\.venv\Scripts\python.exe -m geometrize_py doctor` to confirm that the
 native backend can be imported, or add `--json` for structured diagnostics.
@@ -137,6 +195,8 @@ resumable-session cache budget; the normal 512 MB configuration stays unchanged.
 
 - `python/geometrize_py/` contains the Python package, web server, static UI,
   image helpers, SVG exporter, CLI, and native backend wrapper.
+- `cli_options.py` validates command-line settings, `cli_jobs.py` handles admitted
+  jobs and output publication, and `project.py` validates saved experiment graphs.
 - `python/geometrize_py/native_bindings.cpp` is the pybind11 bridge into the
   C++ core; `native_focus.h` and `native_palette.h` compose placement and color
   callbacks without changing the upstream engine.
