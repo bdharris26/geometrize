@@ -60,6 +60,15 @@ Switch between retained experiments to compare them, and use Name / remove to
 rename one or remove an inactive experiment after its children have been removed.
 Working resolution stays fixed to each experiment's scene until New render.
 
+Palette controls constrain the RGB colors of new shapes. Enter hex colors and
+choose Use colors, or Extract source with a maximum of 1 to 32 colors. Extraction
+uses a small sample, ignores fully transparent pixels, and can return fewer colors
+than requested. Exact uses the chosen colors; Soft pulls the optimal fitted color
+toward the palette with adjustable strength. Zero strength preserves ordinary fitting.
+Opacity blending can produce intermediate pixel colors. Palette edits apply to
+the next batch or paint stroke; retained shapes keep their original colors, and
+each experiment saves its own palette.
+
 The source and live result share zoom and pan controls. Pause finishes the
 current fitting step and confirms the final counts before Continue becomes
 available. The error chart shows the initial baseline and recent improvements;
@@ -112,7 +121,8 @@ resumable-session cache budget; the normal 512 MB configuration stays unchanged.
 - `python/geometrize_py/` contains the Python package, web server, static UI,
   image helpers, SVG exporter, CLI, and native backend wrapper.
 - `python/geometrize_py/native_bindings.cpp` is the pybind11 bridge into the
-  C++ core; `native_focus.h` composes the core's placement callbacks.
+  C++ core; `native_focus.h` and `native_palette.h` compose placement and color
+  callbacks without changing the upstream engine.
 - `lib/geometrize/` is the upstream core engine submodule.
 - `tests/python/` covers the native wrapper, CLI, rendering, exports, and HTTP
   API.
