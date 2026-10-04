@@ -72,6 +72,8 @@ OPTION_DEFAULTS = {
     "stagnation_limit": 128,
     "focus": None,
     "palette": None,
+    "source": {"frame": 0, "matte": None},
+    "background": None,
 }
 FOCUS_DEFAULTS = {"radius": 0.2, "strength": 0.75}
 FOCUS_LIMITS = {"x": (0.0, 1.0), "y": (0.0, 1.0), "radius": (0.01, 1.0), "strength": (0.0, 1.0)}
@@ -82,6 +84,11 @@ PALETTE_DEFAULTS = {"max_colors": 8, "strength": 1.0, "soft_strength": 0.75}
 MAX_SOURCE_DIMENSION = 16384
 MAX_SOURCE_PIXELS = 8192 * 8192
 MAX_REQUEST_BYTES = 64 * 1024 * 1024
+SOURCE_MAX_FRAMES = 256
+SOURCE_MAX_DECODE_WORK = 128_000_000
+SOURCE_PREVIEW_SIZE = 1024
+SOURCE_MAX_RECORDS = 1_000_000
+SOURCE_MAX_METADATA_BYTES = 64 * 1024 * 1024
 PROJECT_FORMAT = "geometrize-project"
 PROJECT_VERSION = 2
 PROJECT_MAX_BYTES = MAX_REQUEST_BYTES
@@ -96,8 +103,8 @@ PROJECT_MAX_HISTORY_SHAPES = 200000
 PROJECT_MAX_HISTORY_POINTS = 1_000_000
 RESTORE_MAX_RASTER_POINTS = 2_000_000
 RESTORE_MAX_WORK = 1_000_000_000
-RASTER_MIME_TYPES = ("image/png", "image/jpeg", "image/webp", "image/bmp", "image/gif")
-RASTER_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif")
+RASTER_MIME_TYPES = ("image/png", "image/apng", "image/jpeg", "image/webp", "image/bmp", "image/gif")
+RASTER_EXTENSIONS = (".png", ".apng", ".jpg", ".jpeg", ".webp", ".bmp", ".gif")
 
 PRESETS = {
     "quick": {"label": "Quick sketch", "options": {"steps": 64, "shape_count": 16, "mutations": 32, "max_size": 256}},
@@ -131,6 +138,13 @@ def app_contract() -> dict[str, Any]:
             "sample_size": PALETTE_SAMPLE_SIZE,
             "defaults": deepcopy(PALETTE_DEFAULTS),
             "limits": {"strength": {"min": 0.0, "max": 1.0}},
+        },
+        "source": {
+            "defaults": {"frame": 0, "matte": None},
+            "limits": {"frame": {"min": 0, "max": SOURCE_MAX_FRAMES - 1}},
+            "max_frames": SOURCE_MAX_FRAMES,
+            "max_decode_work": SOURCE_MAX_DECODE_WORK,
+            "preview_size": SOURCE_PREVIEW_SIZE,
         },
         "images": {
             "mime_types": list(RASTER_MIME_TYPES),
