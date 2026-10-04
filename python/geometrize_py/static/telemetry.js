@@ -1,5 +1,7 @@
 "use strict";
 
+const HISTORY_PAGE_SIZE = 50;
+
 function fixed(value) {
   return typeof value === "number" && Number.isFinite(value) ?
     (Math.abs(value) < 0.00005 ? 0 : value).toFixed(4) : "--";
@@ -52,6 +54,12 @@ export class Telemetry {
   constructor(elements, shapeLabels) {
     this.el = elements;
     this.shapeLabels = shapeLabels;
+    elements.historyOlder?.addEventListener("click", () => this.pageHistory(-1));
+    elements.historyNewer?.addEventListener("click", () => this.pageHistory(1));
+    elements.historyLatest?.addEventListener("click", () => {
+      this.historyStart = null;
+      this.renderHistory();
+    });
     this.reset();
   }
 
@@ -63,6 +71,8 @@ export class Telemetry {
     this.attempts = 0;
     this.initialScore = null;
     this.batches = [];
+    this.historyStart = null;
+    this.historyRows = null;
     this.state = "Idle";
     this.elapsed = 0;
     this.render();
@@ -123,7 +133,9 @@ export class Telemetry {
     for (const key of ["focus", "initial_focus"]) {
       if (key in summary) batch[key] = summary[key] ? { ...summary[key] } : null;
     }
-    const previous = this.batches.findIndex((item) => item.index === batch.index);
+    const last = this.batches.at(-1);
+    const previous = !last || last.index < batch.index ? -1 : last.index === batch.index ? this.batches.length - 1 :
+      this.batches.findIndex((item) => item.index === batch.index);
     if (previous >= 0) this.batches[previous] = batch;
     else this.batches.push(batch);
     this.render();
@@ -167,7 +179,37 @@ export class Telemetry {
     });
     el.mix.replaceChildren(...rows);
 
-    const chips = this.batches.map((batch) => {
+    this.renderHistory();
+  }
+
+  pageHistory(direction) {
+    const latest = Math.max(0, this.batches.length - HISTORY_PAGE_SIZE);
+    const start = this.historyStart ?? latest;
+    const next = Math.max(0, start + direction * HISTORY_PAGE_SIZE);
+    this.historyStart = next >= latest ? null : next;
+    this.renderHistory();
+  }
+
+  renderHistory() {
+    const el = this.el;
+    const count = this.batches.length;
+    const latest = Math.max(0, count - HISTORY_PAGE_SIZE);
+    const start = this.historyStart === null ? latest : Math.min(this.historyStart, latest);
+    const visible = this.batches.slice(start, start + HISTORY_PAGE_SIZE);
+    if (el.historySummary) el.historySummary.textContent = `${this.shapes.length.toLocaleString()} shapes · ${count.toLocaleString()} batches`;
+    if (el.historyWindow) el.historyWindow.textContent = count ?
+      `${this.historyStart === null ? "Latest" : "History"} · ${start + 1}–${start + visible.length} of ${count.toLocaleString()} batches` :
+      "No completed batches";
+    if (el.historyOlder) el.historyOlder.disabled = start === 0;
+    if (el.historyNewer) el.historyNewer.disabled = this.historyStart === null;
+    if (el.historyLatest) el.historyLatest.disabled = this.historyStart === null;
+    // Running telemetry changes much more frequently than completed history.
+    // Preserve the scroll position and DOM of an older page as new batches land.
+    if (this.historyRows && visible.length === this.historyRows.length &&
+        visible.every((row, index) => row === this.historyRows[index])) return;
+    const scrollTop = el.history.scrollTop;
+    this.historyRows = visible;
+    const chips = visible.map((batch) => {
       const chip = document.createElement("span");
       const label = document.createElement("span");
       const added = document.createElement("strong");
@@ -181,5 +223,6 @@ export class Telemetry {
       return chip;
     });
     el.history.replaceChildren(...chips);
+    el.history.scrollTop = this.historyStart === null ? el.history.scrollHeight : scrollTop;
   }
 }

@@ -168,7 +168,19 @@
           <span id="telemetry-improvement" title="Error is measured by the fitting engine at working resolution. PNG and SVG use different drawing rules, so their pixels can differ.">Error -- · lower is better</span>
           <span id="telemetry-duration">--</span>
         </div>
-        <div id="batch-history" class="batch-history" aria-label="Completed shape batches"></div>
+        <section class="batch-history-section" aria-labelledby="batch-history-title">
+          <div class="batch-history-header">
+            <span id="batch-history-title">Batch history</span>
+            <output id="batch-history-summary">0 shapes · 0 batches</output>
+            <div class="batch-history-actions" aria-label="Batch history pages">
+              <button id="batch-history-older" class="secondary" type="button" disabled>Older</button>
+              <button id="batch-history-newer" class="secondary" type="button" disabled>Newer</button>
+              <button id="batch-history-latest" class="secondary" type="button" disabled>Latest</button>
+            </div>
+          </div>
+          <div id="batch-history" class="batch-history" role="region" tabindex="0" aria-label="Completed shape batches" aria-describedby="batch-history-window"></div>
+          <span id="batch-history-window" class="settings-help">No completed batches</span>
+        </section>
         <div class="telemetry-grid">
           <article class="telemetry-card">
             <header><span>Convergence</span><output id="telemetry-score">--</output></header>

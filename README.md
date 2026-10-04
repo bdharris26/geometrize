@@ -48,6 +48,8 @@ active shape and stops further work. Leaving Paint clears pending work; Pause
 finishes the current optimizer attempt. Holds also stop on an interruption or
 when no candidate improves the fit. A click can add no shape when the image is
 already matched. Projects save focus settings and the complete batch history.
+The history panel keeps a fixed height, shows at most 50 batches, and lets you
+page through older entries without shrinking the previews.
 
 The source and live result share zoom and pan controls. Pause finishes the
 current fitting step and confirms the final counts before Continue becomes

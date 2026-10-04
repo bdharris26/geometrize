@@ -697,11 +697,60 @@ figcaption span {
   overflow-wrap: anywhere;
 }
 
+.batch-history-section {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.batch-history-header {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+#batch-history-title {
+  font-weight: 760;
+}
+
+#batch-history-summary {
+  color: var(--accent-strong);
+  font-weight: 650;
+}
+
+.batch-history-actions {
+  display: flex;
+  gap: 5px;
+  margin-left: auto;
+}
+
+.batch-history-actions button {
+  min-width: 0;
+  min-height: 25px;
+  padding: 2px 7px;
+  font-size: 0.7rem;
+}
+
 .batch-history {
   display: flex;
   flex-wrap: wrap;
+  align-content: flex-start;
+  align-items: flex-start;
   gap: 7px;
   min-height: 0;
+  height: 64px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  padding: 2px;
+}
+
+.batch-history:focus-visible {
+  outline: 2px solid var(--gold);
+  outline-offset: 2px;
 }
 
 .batch-chip {

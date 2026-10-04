@@ -733,6 +733,100 @@ def test_hold_suspends_outside_media_and_replacement_clears_it(
         browser.close()
 
 
+def test_history_paging_preserves_older_view_during_new_batches_and_reset(server_url: str) -> None:
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = browser.new_page(viewport={"width":1440,"height":1050})
+        page.goto(server_url, wait_until="networkidle")
+        _module(page, "telemetry.js")
+        page.evaluate("""() => {
+          const id = value => document.getElementById(value);
+          window.historyTelemetry = new Telemetry({state:id('telemetry-state'),
+            acceptance:id('telemetry-acceptance'),improvement:id('telemetry-improvement'),
+            duration:id('telemetry-duration'),score:id('telemetry-score'),baseline:id('telemetry-baseline'),
+            total:id('telemetry-total'),impact:id('telemetry-impact'),scoreGraph:id('score-graph'),
+            impactGraph:id('impact-graph'),mix:id('primitive-mix'),history:id('batch-history'),
+            historySummary:id('batch-history-summary'),historyWindow:id('batch-history-window'),
+            historyOlder:id('batch-history-older'),historyNewer:id('batch-history-newer'),
+            historyLatest:id('batch-history-latest')}, {circle:'Circle'});
+          window.historyBatch = index => ({index,target:1,shapeTypes:['circle'],candidates:10,
+            mutations:10,alpha:128,added:1,attempts:1,state:'Target reached'});
+          historyTelemetry.batches = Array.from({length:5000}, (_, index) => historyBatch(index+1));
+          historyTelemetry.render();
+        }""")
+        expect(page.locator("#batch-history .batch-chip")).to_have_count(50)
+        expect(page.locator("#batch-history-window")).to_have_text("Latest · 4951–5000 of 5,000 batches")
+        # Use the dedicated instance directly; the app instance has its own page listeners.
+        page.evaluate("historyTelemetry.pageHistory(-1)")
+        expect(page.locator("#batch-history-window")).to_have_text("History · 4901–4950 of 5,000 batches")
+        result = page.evaluate("""() => {
+          const history = document.getElementById('batch-history');
+          history.scrollTop = 15; const chip = history.firstChild, position = history.scrollTop;
+          historyTelemetry.addBatch(historyBatch(5001)); historyTelemetry.setState('Running');
+          return {same:chip===history.firstChild,position,after:history.scrollTop,
+            count:history.childElementCount,total:historyTelemetry.batches.length};
+        }""")
+        assert result == {"same":True,"position":15,"after":15,"count":50,"total":5001}
+        expect(page.locator("#batch-history-window")).to_have_text("History · 4901–4950 of 5,001 batches")
+        page.evaluate("historyTelemetry.pageHistory(1)")
+        expect(page.locator("#batch-history-window")).to_have_text("History · 4951–5000 of 5,001 batches")
+        page.evaluate("historyTelemetry.pageHistory(1)")
+        expect(page.locator("#batch-history-window")).to_have_text("Latest · 4952–5001 of 5,001 batches")
+        page.evaluate("historyTelemetry.reset()")
+        expect(page.locator("#batch-history .batch-chip")).to_have_count(0)
+        expect(page.locator("#batch-history-summary")).to_have_text("0 shapes · 0 batches")
+        expect(page.locator("#batch-history-window")).to_have_text("No completed batches")
+        browser.close()
+
+
+@pytest.mark.parametrize("viewport", [{"width":1440,"height":1050},{"width":390,"height":1000}])
+def test_long_project_history_uses_fixed_space_and_round_trips_all_batches(
+    server_url: str, tmp_path: Path, viewport: dict[str, int]
+) -> None:
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = browser.new_page(viewport=viewport)
+        _prepare_hold(page, server_url)
+        page.locator("#paint-behavior").select_option("click")
+        _click_fraction(page, 0.2, 0.3)
+        page.evaluate("finishStroke()")
+        expect(page.locator("#run-button")).to_have_text("Continue")
+        single = _save_project(page, tmp_path / "single.json")
+        before = page.locator(".preview-grid").bounding_box()
+        assert before
+        project = json.loads(json.dumps(single))
+        original = single["telemetry"]["batches"][0]
+        project["telemetry"]["batches"] = [{**original,"index":index} for index in range(1, 2001)]
+        path = tmp_path / "long-history.json"
+        path.write_text(json.dumps(project), encoding="utf-8")
+        page.locator("#project-input").set_input_files(path)
+        expect(page.locator("#status")).to_have_text("Project loaded — Run starts a new render")
+        expect(page.locator("#batch-history .batch-chip")).to_have_count(50)
+        expect(page.locator("#batch-history-summary")).to_have_text("1 shapes · 2,000 batches")
+        expect(page.locator("#batch-history-window")).to_have_text("Latest · 1951–2000 of 2,000 batches")
+        after = page.locator(".preview-grid").bounding_box()
+        assert after
+        assert after["height"] == pytest.approx(before["height"], abs=1)
+        assert after["width"] == pytest.approx(before["width"], abs=1)
+        assert page.locator("#batch-history").evaluate("e => e.clientHeight") == 64
+        assert page.locator("#batch-history").evaluate("e => e.scrollHeight > e.clientHeight")
+        page.get_by_role("button", name="Older", exact=True).click()
+        expect(page.locator("#batch-history-window")).to_have_text("History · 1901–1950 of 2,000 batches")
+        page.get_by_role("button", name="Newer", exact=True).click()
+        expect(page.locator("#batch-history-window")).to_have_text("Latest · 1951–2000 of 2,000 batches")
+        page.get_by_role("button", name="Older", exact=True).click()
+        page.get_by_role("button", name="Latest", exact=True).click()
+        expect(page.locator("#batch-history-latest")).to_be_disabled()
+        saved = _save_project(page, tmp_path / "resaved-history.json")
+        assert saved["telemetry"]["batches"] == project["telemetry"]["batches"]
+        page.locator("#project-input").set_input_files(tmp_path / "resaved-history.json")
+        expect(page.locator("#batch-history-window")).to_have_text("Latest · 1951–2000 of 2,000 batches")
+        page.get_by_role("button", name="New render", exact=True).click()
+        expect(page.locator("#batch-history .batch-chip")).to_have_count(0)
+        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+        browser.close()
+
+
 def test_both_resolution_controls_accept_8192_and_project_round_trip(server_url: str, tmp_path: Path) -> None:
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()

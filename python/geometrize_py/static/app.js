@@ -830,7 +830,10 @@ async function init() {
       score: byId("telemetry-score"), baseline: byId("telemetry-baseline"),
       total: byId("telemetry-total"), impact: byId("telemetry-impact"),
       scoreGraph: byId("score-graph"), impactGraph: byId("impact-graph"),
-      mix: byId("primitive-mix"), history: byId("batch-history")
+      mix: byId("primitive-mix"), history: byId("batch-history"),
+      historySummary: byId("batch-history-summary"), historyWindow: byId("batch-history-window"),
+      historyOlder: byId("batch-history-older"), historyNewer: byId("batch-history-newer"),
+      historyLatest: byId("batch-history-latest")
     }, Object.fromEntries(contract.shapes.map((shape) => [shape.type, shape.label])));
     bindEvents();
     setControls();
