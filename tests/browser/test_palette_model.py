@@ -1,32 +1,12 @@
 from __future__ import annotations
 
-import threading
-from collections.abc import Iterator
-
-import pytest
-from playwright.sync_api import sync_playwright
-
-from geometrize_py.web import GeometrizeRequestHandler, GeometrizeServer
+from playwright.sync_api import Browser
 
 
-@pytest.fixture
-def server_url() -> Iterator[str]:
-    server = GeometrizeServer(("127.0.0.1", 0), GeometrizeRequestHandler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    host, port = server.server_address
-    yield f"http://{host}:{port}"
-    server.shutdown()
-    server.server_close()
-    thread.join(timeout=5)
-
-
-def test_palette_validation_defaults_and_nested_snapshot_isolation(server_url: str) -> None:
-    with sync_playwright() as playwright:
-        browser = playwright.chromium.launch()
-        page = browser.new_page()
-        page.goto(server_url, wait_until="networkidle")
-        result = page.evaluate("""async () => {
+def test_palette_validation_defaults_and_nested_snapshot_isolation(server_url: str, browser: Browser) -> None:
+    page = browser.new_page()
+    page.goto(server_url, wait_until="networkidle")
+    result = page.evaluate("""async () => {
           const {validatePalette,parseHexColors,copyPalette} = await import('/static/palette.js');
           const {ReconstructionHistory} = await import('/static/history.js');
           const {validateProject} = await import('/static/project.js');
@@ -70,11 +50,10 @@ def test_palette_validation_defaults_and_nested_snapshot_isolation(server_url: s
             inactive,
             projectErrors,softZero:validatePalette({colors:[[1,2,3]],strength:0})};
         }""")
-        assert result["palette"] == {"colors":[[1,2,3],[4,5,6]], "strength":1}
-        assert all(result["errors"])
-        assert result["parsed"] == [[170,187,204],[1,35,69]]
-        assert result["independentlyCopied"] and result["isolated"] == {"option":1,"batch":1}
-        assert result["inactive"] == {"colors":[[90,80,70]],"strength":0}
-        assert all(result["projectErrors"])
-        assert result["softZero"] == {"colors":[[1,2,3]],"strength":0}
-        browser.close()
+    assert result["palette"] == {"colors":[[1,2,3],[4,5,6]], "strength":1}
+    assert all(result["errors"])
+    assert result["parsed"] == [[170,187,204],[1,35,69]]
+    assert result["independentlyCopied"] and result["isolated"] == {"option":1,"batch":1}
+    assert result["inactive"] == {"colors":[[90,80,70]],"strength":0}
+    assert all(result["projectErrors"])
+    assert result["softZero"] == {"colors":[[1,2,3]],"strength":0}

@@ -2,27 +2,11 @@ from __future__ import annotations
 
 import io
 import json
-import threading
-from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 from PIL import Image
-from playwright.sync_api import Page, expect, sync_playwright
-
-from geometrize_py.web import GeometrizeRequestHandler, GeometrizeServer
-
-
-@pytest.fixture
-def server_url() -> Iterator[str]:
-    server = GeometrizeServer(("127.0.0.1", 0), GeometrizeRequestHandler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    host, port = server.server_address
-    yield f"http://{host}:{port}"
-    server.shutdown()
-    server.server_close()
-    thread.join(timeout=5)
+from playwright.sync_api import Browser, Page, expect
 
 
 def _save(page: Page, path: Path) -> dict:
@@ -123,291 +107,285 @@ def _click_result(page: Page, x: float = 0.5) -> None:
     page.mouse.click(box["x"]+box["width"]*x, box["y"]+box["height"]*0.5)
 
 
-def test_native_exact_palette_keeps_retained_shapes_and_background(server_url: str, tmp_path: Path) -> None:
-    with sync_playwright() as playwright:
-        browser = playwright.chromium.launch()
-        page = browser.new_page()
-        page.goto(server_url, wait_until="networkidle")
-        expect(page.locator("#native-state")).to_have_text("Core ready")
-        page.locator("#sample-button").click()
-        page.locator("#max-size-number").fill("64")
-        page.locator("#steps-number").fill("2")
-        page.locator(".advanced-controls summary").click()
-        page.locator("#shape-count").fill("16")
-        page.locator("#mutations").fill("24")
-        page.locator("#max-threads").fill("1")
-        page.locator("#run-button").click()
-        expect(page.locator("#run-button")).to_have_text("Continue", timeout=120_000)
-        original = _save(page, tmp_path / "native-off.json")
-        page.locator(".palette-controls summary").click()
-        _colors(page,"#F5DC82,#468246,#8C4628")
-        page.locator("#run-button").click()
-        expect(page.locator("#run-button")).to_have_text("Continue", timeout=120_000)
-        constrained = _save(page, tmp_path / "native-exact.json")
-        assert constrained["result"]["shapes"][:2] == original["result"]["shapes"]
-        assert constrained["result"]["background"] == original["result"]["background"]
-        added = constrained["result"]["shapes"][2:]
-        assert added
-        colors = constrained["options"]["palette"]["colors"]
-        for shape in added:
-            assert [shape["color"][channel] for channel in ("r","g","b")] in colors
-            assert shape["color"]["a"] == 128
-        assert constrained["telemetry"]["batches"][0]["palette"] is None
-        assert constrained["telemetry"]["batches"][1]["palette"] == constrained["options"]["palette"]
-        page.locator("#experiment-fork").click()
-        expect(page.locator("#status")).to_contain_text("ready to Continue")
-        restored = _save(page, tmp_path / "native-exact-restored.json")
-        assert [shape["color"] for shape in restored["result"]["shapes"]] == [
-            shape["color"] for shape in constrained["result"]["shapes"]
-        ]
-        browser.close()
+def test_native_exact_palette_keeps_retained_shapes_and_background(
+    server_url: str, tmp_path: Path,
+    browser: Browser,
+) -> None:
+    page = browser.new_page()
+    page.goto(server_url, wait_until="networkidle")
+    expect(page.locator("#native-state")).to_have_text("Core ready")
+    page.locator("#sample-button").click()
+    page.locator("#max-size-number").fill("64")
+    page.locator("#steps-number").fill("2")
+    page.locator(".advanced-controls summary").click()
+    page.locator("#shape-count").fill("16")
+    page.locator("#mutations").fill("24")
+    page.locator("#max-threads").fill("1")
+    page.locator("#run-button").click()
+    expect(page.locator("#run-button")).to_have_text("Continue", timeout=120_000)
+    original = _save(page, tmp_path / "native-off.json")
+    page.locator(".palette-controls summary").click()
+    _colors(page,"#F5DC82,#468246,#8C4628")
+    page.locator("#run-button").click()
+    expect(page.locator("#run-button")).to_have_text("Continue", timeout=120_000)
+    constrained = _save(page, tmp_path / "native-exact.json")
+    assert constrained["result"]["shapes"][:2] == original["result"]["shapes"]
+    assert constrained["result"]["background"] == original["result"]["background"]
+    added = constrained["result"]["shapes"][2:]
+    assert added
+    colors = constrained["options"]["palette"]["colors"]
+    for shape in added:
+        assert [shape["color"][channel] for channel in ("r","g","b")] in colors
+        assert shape["color"]["a"] == 128
+    assert constrained["telemetry"]["batches"][0]["palette"] is None
+    assert constrained["telemetry"]["batches"][1]["palette"] == constrained["options"]["palette"]
+    page.locator("#experiment-fork").click()
+    expect(page.locator("#status")).to_contain_text("ready to Continue")
+    restored = _save(page, tmp_path / "native-exact-restored.json")
+    assert [shape["color"] for shape in restored["result"]["shapes"]] == [
+        shape["color"] for shape in constrained["result"]["shapes"]
+    ]
 
 
-def test_native_soft_zero_matches_off_and_source_extraction_is_bounded(server_url: str, tmp_path: Path) -> None:
-    with sync_playwright() as playwright:
-        browser = playwright.chromium.launch()
-        page = browser.new_page()
-        page.goto(server_url, wait_until="networkidle")
-        page.locator("#sample-button").click()
-        page.locator("#max-size-number").fill("64")
-        page.locator("#steps-number").fill("2")
-        page.locator(".advanced-controls summary").click()
-        page.locator("#shape-count").fill("16")
-        page.locator("#mutations").fill("24")
-        page.locator("#max-threads").fill("1")
-        page.locator("#run-button").click()
-        expect(page.locator("#run-button")).to_have_text("Continue", timeout=120_000)
-        off = _save(page, tmp_path / "off-native.json")
-        page.locator(".palette-controls summary").click()
-        page.locator("#palette-extract-count").fill("32")
-        page.locator("#palette-extract").click()
-        expect(page.locator("#palette-mode")).to_have_value("exact", timeout=30_000)
-        count = page.locator("#palette-swatches li").count()
-        assert 1 <= count <= 32
-        page.locator("#palette-mode").select_option("soft")
-        page.locator("#palette-strength-number").fill("0")
-        page.locator("#palette-strength-number").dispatch_event("change")
-        page.locator("#restart-button").click()
-        page.locator("#run-button").click()
-        expect(page.locator("#run-button")).to_have_text("Continue", timeout=120_000)
-        zero = _save(page, tmp_path / "zero-native.json")
-        assert zero["result"]["shapes"] == off["result"]["shapes"]
-        assert zero["result"]["background"] == off["result"]["background"]
-        assert zero["options"]["palette"]["strength"] == 0
-        assert zero["telemetry"]["batches"][0]["palette"]["strength"] == 0
-        browser.close()
+def test_native_soft_zero_matches_off_and_source_extraction_is_bounded(
+    server_url: str, tmp_path: Path,
+    browser: Browser,
+) -> None:
+    page = browser.new_page()
+    page.goto(server_url, wait_until="networkidle")
+    page.locator("#sample-button").click()
+    page.locator("#max-size-number").fill("64")
+    page.locator("#steps-number").fill("2")
+    page.locator(".advanced-controls summary").click()
+    page.locator("#shape-count").fill("16")
+    page.locator("#mutations").fill("24")
+    page.locator("#max-threads").fill("1")
+    page.locator("#run-button").click()
+    expect(page.locator("#run-button")).to_have_text("Continue", timeout=120_000)
+    off = _save(page, tmp_path / "off-native.json")
+    page.locator(".palette-controls summary").click()
+    page.locator("#palette-extract-count").fill("32")
+    page.locator("#palette-extract").click()
+    expect(page.locator("#palette-mode")).to_have_value("exact", timeout=30_000)
+    count = page.locator("#palette-swatches li").count()
+    assert 1 <= count <= 32
+    page.locator("#palette-mode").select_option("soft")
+    page.locator("#palette-strength-number").fill("0")
+    page.locator("#palette-strength-number").dispatch_event("change")
+    page.locator("#restart-button").click()
+    page.locator("#run-button").click()
+    expect(page.locator("#run-button")).to_have_text("Continue", timeout=120_000)
+    zero = _save(page, tmp_path / "zero-native.json")
+    assert zero["result"]["shapes"] == off["result"]["shapes"]
+    assert zero["result"]["background"] == off["result"]["background"]
+    assert zero["options"]["palette"]["strength"] == 0
+    assert zero["telemetry"]["batches"][0]["palette"]["strength"] == 0
 
 
 @pytest.mark.parametrize("viewport", [{"width":1440,"height":1000},{"width":390,"height":1000}])
 def test_palette_committed_edits_modes_projects_and_branch_settings(
-    server_url: str, tmp_path: Path, viewport: dict[str, int]
+    server_url: str, tmp_path: Path, viewport: dict[str, int],
+    browser: Browser,
 ) -> None:
-    with sync_playwright() as playwright:
-        browser = playwright.chromium.launch()
-        page = browser.new_page(viewport=viewport)
-        errors: list[str] = []
-        page.on("pageerror", lambda error: errors.append(str(error)))
-        _prepare(page, server_url)
-        _colors(page, "#123, #ABC, #112233")
-        expect(page.locator("#palette-mode")).to_have_value("exact")
-        expect(page.locator("#palette-swatches li")).to_have_count(2)
-        _run(page)
-        first = _save(page, tmp_path / "palette-first.json")
-        assert first["options"]["palette"] == {"colors":[[17,34,51],[170,187,204]],"strength":1}
-        page.locator("#palette-mode").select_option("soft")
-        page.locator("#palette-strength-number").fill("0")
-        page.locator("#palette-strength-number").dispatch_event("change")
-        assert _save(page, tmp_path / "soft-zero.json")["options"]["palette"]["strength"] == 0
-        page.locator("#palette-strength-number").fill("100")
-        page.locator("#palette-strength-number").dispatch_event("change")
-        expect(page.locator("#palette-mode")).to_have_value("exact")
-        page.locator("#palette-colors").fill("not a hex color")
-        page.locator("#palette-apply").click()
-        expect(page.locator("#palette-colors")).to_have_attribute("aria-invalid","true")
-        _run(page)
-        assert page.evaluate("runRequests[1].options.palette") == first["options"]["palette"]
-        saved = _save(page, tmp_path / "invalid-draft.json")
-        assert saved["options"]["palette"] == first["options"]["palette"]
-        assert saved["telemetry"]["batches"][0]["palette"] == first["options"]["palette"]
-        _colors(page, "#F00")
-        page.locator("#experiment-fork").click()
-        expect(page.locator("#status")).to_contain_text("ready to Continue")
-        branched = _save(page, tmp_path / "branched.json")
-        assert branched["options"]["palette"] == {"colors":[[255,0,0]],"strength":1}
-        assert branched["history"]["branches"][0]["result"]["shapes"] == saved["result"]["shapes"]
-        page.locator("#experiment-select").select_option("experiment-1")
-        expect(page.locator("#palette-colors")).to_have_value("#FF0000")
-        _colors(page, "#00F")
-        page.locator("#experiment-select").select_option("experiment-2")
-        expect(page.locator("#palette-colors")).to_have_value("#FF0000")
-        page.locator("#project-input").set_input_files(tmp_path / "branched.json")
-        expect(page.locator("#status")).to_have_text("Project loaded — Restore or fork to continue")
-        assert _save(page, tmp_path / "palette-round-trip.json")["history"] == branched["history"]
-        page.locator("#palette-mode").select_option("off")
-        expect(page.locator("#palette-colors")).to_have_value("#FF0000")
-        assert _save(page, tmp_path / "off.json")["options"]["palette"] is None
-        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
-        assert errors == []
-        browser.close()
+    page = browser.new_page(viewport=viewport)
+    errors: list[str] = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    _prepare(page, server_url)
+    _colors(page, "#123, #ABC, #112233")
+    expect(page.locator("#palette-mode")).to_have_value("exact")
+    expect(page.locator("#palette-swatches li")).to_have_count(2)
+    _run(page)
+    first = _save(page, tmp_path / "palette-first.json")
+    assert first["options"]["palette"] == {"colors":[[17,34,51],[170,187,204]],"strength":1}
+    page.locator("#palette-mode").select_option("soft")
+    page.locator("#palette-strength-number").fill("0")
+    page.locator("#palette-strength-number").dispatch_event("change")
+    assert _save(page, tmp_path / "soft-zero.json")["options"]["palette"]["strength"] == 0
+    page.locator("#palette-strength-number").fill("100")
+    page.locator("#palette-strength-number").dispatch_event("change")
+    expect(page.locator("#palette-mode")).to_have_value("exact")
+    page.locator("#palette-colors").fill("not a hex color")
+    page.locator("#palette-apply").click()
+    expect(page.locator("#palette-colors")).to_have_attribute("aria-invalid","true")
+    _run(page)
+    assert page.evaluate("runRequests[1].options.palette") == first["options"]["palette"]
+    saved = _save(page, tmp_path / "invalid-draft.json")
+    assert saved["options"]["palette"] == first["options"]["palette"]
+    assert saved["telemetry"]["batches"][0]["palette"] == first["options"]["palette"]
+    _colors(page, "#F00")
+    page.locator("#experiment-fork").click()
+    expect(page.locator("#status")).to_contain_text("ready to Continue")
+    branched = _save(page, tmp_path / "branched.json")
+    assert branched["options"]["palette"] == {"colors":[[255,0,0]],"strength":1}
+    assert branched["history"]["branches"][0]["result"]["shapes"] == saved["result"]["shapes"]
+    page.locator("#experiment-select").select_option("experiment-1")
+    expect(page.locator("#palette-colors")).to_have_value("#FF0000")
+    _colors(page, "#00F")
+    page.locator("#experiment-select").select_option("experiment-2")
+    expect(page.locator("#palette-colors")).to_have_value("#FF0000")
+    page.locator("#project-input").set_input_files(tmp_path / "branched.json")
+    expect(page.locator("#status")).to_have_text("Project loaded — Restore or fork to continue")
+    assert _save(page, tmp_path / "palette-round-trip.json")["history"] == branched["history"]
+    page.locator("#palette-mode").select_option("off")
+    expect(page.locator("#palette-colors")).to_have_value("#FF0000")
+    assert _save(page, tmp_path / "off.json")["options"]["palette"] is None
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+    assert errors == []
 
 
 @pytest.mark.parametrize("replacement", ["edit","source","branch","failed_import","restore"])
 @pytest.mark.parametrize("error", [False,True])
 def test_palette_extraction_ignores_changed_editor_source_branch_or_restore(
-    server_url: str, replacement: str, error: bool
+    server_url: str, replacement: str, error: bool,
+    browser: Browser,
 ) -> None:
-    with sync_playwright() as playwright:
-        browser = playwright.chromium.launch()
-        page = browser.new_page()
-        _prepare(page, server_url)
-        _colors(page, "#123")
-        _run(page)
-        if replacement == "branch":
-            page.locator("#restart-button").click()
-            expect(page.locator("#status")).to_have_text("New render ready")
-            page.locator("#experiment-select").select_option("experiment-1")
-            expect(page.locator("#status")).to_contain_text("Original selected")
-        page.locator("#palette-extract").click()
-        assert page.evaluate("paletteRequests[0].max_colors") == 8
-        if replacement == "edit":
-            _colors(page,"#F00")
-        elif replacement == "source":
-            page.locator("#sample-button").click()
-            expect(page.locator("#status")).to_have_text("Ready")
-        elif replacement == "branch":
-            page.locator("#experiment-select").select_option("experiment-2")
-            expect(page.locator("#experiment-select")).to_have_value("experiment-2")
-        elif replacement == "failed_import":
-            page.locator("#project-input").set_input_files({"name":"bad.json","mimeType":"application/json","buffer":b"{"})
-            expect(page.locator("#status")).to_contain_text("Could not open project")
-        else:
-            page.evaluate("deferPaletteRestore=true")
-            page.locator("#experiment-fork").click()
-            expect(page.locator("#palette-mode")).to_be_disabled()
-        mode = page.locator("#palette-mode").input_value()
-        text = page.locator("#palette-colors").input_value()
-        feedback = page.locator("#palette-status").inner_text()
-        page.evaluate("error => paletteReplies[0]([[0,255,0]], error)", error)
-        page.evaluate("() => new Promise(resolve => setTimeout(resolve,0))")
-        expect(page.locator("#palette-mode")).to_have_value(mode)
-        expect(page.locator("#palette-colors")).to_have_value(text)
-        expect(page.locator("#palette-status")).to_have_text(feedback)
-        if replacement == "restore":
-            page.evaluate("restoreReplies[0]()")
-            expect(page.locator("#palette-mode")).to_be_enabled()
-            expect(page.locator("#palette-colors")).to_have_value("#112233")
-        else:
-            expect(page.locator("#palette-extract")).to_be_enabled()
-        browser.close()
+    page = browser.new_page()
+    _prepare(page, server_url)
+    _colors(page, "#123")
+    _run(page)
+    if replacement == "branch":
+        page.locator("#restart-button").click()
+        expect(page.locator("#status")).to_have_text("New render ready")
+        page.locator("#experiment-select").select_option("experiment-1")
+        expect(page.locator("#status")).to_contain_text("Original selected")
+    page.locator("#palette-extract").click()
+    assert page.evaluate("paletteRequests[0].max_colors") == 8
+    if replacement == "edit":
+        _colors(page,"#F00")
+    elif replacement == "source":
+        page.locator("#sample-button").click()
+        expect(page.locator("#status")).to_have_text("Ready")
+    elif replacement == "branch":
+        page.locator("#experiment-select").select_option("experiment-2")
+        expect(page.locator("#experiment-select")).to_have_value("experiment-2")
+    elif replacement == "failed_import":
+        page.locator("#project-input").set_input_files({"name":"bad.json","mimeType":"application/json","buffer":b"{"})
+        expect(page.locator("#status")).to_contain_text("Could not open project")
+    else:
+        page.evaluate("deferPaletteRestore=true")
+        page.locator("#experiment-fork").click()
+        expect(page.locator("#palette-mode")).to_be_disabled()
+    mode = page.locator("#palette-mode").input_value()
+    text = page.locator("#palette-colors").input_value()
+    feedback = page.locator("#palette-status").inner_text()
+    page.evaluate("error => paletteReplies[0]([[0,255,0]], error)", error)
+    page.evaluate("() => new Promise(resolve => setTimeout(resolve,0))")
+    expect(page.locator("#palette-mode")).to_have_value(mode)
+    expect(page.locator("#palette-colors")).to_have_value(text)
+    expect(page.locator("#palette-status")).to_have_text(feedback)
+    if replacement == "restore":
+        page.evaluate("restoreReplies[0]()")
+        expect(page.locator("#palette-mode")).to_be_enabled()
+        expect(page.locator("#palette-colors")).to_have_value("#112233")
+    else:
+        expect(page.locator("#palette-extract")).to_be_enabled()
 
 
 @pytest.mark.parametrize("behavior", ["click","hold"])
 def test_palette_requests_snapshot_each_stroke_and_extraction_survives_same_source_fitting(
-    server_url: str, behavior: str
+    server_url: str, behavior: str,
+    browser: Browser,
 ) -> None:
-    with sync_playwright() as playwright:
-        browser = playwright.chromium.launch()
-        page = browser.new_page()
-        _prepare(page, server_url)
-        _colors(page,"#123")
-        page.locator("#palette-extract-count").fill("32")
+    page = browser.new_page()
+    _prepare(page, server_url)
+    _colors(page,"#123")
+    page.locator("#palette-extract-count").fill("32")
+    page.locator("#palette-extract").click()
+    page.locator("#paint-toggle").click()
+    page.locator("#paint-behavior").select_option(behavior)
+    if behavior == "click":
+        _click_result(page, 0.3)
+        _click_result(page, 0.7)
+    else:
+        page.locator("#result-canvas").scroll_into_view_if_needed()
+        box = page.locator("#result-canvas").bounding_box()
+        assert box
+        page.mouse.move(box["x"]+box["width"]*0.5, box["y"]+box["height"]*0.5)
+        page.mouse.down()
+    page.evaluate("paletteReplies[0]([[0,255,0]])")
+    expect(page.locator("#palette-colors")).to_have_value("#00FF00")
+    assert page.evaluate("runRequests[0].options.palette.colors") == [[17,34,51]]
+    page.evaluate("finishPaletteRun()")
+    page.wait_for_function("runRequests.length===2")
+    assert page.evaluate("runRequests[1].options.palette.colors") == [[0,255,0]]
+    if behavior == "hold":
+        page.mouse.up()
+    page.evaluate("finishPaletteRun()")
+    expect(page.locator("#run-button")).to_be_enabled()
+    assert page.evaluate("runRequests.length") == 2
+    assert page.evaluate("paletteRequests.length") == 1
+
+
+def test_palette_extraction_counts_and_new_render_source_lifecycle(
+    server_url: str, tmp_path: Path,
+    browser: Browser,
+) -> None:
+    page = browser.new_page()
+    _prepare(page, server_url)
+    for index,count in enumerate((1,32)):
+        page.locator("#palette-extract-count").fill(str(count))
         page.locator("#palette-extract").click()
-        page.locator("#paint-toggle").click()
-        page.locator("#paint-behavior").select_option(behavior)
-        if behavior == "click":
-            _click_result(page, 0.3)
-            _click_result(page, 0.7)
-        else:
-            page.locator("#result-canvas").scroll_into_view_if_needed()
-            box = page.locator("#result-canvas").bounding_box()
-            assert box
-            page.mouse.move(box["x"]+box["width"]*0.5, box["y"]+box["height"]*0.5)
-            page.mouse.down()
-        page.evaluate("paletteReplies[0]([[0,255,0]])")
-        expect(page.locator("#palette-colors")).to_have_value("#00FF00")
-        assert page.evaluate("runRequests[0].options.palette.colors") == [[17,34,51]]
-        page.evaluate("finishPaletteRun()")
-        page.wait_for_function("runRequests.length===2")
-        assert page.evaluate("runRequests[1].options.palette.colors") == [[0,255,0]]
-        if behavior == "hold":
-            page.mouse.up()
-        page.evaluate("finishPaletteRun()")
-        expect(page.locator("#run-button")).to_be_enabled()
-        assert page.evaluate("runRequests.length") == 2
-        assert page.evaluate("paletteRequests.length") == 1
-        browser.close()
+        assert page.evaluate(f"paletteRequests[{index}].max_colors") == count
+        page.evaluate(f"paletteReplies[{index}]([[10,20,30]])")
+        expect(page.locator("#palette-swatches li")).to_have_count(1)
+    page.locator("#palette-mode").select_option("soft")
+    page.locator("#palette-strength-number").fill("25")
+    page.locator("#palette-strength-number").dispatch_event("change")
+    _run(page)
+    page.locator("#restart-button").click()
+    same_source = _save(page, tmp_path / "same-source.json")
+    assert same_source["options"]["palette"] == {"colors":[[10,20,30]],"strength":0.25}
+    page.locator("#sample-button").click()
+    expect(page.locator("#palette-mode")).to_have_value("off")
+    expect(page.locator("#palette-swatches li")).to_have_count(0)
+    assert _save(page, tmp_path / "new-source.json")["options"]["palette"] is None
 
 
-def test_palette_extraction_counts_and_new_render_source_lifecycle(server_url: str, tmp_path: Path) -> None:
-    with sync_playwright() as playwright:
-        browser = playwright.chromium.launch()
-        page = browser.new_page()
-        _prepare(page, server_url)
-        for index,count in enumerate((1,32)):
-            page.locator("#palette-extract-count").fill(str(count))
-            page.locator("#palette-extract").click()
-            assert page.evaluate(f"paletteRequests[{index}].max_colors") == count
-            page.evaluate(f"paletteReplies[{index}]([[10,20,30]])")
-            expect(page.locator("#palette-swatches li")).to_have_count(1)
-        page.locator("#palette-mode").select_option("soft")
-        page.locator("#palette-strength-number").fill("25")
-        page.locator("#palette-strength-number").dispatch_event("change")
-        _run(page)
-        page.locator("#restart-button").click()
-        same_source = _save(page, tmp_path / "same-source.json")
-        assert same_source["options"]["palette"] == {"colors":[[10,20,30]],"strength":0.25}
-        page.locator("#sample-button").click()
-        expect(page.locator("#palette-mode")).to_have_value("off")
-        expect(page.locator("#palette-swatches li")).to_have_count(0)
-        assert _save(page, tmp_path / "new-source.json")["options"]["palette"] is None
-        browser.close()
-
-
-def test_palette_edits_during_normal_batch_apply_to_next_batch(server_url: str, tmp_path: Path) -> None:
-    with sync_playwright() as playwright:
-        browser = playwright.chromium.launch()
-        page = browser.new_page()
-        _prepare(page,server_url)
-        _colors(page,"#123")
-        page.locator("#run-button").click()
-        _colors(page,"#F00")
-        assert page.evaluate("runRequests[0].options.palette.colors") == [[17,34,51]]
-        page.evaluate("finishPaletteRun()")
-        expect(page.locator("#run-button")).to_have_text("Continue")
-        first = _save(page,tmp_path / "edited-mid-batch.json")
-        assert first["options"]["palette"]["colors"] == [[255,0,0]]
-        assert first["telemetry"]["batches"][0]["palette"]["colors"] == [[17,34,51]]
-        _run(page)
-        second = _save(page,tmp_path / "next-batch.json")
-        assert [batch["palette"]["colors"] for batch in second["telemetry"]["batches"]] == [
-            [[17,34,51]],[[255,0,0]],
-        ]
-        browser.close()
+def test_palette_edits_during_normal_batch_apply_to_next_batch(
+    server_url: str, tmp_path: Path,
+    browser: Browser,
+) -> None:
+    page = browser.new_page()
+    _prepare(page,server_url)
+    _colors(page,"#123")
+    page.locator("#run-button").click()
+    _colors(page,"#F00")
+    assert page.evaluate("runRequests[0].options.palette.colors") == [[17,34,51]]
+    page.evaluate("finishPaletteRun()")
+    expect(page.locator("#run-button")).to_have_text("Continue")
+    first = _save(page,tmp_path / "edited-mid-batch.json")
+    assert first["options"]["palette"]["colors"] == [[255,0,0]]
+    assert first["telemetry"]["batches"][0]["palette"]["colors"] == [[17,34,51]]
+    _run(page)
+    second = _save(page,tmp_path / "next-batch.json")
+    assert [batch["palette"]["colors"] for batch in second["telemetry"]["batches"]] == [
+        [[17,34,51]],[[255,0,0]],
+    ]
 
 
 @pytest.mark.parametrize("old_error", [False,True])
-def test_palette_older_reply_keeps_newer_extraction_pending_and_errors_local(server_url: str, old_error: bool) -> None:
-    with sync_playwright() as playwright:
-        browser = playwright.chromium.launch()
-        page = browser.new_page()
-        errors: list[str] = []
-        page.on("pageerror", lambda error: errors.append(str(error)))
-        _prepare(page,server_url)
-        _colors(page,"#123")
-        page.locator("#palette-extract").click()
-        _colors(page,"#F00")
-        page.locator("#palette-extract-count").fill("")
-        page.locator("#palette-extract").click()
-        assert page.evaluate("paletteRequests[1].max_colors") == 8
-        page.evaluate("error => paletteReplies[0]([[0,255,0]],error)",old_error)
-        page.evaluate("() => new Promise(resolve => setTimeout(resolve,0))")
-        expect(page.locator("#palette-extract")).to_be_disabled()
-        expect(page.locator("#palette-status")).to_have_text("Extracting source colors…")
-        expect(page.locator("#palette-colors")).to_have_value("#FF0000")
-        page.evaluate("paletteReplies[1]([],true)")
-        expect(page.locator("#palette-extract")).to_be_enabled()
-        expect(page.locator("#palette-status")).to_contain_text("Could not extract palette")
-        expect(page.locator("#palette-colors")).to_have_value("#FF0000")
-        expect(page.locator("#status")).to_have_text("Ready")
-        assert errors == []
-        browser.close()
+def test_palette_older_reply_keeps_newer_extraction_pending_and_errors_local(
+    server_url: str, old_error: bool,
+    browser: Browser,
+) -> None:
+    page = browser.new_page()
+    errors: list[str] = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    _prepare(page,server_url)
+    _colors(page,"#123")
+    page.locator("#palette-extract").click()
+    _colors(page,"#F00")
+    page.locator("#palette-extract-count").fill("")
+    page.locator("#palette-extract").click()
+    assert page.evaluate("paletteRequests[1].max_colors") == 8
+    page.evaluate("error => paletteReplies[0]([[0,255,0]],error)",old_error)
+    page.evaluate("() => new Promise(resolve => setTimeout(resolve,0))")
+    expect(page.locator("#palette-extract")).to_be_disabled()
+    expect(page.locator("#palette-status")).to_have_text("Extracting source colors…")
+    expect(page.locator("#palette-colors")).to_have_value("#FF0000")
+    page.evaluate("paletteReplies[1]([],true)")
+    expect(page.locator("#palette-extract")).to_be_enabled()
+    expect(page.locator("#palette-status")).to_contain_text("Could not extract palette")
+    expect(page.locator("#palette-colors")).to_have_value("#FF0000")
+    expect(page.locator("#status")).to_have_text("Ready")
+    assert errors == []

@@ -1,32 +1,12 @@
 from __future__ import annotations
 
-import threading
-from collections.abc import Iterator
-
-import pytest
-from playwright.sync_api import sync_playwright
-
-from geometrize_py.web import GeometrizeRequestHandler, GeometrizeServer
+from playwright.sync_api import Browser
 
 
-@pytest.fixture
-def server_url() -> Iterator[str]:
-    server = GeometrizeServer(("127.0.0.1", 0), GeometrizeRequestHandler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    host, port = server.server_address
-    yield f"http://{host}:{port}"
-    server.shutdown()
-    server.server_close()
-    thread.join(timeout=5)
-
-
-def test_source_policy_validation_and_independent_experiment_snapshots(server_url: str) -> None:
-    with sync_playwright() as playwright:
-        browser = playwright.chromium.launch()
-        page = browser.new_page()
-        page.goto(server_url, wait_until="networkidle")
-        result = page.evaluate("""async () => {
+def test_source_policy_validation_and_independent_experiment_snapshots(server_url: str, browser: Browser) -> None:
+    page = browser.new_page()
+    page.goto(server_url, wait_until="networkidle")
+    result = page.evaluate("""async () => {
           const {validateSource,validateRgb} = await import('/static/source.js');
           const {ReconstructionHistory} = await import('/static/history.js');
           const config = await (await fetch('/api/config')).json();
@@ -53,22 +33,19 @@ def test_source_policy_validation_and_independent_experiment_snapshots(server_ur
           serialized.branches[0].options.background[0]=105;
           return {defaults,errors,backgrounds,isolated,serializedHasSession:'sessionId' in serialized.branches[0]};
         }""")
-        assert result["defaults"] == [{"frame": 0, "matte": None}] * 3
-        assert all(result["errors"]) and all(result["backgrounds"])
-        assert result["isolated"] == {
-            "source": {"frame": 1, "matte": [1, 2, 3]}, "background": [4, 5, 6],
-            "batch": {"index": 1, "source": {"frame": 1, "matte": [7, 8, 9]}, "background": [10, 11, 12]},
-        }
-        assert not result["serializedHasSession"]
-        browser.close()
+    assert result["defaults"] == [{"frame": 0, "matte": None}] * 3
+    assert all(result["errors"]) and all(result["backgrounds"])
+    assert result["isolated"] == {
+        "source": {"frame": 1, "matte": [1, 2, 3]}, "background": [4, 5, 6],
+        "batch": {"index": 1, "source": {"frame": 1, "matte": [7, 8, 9]}, "background": [10, 11, 12]},
+    }
+    assert not result["serializedHasSession"]
 
 
-def test_source_project_target_graph_and_active_options_authority(server_url: str) -> None:
-    with sync_playwright() as playwright:
-        browser = playwright.chromium.launch()
-        page = browser.new_page()
-        page.goto(server_url, wait_until="networkidle")
-        result = page.evaluate("""async () => {
+def test_source_project_target_graph_and_active_options_authority(server_url: str, browser: Browser) -> None:
+    page = browser.new_page()
+    page.goto(server_url, wait_until="networkidle")
+    result = page.evaluate("""async () => {
           const {validateProject} = await import('/static/project.js');
           const config = await (await fetch('/api/config')).json();
           const canvas = document.createElement('canvas');canvas.width=8;canvas.height=8;
@@ -101,19 +78,19 @@ def test_source_project_target_graph_and_active_options_authority(server_url: st
           const digest=validateProject(mixedCase,config).history.branches[1].result.target_digest;
           return {authority,isolated,errors,digest};
         }""")
-        assert result["authority"] == {"source": {"frame": 1, "matte": [1, 2, 3]}, "background": [4, 5, 6]}
-        assert result["isolated"]
-        assert all(result["errors"])
-        assert result["digest"] == "a" * 64
-        browser.close()
+    assert result["authority"] == {"source": {"frame": 1, "matte": [1, 2, 3]}, "background": [4, 5, 6]}
+    assert result["isolated"]
+    assert all(result["errors"])
+    assert result["digest"] == "a" * 64
 
 
-def test_preparation_ownership_metadata_bounds_and_original_byte_preservation(server_url: str) -> None:
-    with sync_playwright() as playwright:
-        browser = playwright.chromium.launch()
-        page = browser.new_page()
-        page.goto(server_url, wait_until="networkidle")
-        result = page.evaluate(r"""async () => {
+def test_preparation_ownership_metadata_bounds_and_original_byte_preservation(
+    server_url: str,
+    browser: Browser,
+) -> None:
+    page = browser.new_page()
+    page.goto(server_url, wait_until="networkidle")
+    result = page.evaluate(r"""async () => {
           const {SourcePreparation,canonicalImageUrl} = await import('/static/source.js');
           const config = await (await fetch('/api/config')).json();
           const pending=[],requests=[];
@@ -140,22 +117,22 @@ def test_preparation_ownership_metadata_bounds_and_original_byte_preservation(se
           }
           return {stale,current,errors,request:requests[0],canonical:canonicalImageUrl(original,'image/apng')};
         }""")
-        assert result["stale"] is None
-        assert result["current"]["image"] == "data:image/gif;base64,R0lGODlh\r\nAQABAIAAAP///w=="
-        assert result["current"]["width"] == 1600 and result["current"]["preview_width"] == 16
-        assert result["request"]["url"] == "/api/source/prepare"
-        assert result["request"]["body"]["source"] == {"frame": 1, "matte": None}
-        assert all(result["errors"])
-        assert result["canonical"].startswith("data:image/apng;base64,R0lGODlh\r\n")
-        browser.close()
+    assert result["stale"] is None
+    assert result["current"]["image"] == "data:image/gif;base64,R0lGODlh\r\nAQABAIAAAP///w=="
+    assert result["current"]["width"] == 1600 and result["current"]["preview_width"] == 16
+    assert result["request"]["url"] == "/api/source/prepare"
+    assert result["request"]["body"]["source"] == {"frame": 1, "matte": None}
+    assert all(result["errors"])
+    assert result["canonical"].startswith("data:image/apng;base64,R0lGODlh\r\n")
 
 
-def test_project_discards_cached_previews_and_preserves_bounded_geometry_serialization(server_url: str) -> None:
-    with sync_playwright() as playwright:
-        browser = playwright.chromium.launch()
-        page = browser.new_page()
-        page.goto(server_url, wait_until="networkidle")
-        result = page.evaluate("""async () => {
+def test_project_discards_cached_previews_and_preserves_bounded_geometry_serialization(
+    server_url: str,
+    browser: Browser,
+) -> None:
+    page = browser.new_page()
+    page.goto(server_url, wait_until="networkidle")
+    result = page.evaluate("""async () => {
           const {projectContent,validateProject} = await import('/static/project.js');
           const config=await (await fetch('/api/config')).json(),options=config.defaults;
           const original='data:image/gif;base64,originalBytes';
@@ -174,11 +151,10 @@ def test_project_discards_cached_previews_and_preserves_bounded_geometry_seriali
           return {saved,tooLarge,
             untouched:project.result.preview_data_url.length===3022};
         }""")
-        assert result["untouched"]
-        assert result["saved"]["source"]["data_url"] == "data:image/gif;base64,originalBytes"
-        assert result["saved"]["result"]["target_digest"] == "a" * 64
-        assert result["saved"]["result"]["preview_data_url"] is None
-        assert result["saved"]["history"]["branches"][1]["result"]["preview_data_url"] is None
-        assert result["saved"]["history"]["branches"][2]["result"]["preview_data_url"] is None
-        assert "exceeds 64 MB" in result["tooLarge"]
-        browser.close()
+    assert result["untouched"]
+    assert result["saved"]["source"]["data_url"] == "data:image/gif;base64,originalBytes"
+    assert result["saved"]["result"]["target_digest"] == "a" * 64
+    assert result["saved"]["result"]["preview_data_url"] is None
+    assert result["saved"]["history"]["branches"][1]["result"]["preview_data_url"] is None
+    assert result["saved"]["history"]["branches"][2]["result"]["preview_data_url"] is None
+    assert "exceeds 64 MB" in result["tooLarge"]

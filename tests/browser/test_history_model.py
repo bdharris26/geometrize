@@ -3,26 +3,9 @@ from __future__ import annotations
 import base64
 import io
 import json
-import threading
-from collections.abc import Iterator
 
-import pytest
 from PIL import Image
-from playwright.sync_api import sync_playwright
-
-from geometrize_py.web import GeometrizeRequestHandler, GeometrizeServer
-
-
-@pytest.fixture
-def server_url() -> Iterator[str]:
-    server = GeometrizeServer(("127.0.0.1", 0), GeometrizeRequestHandler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    host, port = server.server_address
-    yield f"http://{host}:{port}"
-    server.shutdown()
-    server.server_close()
-    thread.join(timeout=5)
+from playwright.sync_api import Browser
 
 
 def _source() -> bytes:
@@ -31,12 +14,10 @@ def _source() -> bytes:
     return buffer.getvalue()
 
 
-def test_history_model_preserves_heads_snapshots_and_point_capacity(server_url: str) -> None:
-    with sync_playwright() as playwright:
-        browser = playwright.chromium.launch()
-        page = browser.new_page()
-        page.goto(server_url, wait_until="networkidle")
-        result = page.evaluate("""async () => {
+def test_history_model_preserves_heads_snapshots_and_point_capacity(server_url: str, browser: Browser) -> None:
+    page = browser.new_page()
+    page.goto(server_url, wait_until="networkidle")
+    result = page.evaluate("""async () => {
           const {ReconstructionHistory,validateHistory} = await import('/static/history.js');
           const limits = {max_branches:3,max_shapes:10,max_history_shapes:12,max_history_points:8};
           const options = {shape_types:['polyline'],focus:null}, batches = [{index:1}];
@@ -58,24 +39,21 @@ def test_history_model_preserves_heads_snapshots_and_point_capacity(server_url: 
           return {sameShapes,count,parentBatches,parentTypes,capacity,circleCapacity,deletion,serialized,
             rawName:raw.branches[0].name,normalizedName:validated.branches[0].name,remaining:history.branches.length};
         }""")
-        assert result["sameShapes"] and result["count"] == 1
-        assert result["parentBatches"] == result["parentTypes"] == 1
-        assert result["capacity"] == 0 and result["circleCapacity"] == 9
-        assert "Remove “Child” first" in result["deletion"]
-        assert result["rawName"] == " Original " and result["normalizedName"] == "Original"
-        assert result["remaining"] == 1
-        assert "sessionId" not in json.dumps(result["serialized"])
-        assert "result" not in result["serialized"]["branches"][1]
-        assert result["serialized"]["branches"][0]["result"]["shapes"]
-        browser.close()
+    assert result["sameShapes"] and result["count"] == 1
+    assert result["parentBatches"] == result["parentTypes"] == 1
+    assert result["capacity"] == 0 and result["circleCapacity"] == 9
+    assert "Remove “Child” first" in result["deletion"]
+    assert result["rawName"] == " Original " and result["normalizedName"] == "Original"
+    assert result["remaining"] == 1
+    assert "sessionId" not in json.dumps(result["serialized"])
+    assert "result" not in result["serialized"]["branches"][1]
+    assert result["serialized"]["branches"][0]["result"]["shapes"]
 
 
-def test_project_history_strict_validation_and_unsupported_versions(server_url: str) -> None:
-    with sync_playwright() as playwright:
-        browser = playwright.chromium.launch()
-        page = browser.new_page()
-        page.goto(server_url, wait_until="networkidle")
-        results = page.evaluate("""async dataUrl => {
+def test_project_history_strict_validation_and_unsupported_versions(server_url: str, browser: Browser) -> None:
+    page = browser.new_page()
+    page.goto(server_url, wait_until="networkidle")
+    results = page.evaluate("""async dataUrl => {
           const {validateProject,openProjectFile} = await import('/static/project.js');
           const contract = await (await fetch('/api/config')).json(), options = contract.defaults;
           const color = {r:10,g:20,b:30,a:255}, shape = {type:'circle',color,data:{x:2,y:2,r:1}};
@@ -143,11 +121,10 @@ def test_project_history_strict_validation_and_unsupported_versions(server_url: 
           return {errors,decoded,name:accepted.history.branches[1].name,rawName:project.history.branches[1].name,
             exportDefault,expectedDefault:contract.defaults.export_size,nullOption,cachedPreviews};
         }""", "data:image/png;base64," + base64.b64encode(_source()).decode())
-        for result in results["errors"]:
-            assert result["error"] and result["want"] in result["error"], result
-        assert results["decoded"] == 0
-        assert results["name"] == "Child" and results["rawName"] == " Child "
-        assert results["exportDefault"] == results["expectedDefault"]
-        assert results["nullOption"]
-        assert results["cachedPreviews"] == [None, None]
-        browser.close()
+    for result in results["errors"]:
+        assert result["error"] and result["want"] in result["error"], result
+    assert results["decoded"] == 0
+    assert results["name"] == "Child" and results["rawName"] == " Child "
+    assert results["exportDefault"] == results["expectedDefault"]
+    assert results["nullOption"]
+    assert results["cachedPreviews"] == [None, None]

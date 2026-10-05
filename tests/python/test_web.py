@@ -45,7 +45,7 @@ class _ObservedHandler(GeometrizeRequestHandler):
 def server() -> Iterator[GeometrizeServer]:
     server = _ObservedServer(("127.0.0.1", 0), _ObservedHandler)
     server.post_completions = {}
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
     thread.start()
     try:
         yield server
@@ -240,7 +240,7 @@ def test_partial_request_body_times_out_without_acquiring_render_slot() -> None:
         max_active_renders=1,
         request_timeout_seconds=0.2,
     )
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
     thread.start()
     client = socket.create_connection(server.server_address, timeout=5)
     slot_acquired = False

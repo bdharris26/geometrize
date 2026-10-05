@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from playwright.sync_api import Page, sync_playwright
+from playwright.sync_api import Browser, Page
 
 from geometrize_py.render import render_shapes_to_image
 from geometrize_py.svg import shapes_to_svg
@@ -27,34 +27,31 @@ SHAPES = {
 }
 
 
-def test_all_nine_svg_primitives_follow_png_geometry_away_from_antialiased_edges() -> None:
-    with sync_playwright() as playwright:
-        browser = playwright.chromium.launch()
-        page = browser.new_page()
-        _load_preview(page)
-        for shape_type, data in SHAPES.items():
-            shape = {"type": shape_type, "data": data, "color": {"r": 0, "g": 0, "b": 0, "a": 255}}
-            png = render_shapes_to_image([shape], *SOURCE_SIZE, (255, 255, 255, 255), *OUTPUT_SIZE)
-            svg = shapes_to_svg([shape], *SOURCE_SIZE, (255, 255, 255, 255), *OUTPUT_SIZE)
-            svg_red = _svg_red(page, svg, OUTPUT_SIZE)
-            png_red = png.getchannel("R").tobytes()
-            png_mask = _mask(png_red, OUTPUT_SIZE[0])
-            svg_mask = _mask(svg_red, OUTPUT_SIZE[0])
-            assert png_mask and svg_mask, shape_type
-            assert _within_edge_band(png_mask, svg_mask, 2), shape_type
-            assert _within_edge_band(svg_mask, png_mask, 2), shape_type
-            assert _bbox_distance(png_mask, svg_mask) <= 2, shape_type
+def test_all_nine_svg_primitives_follow_png_geometry_away_from_antialiased_edges(browser: Browser) -> None:
+    page = browser.new_page()
+    _load_preview(page)
+    for shape_type, data in SHAPES.items():
+        shape = {"type": shape_type, "data": data, "color": {"r": 0, "g": 0, "b": 0, "a": 255}}
+        png = render_shapes_to_image([shape], *SOURCE_SIZE, (255, 255, 255, 255), *OUTPUT_SIZE)
+        svg = shapes_to_svg([shape], *SOURCE_SIZE, (255, 255, 255, 255), *OUTPUT_SIZE)
+        svg_red = _svg_red(page, svg, OUTPUT_SIZE)
+        png_red = png.getchannel("R").tobytes()
+        png_mask = _mask(png_red, OUTPUT_SIZE[0])
+        svg_mask = _mask(svg_red, OUTPUT_SIZE[0])
+        assert png_mask and svg_mask, shape_type
+        assert _within_edge_band(png_mask, svg_mask, 2), shape_type
+        assert _within_edge_band(svg_mask, png_mask, 2), shape_type
+        assert _bbox_distance(png_mask, svg_mask) <= 2, shape_type
 
-            # The live preview uses continuous Canvas paths at source size.
-            # Compare it with the same-size SVG before the export-scale rules.
-            source_svg = shapes_to_svg([shape], *SOURCE_SIZE, (255, 255, 255, 255))
-            canvas_mask = _mask(_canvas_red(page, [shape], SOURCE_SIZE), SOURCE_SIZE[0])
-            source_svg_mask = _mask(_svg_red(page, source_svg, SOURCE_SIZE), SOURCE_SIZE[0])
-            assert canvas_mask and source_svg_mask, shape_type
-            assert _within_edge_band(canvas_mask, source_svg_mask, 2), shape_type
-            assert _within_edge_band(source_svg_mask, canvas_mask, 2), shape_type
-            assert _bbox_distance(canvas_mask, source_svg_mask) <= 2, shape_type
-        browser.close()
+        # The live preview uses continuous Canvas paths at source size.
+        # Compare it with the same-size SVG before the export-scale rules.
+        source_svg = shapes_to_svg([shape], *SOURCE_SIZE, (255, 255, 255, 255))
+        canvas_mask = _mask(_canvas_red(page, [shape], SOURCE_SIZE), SOURCE_SIZE[0])
+        source_svg_mask = _mask(_svg_red(page, source_svg, SOURCE_SIZE), SOURCE_SIZE[0])
+        assert canvas_mask and source_svg_mask, shape_type
+        assert _within_edge_band(canvas_mask, source_svg_mask, 2), shape_type
+        assert _within_edge_band(source_svg_mask, canvas_mask, 2), shape_type
+        assert _bbox_distance(canvas_mask, source_svg_mask) <= 2, shape_type
 
 
 def _load_preview(page: Page) -> None:
@@ -68,7 +65,7 @@ def _load_preview(page: Page) -> None:
     )
 
 
-def test_translucent_overlaps_have_matching_canvas_and_svg_interior_colors() -> None:
+def test_translucent_overlaps_have_matching_canvas_and_svg_interior_colors(browser: Browser) -> None:
     shapes = [
         {
             "type": "rectangle",
@@ -81,22 +78,19 @@ def test_translucent_overlaps_have_matching_canvas_and_svg_interior_colors() -> 
             "color": {"r": 0, "g": 0, "b": 0, "a": 128},
         },
     ]
-    with sync_playwright() as playwright:
-        browser = playwright.chromium.launch()
-        page = browser.new_page()
-        _load_preview(page)
-        canvas_red = _canvas_red(page, shapes, SOURCE_SIZE)
-        svg_red = _svg_red(page, shapes_to_svg(shapes, *SOURCE_SIZE, (255, 255, 255, 255)), SOURCE_SIZE)
-        png_red = render_shapes_to_image(shapes, *SOURCE_SIZE, (255, 255, 255, 255), *SOURCE_SIZE).getchannel(
-            "R"
-        ).tobytes()
-        samples = ((2, 2, (255, 255)), (12, 12, (125, 130)), (42, 30, (125, 130)), (30, 30, (62, 67)))
-        for x, y, expected_range in samples:
-            index = y * SOURCE_SIZE[0] + x
-            assert expected_range[0] <= canvas_red[index] <= expected_range[1]
-            assert abs(canvas_red[index] - svg_red[index]) <= 1
-            assert abs(canvas_red[index] - png_red[index]) <= 1
-        browser.close()
+    page = browser.new_page()
+    _load_preview(page)
+    canvas_red = _canvas_red(page, shapes, SOURCE_SIZE)
+    svg_red = _svg_red(page, shapes_to_svg(shapes, *SOURCE_SIZE, (255, 255, 255, 255)), SOURCE_SIZE)
+    png_red = render_shapes_to_image(shapes, *SOURCE_SIZE, (255, 255, 255, 255), *SOURCE_SIZE).getchannel(
+        "R"
+    ).tobytes()
+    samples = ((2, 2, (255, 255)), (12, 12, (125, 130)), (42, 30, (125, 130)), (30, 30, (62, 67)))
+    for x, y, expected_range in samples:
+        index = y * SOURCE_SIZE[0] + x
+        assert expected_range[0] <= canvas_red[index] <= expected_range[1]
+        assert abs(canvas_red[index] - svg_red[index]) <= 1
+        assert abs(canvas_red[index] - png_red[index]) <= 1
 
 
 def _svg_red(page: Page, svg: str, size: tuple[int, int]) -> list[int]:
@@ -133,14 +127,13 @@ def _canvas_red(page: Page, shapes: list[dict], size: tuple[int, int]) -> list[i
             document.body.append(stage);
           }
           const sourceImage = document.createElement('img');
-          const resultImage = document.createElement('img');
           const resultCanvas = document.createElement('canvas');
           const zoomOutput = document.createElement('span');
           sourceStage.append(sourceImage);
-          resultStage.append(resultImage, resultCanvas);
+          resultStage.append(resultCanvas);
           try {
             const preview = new window.PreviewForTest({
-              sourceStage, resultStage, sourceImage, resultImage, resultCanvas, zoomOutput,
+              sourceStage, resultStage, sourceImage, resultCanvas, zoomOutput,
             });
             preview.rebuild(width, height, [255, 255, 255, 255], shapes);
             const pixels = resultCanvas.getContext('2d').getImageData(0, 0, width, height).data;
