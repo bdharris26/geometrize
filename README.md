@@ -98,14 +98,14 @@ continuous paths and antialiasing, so curved boundaries can differ more at large
 export sizes. The fitting engine uses its own
 scanline and blending rules for the error score. Project JSON saves the source,
 every experiment's full head and settings, complete batch history, and the selected
-prefix. The app accepts project versions 1, 2, and 3. Older projects keep their
-first-frame and transparency behavior; version 1 becomes a single Original
-experiment. New projects retain source policies and a fingerprint of each fitted
-target, so restore detects a changed target. Live sessions can Continue after
-switching back; reopened or expired sessions require an explicit Restore or Fork
+prefix. Project files use the current draft format, version 3; earlier draft
+formats are no longer supported. Projects retain source policies and a fingerprint
+of each fitted target, so restore detects a changed target. Live sessions can
+Continue after switching back; reopened or expired sessions require an explicit Restore or Fork
 before fitting. A project supports
 32 experiments, 200,000 retained shapes, and 1,000,000 polyline points in total.
-Legacy preview-only results use New render to start fitting while retaining the preview.
+Saved results retain their complete geometry; previews are rebuilt from it rather
+than stored as PNG copies. Unrendered experiments can be saved as blank drafts.
 
 ## Command Line
 
@@ -167,9 +167,9 @@ Inspect and export saved geometry, or create a retained experiment from a prefix
 
 `--branch` selects an experiment ID reported by inspection. Omit `--at-shape` to
 use its full head. Inspection and geometry export work without the native
-backend; preview-only legacy results remain inspectable. Forking replays into a
-fresh native session, retains the parent, and resets fitting attempts. Its default
-is replay only (`--steps 0`); positive steps add new shapes. Omitted settings inherit
+backend. Forking replays into a fresh native session, retains the parent, and
+resets fitting attempts. Its default is replay only (`--steps 0`); positive steps
+add new shapes. Omitted settings inherit
 from the selected experiment. Frame, matte, background, and working resolution
 stay fixed; `--focus-off` and `--palette-off` clear inherited fitting constraints.
 
@@ -228,6 +228,11 @@ Run the browser tests separately:
 .\.venv\Scripts\python.exe -m playwright install chromium
 .\.venv\Scripts\python.exe -m pytest tests\browser
 ```
+
+Browser tests share one Chromium process, with a fresh browser context and local
+server for each test. API options use the same strict numeric validation and
+independent defaults as direct Python options; invalid values and unknown fields
+return an error rather than changing the requested settings.
 
 Installing the package builds the extension with scikit-build-core and CMake.
 

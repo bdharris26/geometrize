@@ -33,7 +33,8 @@ current so the next agent can find the important edges quickly.
   `python/geometrize_py/native_bindings.cpp`; placement is in `native_focus.h`.
 - Exports and resource budgets: `exporting.py`, `render.py`, `svg.py`, and
   `resources.py` under `python/geometrize_py/`.
-- Tests: `tests/python/` and `tests/browser/`.
+- Tests: `tests/python/` and `tests/browser/`; shared browser lifecycle fixtures
+  live in `tests/browser/conftest.py`.
 
 ## Build And Verification
 
@@ -69,9 +70,14 @@ current so the next agent can find the important edges quickly.
   a hold samples the latest pointer only when fitting is ready for another shape.
 - Timeline inspection is read-only; branch heads stay intact. Explicit Restore/Fork
   creates a native session with reset attempts/RNG and retained shape counts.
-  Project v3 stores the full graph and source policy; v1/v2 keep legacy defaults.
+  Project readers accept only the current format (v3), with a complete graph and
+  geometry or a blank unrendered draft; do not add draft-format migration paths.
   Live session IDs stay in memory. Frame/matte edits create a new root; forks keep
   the target and saved background. Verify optional target digests during replay.
+  Derive previews from geometry; do not embed regenerated PNGs in saved projects.
+- `RunOptions` validates API/Python settings consistently; do not silently coerce
+  or clamp wire values. `json_memory.py` shares bounded JSON admission estimates
+  between CLI and HTTP requests; keep resource reservation ownership at each caller.
 - Palette constraints apply to new shape RGB; alpha blending stays native. Off or
   zero strength must preserve the original fitting/RNG path and pixels.
 - Keep new docs concise. The point of this port is a small native-feeling
