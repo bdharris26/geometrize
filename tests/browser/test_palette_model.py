@@ -43,7 +43,7 @@ def test_palette_validation_defaults_and_nested_snapshot_isolation(server_url: s
           const options={...contract.defaults,palette};
           const telemetry={attempts:0,duration_ms:0,initial_score:null,batches:[]};
           const scene={width:8,height:8,background:[0,0,0,255],shapes:[],preview_data_url:null};
-          const project={format:'geometrize-project',version:2,source:{name:'Source',data_url:source.toDataURL()},
+          const project={format:'geometrize-project',version:3,source:{name:'Source',data_url:source.toDataURL()},
             options,result:scene,telemetry,history:{active_branch:'a',view_shape_count:0,branches:[
               {id:'a',name:'A',parent_id:null,fork_shape_count:0,options:{...options,palette:{colors:[[90,80,70]],strength:0}}},
               {id:'b',name:'B',parent_id:null,fork_shape_count:0,options:{...options,palette:{colors:[[90,80,70]],strength:0}},
@@ -59,11 +59,6 @@ def test_palette_validation_defaults_and_nested_snapshot_isolation(server_url: s
           const isolated={option:parent.options.palette.colors[0][0],
             batch:parent.telemetry.batches[0].palette.colors[0][0]};
           const inactive=normalized.history.branches[1].options.palette;
-          const legacy=structuredClone(project);legacy.version=1;delete legacy.history;delete legacy.options.palette;
-          const old=validateProject(legacy,contract);
-          const oldV2=structuredClone(project);delete oldV2.options.palette;
-          oldV2.history.branches.forEach(branch => delete branch.options.palette);
-          const normalizedV2=validateProject(oldV2,contract);
           const invalidProjectCases=[p => p.history.branches[1].options.palette={colors:[[0,0,true]]},
             p => p.history.branches[0].options.palette={colors:[[1,2,3]],strength:null},
             p => p.telemetry.batches=[{index:1,target:1,shapeTypes:['circle'],candidates:1,mutations:1,alpha:1,
@@ -72,8 +67,7 @@ def test_palette_validation_defaults_and_nested_snapshot_isolation(server_url: s
             const p=structuredClone(project);mutate(p);
             try {validateProject(p,contract);return null;} catch(error) {return error.message;}});
           return {palette:authority,errors,parsed:parseHexColors('#abc, AABBCC #012345'),independentlyCopied,isolated,
-            inactive,legacy:old.options.palette,
-            legacyV2:normalizedV2.history.branches.map(branch => branch.options.palette),
+            inactive,
             projectErrors,softZero:validatePalette({colors:[[1,2,3]],strength:0})};
         }""")
         assert result["palette"] == {"colors":[[1,2,3],[4,5,6]], "strength":1}
@@ -81,8 +75,6 @@ def test_palette_validation_defaults_and_nested_snapshot_isolation(server_url: s
         assert result["parsed"] == [[170,187,204],[1,35,69]]
         assert result["independentlyCopied"] and result["isolated"] == {"option":1,"batch":1}
         assert result["inactive"] == {"colors":[[90,80,70]],"strength":0}
-        assert result["legacy"] is None
-        assert result["legacyV2"] == [None,None]
         assert all(result["projectErrors"])
         assert result["softZero"] == {"colors":[[1,2,3]],"strength":0}
         browser.close()

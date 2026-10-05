@@ -17,7 +17,7 @@ const byId = (id) => {
 
 const ui = {
   form: byId("run-form"), imageInput: byId("image-input"), fileLabel: byId("file-label"),
-  imageName: byId("image-name"), sourceImage: byId("source-preview"), resultImage: byId("result-preview"),
+  imageName: byId("image-name"), sourceImage: byId("source-preview"),
   resultCanvas: byId("result-canvas"), run: byId("run-button"), pause: byId("pause-button"),
   restart: byId("restart-button"), sample: byId("sample-button"), projectInput: byId("project-input"),
   openProject: byId("load-project-button"), saveProject: byId("save-project-button"),
@@ -70,7 +70,6 @@ let sessionId = "";
 let phase = "idle";
 let stableResult = null;
 let workingResult = null;
-let loadedPreviewOnlyResult = null;
 let sceneVersion = 0;
 let contentVersion = 0;
 let exportVersion = 0;
@@ -186,8 +185,7 @@ function setControls() {
   const preparing = phase === "preparing";
   const restoring = phase === "restoring" || preparing;
   const inspecting = history?.inspecting || false;
-  const previewOnly = Boolean(loadedPreviewOnlyResult?.preview_data_url || loadedPreviewOnlyResult?.shapes.length);
-  const retainedHead = Boolean((stableResult || previewOnly) && !sessionId);
+  const retainedHead = Boolean(stableResult && !sessionId);
   const capacity = history?.fitCapacity(selectedShapeTypes()) ?? Infinity;
   const canFit = !inspecting && !restoring && !retainedHead && phase !== "recovery" && capacity > 0;
   const recovering = phase === "recovery" && Boolean(sessionId);
@@ -208,8 +206,7 @@ function setControls() {
     ui.alpha, ui.seed, ui.shapeCount, ui.mutations, ui.maxThreads, ui.stagnationLimit,
     ...document.querySelectorAll("input[name='shape']")]) input.disabled = restoring;
   ui.settingsHelp.textContent = capacity === 0 ? "History budget reached. Remove an inactive experiment or choose fewer polyline shapes." :
-    inspecting ? "Inspecting a read-only prefix. Restore or fork it before fitting." : previewOnly ?
-    "This legacy preview cannot be replayed. New render creates a blank experiment and keeps its preview." : retainedHead ?
+    inspecting ? "Inspecting a read-only prefix. Restore or fork it before fitting." : retainedHead ?
     "Restore or fork to continue this experiment. New render creates a blank experiment." : sessionId
     ? "Edits apply to the next batch. Working resolution is fixed until New render."
     : "Settings apply when you Run. Export resolution is used when a download is clicked.";
@@ -236,7 +233,6 @@ function clearResult({ keepHistory = false } = {}) {
   activeRunId = "";
   stableResult = null;
   workingResult = null;
-  loadedPreviewOnlyResult = null;
   lastDurationMs = 0;
   exportCache.clear();
   pendingExports.clear();
@@ -289,6 +285,7 @@ async function prepareSourceWork(read, commit, label) {
   setControls();
   const owns = () => preparationContext === context && sourcePreparation.owns(context.token) &&
     sourceDataUrl === context.source && history.activeId === context.branchId;
+  let applying = false;
   try {
     const request = await read();
     if (!owns()) return;
@@ -299,11 +296,13 @@ async function prepareSourceWork(read, commit, label) {
     if (decoded.naturalWidth !== prepared.preview_width || decoded.naturalHeight !== prepared.preview_height) {
       throw new Error("Prepared preview dimensions do not match the server metadata");
     }
+    applying = true;
     commit(prepared, request);
   } catch (error) {
-    if (!owns()) return;
-    phase = context.previousPhase;
+    if (!applying && !owns()) return;
+    if (phase === "preparing") phase = context.previousPhase;
     ui.status.textContent = `${label}: ${error.message}`;
+    setControls();
   } finally {
     if (preparationContext === context) {
       preparationContext = null;
@@ -391,11 +390,6 @@ function expireCurrentSession() {
   history.expireSession();
 }
 
-function normalizeWorkingSize(result) {
-  return Math.min(contract.limits.max_size.max, Math.max(contract.limits.max_size.min,
-    result.render_width || result.width || 0, result.render_height || result.height || 0));
-}
-
 function installExperiment(branch, prepared = null) {
   const result = branch.result;
   const width = result.render_width || result.width;
@@ -409,12 +403,9 @@ function installExperiment(branch, prepared = null) {
     restored_shape_count: result.restored_shape_count || 0,
     ...(result.target_digest ? { target_digest: result.target_digest } : {})
   } : null;
-  loadedPreviewOnlyResult = stableResult ? null : result;
   if (stableResult) preview.showPrefix(stableResult, history.cursor);
-  else if (width && height && result.preview_data_url) preview.showImage(result.preview_data_url, width, height);
   else preview.clearResult();
-  const options = { ...branch.options };
-  if (stableResult) options.max_size = normalizeWorkingSize(result);
+  const options = branch.options;
   applyOptions(options);
   if (prepared) {
     sourceControls.replace(options, prepared);
@@ -532,7 +523,6 @@ async function restoreExperiment(fork) {
     const count = history.cursor;
     const name = history.checkChild(count, historyControls.childName(fork), stableResult.shapes);
     const options = currentOptions();
-    options.max_size = normalizeWorkingSize(stableResult);
     history.rememberOptions(currentOptions());
     invalidateExperimentView();
     context = { parentId: parent.id, contentVersion, runVersion };
@@ -641,7 +631,6 @@ function acceptSnapshot(event, eventName) {
     ...(event.target_digest ? { target_digest: event.target_digest } : {})
   };
   workingResult = null;
-  loadedPreviewOnlyResult = null;
   sceneVersion += 1;
   exportVersion += 1;
   lastDurationMs = Math.max(0, performance.now() - runStartedAt);
@@ -662,8 +651,6 @@ function acceptSnapshot(event, eventName) {
 function captureConfirmedView() {
   return {
     sceneVersion,
-    previewImage: stableResult ? "" : preview.currentPreview(),
-    previewSize: stableResult ? null : preview.resultSize && { ...preview.resultSize },
     shapes: [...telemetry.shapes],
     attempts: telemetry.attempts,
     initialScore: telemetry.initialScore,
@@ -684,8 +671,6 @@ function restoreConfirmedView(confirmed) {
   focus.setFeedback("");
   if (stableResult) {
     preview.rebuild(stableResult.width, stableResult.height, stableResult.background, stableResult.shapes);
-  } else if (confirmed.previewImage && confirmed.previewSize) {
-    preview.showImage(confirmed.previewImage, confirmed.previewSize.width, confirmed.previewSize.height);
   } else {
     preview.clearResult();
   }
@@ -725,9 +710,8 @@ async function recoverSnapshot(version) {
 
 async function startRun({ paintFocus = null } = {}) {
   if (!sourceDataUrl || ["running", "pausing", "restoring", "preparing"].includes(phase) || history.inspecting) return;
-  if (!sessionId && (stableResult || loadedPreviewOnlyResult?.preview_data_url || loadedPreviewOnlyResult?.shapes.length)) {
-    ui.status.textContent = stableResult ? "Restore or fork this experiment before continuing" :
-      "Use New render to start a fresh experiment and retain this preview";
+  if (!sessionId && stableResult) {
+    ui.status.textContent = "Restore or fork this experiment before continuing";
     return;
   }
   if (phase === "recovery") {
@@ -852,9 +836,9 @@ async function pauseRun() {
   }
 }
 
-function serializeScene(result, previewData = null) {
+function serializeScene(result) {
   return {
-    preview_data_url: result?.background ? previewData : result?.preview_data_url || null,
+    preview_data_url: null,
     width: result?.width || null, height: result?.height || null,
     render_width: result?.render_width || result?.width || null,
     render_height: result?.render_height || result?.height || null,
@@ -866,7 +850,6 @@ function serializeScene(result, previewData = null) {
 
 function createProject() {
   const result = stableResult;
-  const previewOnly = result ? null : loadedPreviewOnlyResult;
   const options = currentOptions();
   history.rememberOptions(options);
   return {
@@ -878,9 +861,9 @@ function createProject() {
       width: sourceMetadata?.width || null, height: sourceMetadata?.height || null
     },
     options,
-    result: serializeScene(result || previewOnly, !history.inspecting && result ? preview.currentPreview() || null : null),
+    result: serializeScene(result),
     telemetry: {
-      attempts: result?.attempts ?? (previewOnly ? telemetry.attempts : 0),
+      attempts: result?.attempts || 0,
       duration_ms: Math.round(lastDurationMs),
       initial_score: telemetry.initialScore, batches: telemetry.batches
     },
@@ -899,10 +882,10 @@ function triggerDownload(content, type, filename) {
 
 function saveProject() {
   if (!sourceDataUrl) return;
-  const { content, omitted } = projectContent(createProject(), contract.project.max_bytes);
+  const content = projectContent(createProject(), contract.project.max_bytes);
   const base = sourceName.replace(/\.[^.]+$/, "").replace(/[^a-z0-9_-]+/gi, "-").replace(/^-+|-+$/g, "") || "geometrize";
   triggerDownload(content, "application/json", `${base}.geometrize-project.json`);
-  ui.status.textContent = omitted ? "Project saved · generated previews omitted to fit" : "Project saved";
+  ui.status.textContent = "Project saved";
 }
 
 function applyProject(project, prepared) {
@@ -912,12 +895,9 @@ function applyProject(project, prepared) {
   setSource(prepared.image, project.source.name, prepared, project.options);
   history.load(project.history);
   installExperiment(history.active, prepared);
-  applyOptions({ ...project.options, ...(stableResult ? { max_size: normalizeWorkingSize(stableResult) } : {}) });
-  history.rememberOptions(currentOptions());
   telemetry.setState("Loaded project", lastDurationMs);
   if (history.inspecting) telemetry.inspect(history.cursor);
-  ui.status.textContent = stableResult ? "Project loaded — Restore or fork to continue" : loadedPreviewOnlyResult?.preview_data_url ?
-    "Project loaded — New render starts a fresh experiment" : "Project loaded — Run starts a new render";
+  ui.status.textContent = stableResult ? "Project loaded — Restore or fork to continue" : "Project loaded — Run starts a new render";
   setControls();
 }
 
@@ -1026,7 +1006,7 @@ function bindEvents() {
   ui.form.addEventListener("submit", (event) => {
     event.preventDefault();
     if ((historyLocked() && phase !== "recovery") || ["restoring", "preparing"].includes(phase) || history.inspecting ||
-        (!sessionId && (stableResult || loadedPreviewOnlyResult?.preview_data_url || loadedPreviewOnlyResult?.shapes.length))) return;
+        (!sessionId && stableResult)) return;
     if (focus.mode === "paint") focus.setMode("focus");
     paintQueue.clear();
     void startRun();
@@ -1067,7 +1047,7 @@ async function init() {
     ui.maxThreads.max = String(Math.min(contract.limits.max_threads.max, contract.resources?.worker_budget || contract.limits.max_threads.max));
     preview = new Preview({
       sourceStage: byId("source-stage"), resultStage: byId("result-stage"),
-      sourceImage: ui.sourceImage, resultImage: ui.resultImage,
+      sourceImage: ui.sourceImage,
       resultCanvas: ui.resultCanvas, zoomOutput: byId("zoom-value"),
       focusOverlay: byId("focus-overlay"),
       onFocusMove: (point) => focus.move(point),

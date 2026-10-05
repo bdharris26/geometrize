@@ -63,7 +63,7 @@ def test_source_policy_validation_and_independent_experiment_snapshots(server_ur
         browser.close()
 
 
-def test_source_project_migration_target_graph_and_active_options_authority(server_url: str) -> None:
+def test_source_project_target_graph_and_active_options_authority(server_url: str) -> None:
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
         page = browser.new_page()
@@ -86,13 +86,8 @@ def test_source_project_migration_target_graph_and_active_options_authority(serv
           normalized.history.branches[0].options.source.matte[0]=77;
           normalized.history.branches[0].options.background[0]=88;
           const isolated=normalized.options.source.matte[0]===1 && normalized.options.background[0]===4;
-          const legacy = [1,2].map(version => {
-            const old=structuredClone(base);old.version=version;delete old.history;
-            delete old.options.source;delete old.options.background;delete old.result.target_digest;
-            const parsed=validateProject(old,config);
-            return {source:parsed.options.source,background:parsed.options.background,
-              branchSource:parsed.history.branches[0].options.source,hasDigest:'target_digest' in parsed.result};});
-          const invalid=[p=>p.version=4,p=>p.options.source={frame:null},p=>p.options.background=[0,0,true],
+          const invalid=[p=>p.version=1,p=>p.version=2,p=>p.version=4,
+            p=>p.options.source={frame:null},p=>p.options.background=[0,0,true],
             p=>p.result.target_digest=null,p=>p.result.target_digest='bad',
             p=>p.history.branches[1].options.source={frame:0,matte:[1,2,3]},
             p=>p.history.branches[1].options.source={frame:1,matte:null},
@@ -104,14 +99,10 @@ def test_source_project_migration_target_graph_and_active_options_authority(serv
           const mixedCase=JSON.parse(JSON.stringify(base));
           mixedCase.history.branches[1].result.target_digest='A'.repeat(64);
           const digest=validateProject(mixedCase,config).history.branches[1].result.target_digest;
-          return {authority,isolated,legacy,errors,digest};
+          return {authority,isolated,errors,digest};
         }""")
         assert result["authority"] == {"source": {"frame": 1, "matte": [1, 2, 3]}, "background": [4, 5, 6]}
         assert result["isolated"]
-        assert result["legacy"] == [
-            {"source": {"frame": 0, "matte": None}, "background": None,
-             "branchSource": {"frame": 0, "matte": None}, "hasDigest": False},
-        ] * 2
         assert all(result["errors"])
         assert result["digest"] == "a" * 64
         browser.close()
@@ -159,30 +150,35 @@ def test_preparation_ownership_metadata_bounds_and_original_byte_preservation(se
         browser.close()
 
 
-def test_project_budget_prunes_only_optional_geometry_previews(server_url: str) -> None:
+def test_project_discards_cached_previews_and_preserves_bounded_geometry_serialization(server_url: str) -> None:
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
         page = browser.new_page()
         page.goto(server_url, wait_until="networkidle")
         result = page.evaluate("""async () => {
-          const {projectContent} = await import('/static/project.js');
+          const {projectContent,validateProject} = await import('/static/project.js');
+          const config=await (await fetch('/api/config')).json(),options=config.defaults;
           const original='data:image/gif;base64,originalBytes';
           const geometry={width:8,height:8,background:[1,2,3,255],shapes:[],target_digest:'a'.repeat(64),
             preview_data_url:'data:image/png;base64,'+'A'.repeat(3000)};
-          const legacy={width:8,height:8,background:null,shapes:[],preview_data_url:'essential-preview'};
-          const project={source:{data_url:original},result:geometry,history:{active_branch:'a',branches:[
-            {id:'a'},{id:'b',result:geometry},{id:'c',result:legacy}]}};
-          const kept=projectContent(project,100000),trimmed=projectContent(project,2000);
-          const saved=JSON.parse(trimmed.content);
+          const draft={width:null,height:null,background:null,shapes:[],preview_data_url:null};
+          const telemetry={attempts:0,duration_ms:0,initial_score:null,batches:[]};
+          const project={format:config.project.format,version:config.project.version,options,
+            source:{data_url:original},result:geometry,telemetry,history:{active_branch:'a',view_shape_count:0,branches:[
+            {id:'a',name:'A',parent_id:null,fork_shape_count:0,options},
+            {id:'b',name:'B',parent_id:null,fork_shape_count:0,options,result:geometry,telemetry},
+            {id:'c',name:'C',parent_id:null,fork_shape_count:0,options,result:draft,telemetry}]}};
+          const normalized=validateProject(project,config);
+          const saved=JSON.parse(projectContent(normalized,100000));
           let tooLarge;try {projectContent(project,50);} catch(error) {tooLarge=error.message;}
-          return {kept:kept.omitted,trimmed:trimmed.omitted,saved,tooLarge,
+          return {saved,tooLarge,
             untouched:project.result.preview_data_url.length===3022};
         }""")
-        assert not result["kept"] and result["trimmed"] and result["untouched"]
+        assert result["untouched"]
         assert result["saved"]["source"]["data_url"] == "data:image/gif;base64,originalBytes"
         assert result["saved"]["result"]["target_digest"] == "a" * 64
         assert result["saved"]["result"]["preview_data_url"] is None
         assert result["saved"]["history"]["branches"][1]["result"]["preview_data_url"] is None
-        assert result["saved"]["history"]["branches"][2]["result"]["preview_data_url"] == "essential-preview"
+        assert result["saved"]["history"]["branches"][2]["result"]["preview_data_url"] is None
         assert "exceeds 64 MB" in result["tooLarge"]
         browser.close()

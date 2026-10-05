@@ -58,9 +58,9 @@ def _fitting_settings(page: Page) -> None:
     page.locator("#max-threads").fill("1")
 
 
-@pytest.mark.parametrize("version", [1, 2, 3])
+@pytest.mark.parametrize("matte", [(16, 32, 48), None])
 def test_wrapped_project_source_prepares_restores_continues_and_preserves_original_bytes(
-    server_url: str, tmp_path: Path, version: int,
+    server_url: str, tmp_path: Path, matte: tuple[int, int, int] | None,
 ) -> None:
     original = Image.new("RGBA", (80, 40), (70, 90, 110, 128))
     ImageDraw.Draw(original).rectangle((0, 0, 35, 39), fill=(180, 110, 50, 255))
@@ -74,7 +74,6 @@ def test_wrapped_project_source_prepares_restores_continues_and_preserves_origin
     wrapped_url = "data:image/png;base64," + "\r\n".join(
         payload[index:index + 76] for index in range(0, len(payload), 76)
     )
-    matte = (16, 32, 48) if version == 3 else None
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
         page = browser.new_page(viewport={"width": 1440, "height": 1000})
@@ -94,14 +93,8 @@ def test_wrapped_project_source_prepares_restores_continues_and_preserves_origin
         _fitting_settings(page)
         _run(page)
         project = _save(page, tmp_path / "unwrapped.json")
-        project["version"] = version
         project["source"]["data_url"] = wrapped_url
-        if version < 3:
-            project.pop("history")
-            project["options"].pop("source")
-            project["options"].pop("background")
-            project["result"].pop("target_digest")
-        project_path = tmp_path / f"wrapped-v{version}.json"
+        project_path = tmp_path / "wrapped.json"
         project_path.write_text(json.dumps(project), encoding="utf-8")
 
         with page.expect_response("**/api/source/prepare") as preparation:

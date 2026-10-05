@@ -158,17 +158,15 @@ def _palette(value: Any) -> dict[str, Any] | None:
 
 def _options(value: Any) -> dict[str, Any]:
     raw = _object(value, "options")
+    if set(raw) - OPTION_DEFAULTS.keys():
+        raise ProjectError("Project options contain an unknown field")
     types = raw.get("shape_types")
     if not isinstance(types, list) or any(not isinstance(name, str) or name not in SHAPE_TYPES for name in types):
         raise ProjectError("Project options shape types must be an array of supported shapes")
-    # Empty arrays are valid legacy inspection settings; RunOptions requires
-    # a primitive before native fitting or replay is requested.
+    # A draft may have no primitives selected. Native fitting requires one.
     result: dict[str, Any] = {"shape_types": list(dict.fromkeys(types))}
     for key, (lower, upper) in OPTION_LIMITS.items():
-        value = raw.get(key)
-        if value is None:
-            value = raw.get("max_size") if key == "export_size" else OPTION_DEFAULTS[key]
-        result[key] = _integer(value, lower, upper, key)
+        result[key] = _integer(raw.get(key, OPTION_DEFAULTS[key]), lower, upper, key)
     result["focus"] = _focus(raw.get("focus"))
     result["palette"] = _palette(raw.get("palette"))
     result["source"] = _source(raw.get("source"))
@@ -229,9 +227,16 @@ def _result_metadata(value: Any) -> dict[str, Any]:
     inspect_scene(raw)
     result = {key: _dimension(raw.get(key), key) for key in ("width", "height", "render_width", "render_height")}
     preview = raw.get("preview_data_url")
-    result["preview_data_url"] = None if preview is None else _raster_url(preview, "result preview")
+    if preview is not None:
+        _raster_url(preview, "result preview")
+    result["preview_data_url"] = None
     result["background"] = None if raw.get("background") is None else _color(raw["background"], "background")
     result["shapes"] = raw["shapes"]
+    width, height = _grid(result)
+    if not (width and height and result["background"] is not None) and (
+        width or height or result["background"] is not None or result["shapes"] or preview is not None
+    ):
+        raise ProjectError("Project results require a fitting grid and background; an unfitted draft must be empty")
     retained = raw.get("restored_shape_count")
     result["restored_shape_count"] = _integer(
         0 if retained is None else retained, 0, len(result["shapes"]), "retained count",
@@ -268,13 +273,7 @@ def _name(value: Any) -> str:
 
 
 def _records(raw: dict[str, Any]) -> tuple[str, int, list[dict[str, Any]]]:
-    history = raw.get("history")
-    if history is None:
-        return "experiment-1", len(raw["result"]["shapes"]), [{
-            "id": "experiment-1", "name": "Original", "parent_id": None, "fork_shape_count": 0,
-            "options": raw["options"], "result": raw["result"], "telemetry": raw["telemetry"],
-        }]
-    history = _object(history, "history")
+    history = _object(raw.get("history"), "history")
     if set(history) - {"active_branch", "view_shape_count", "branches"}:
         raise ProjectError("Project history contains an unknown field")
     branches = history.get("branches")
@@ -360,7 +359,7 @@ def _graph(active: str, cursor: int, branches: list[dict[str, Any]]) -> None:
 
 
 def validate_project(raw: Any) -> dict[str, Any]:
-    """Validate all branch geometry and migrate v1/v2/v3 to a v3 wire model."""
+    """Validate the current project format and all experiment geometry."""
     try:
         return _validate_project(raw)
     except ProjectError:
@@ -375,9 +374,11 @@ def _validate_project(raw: Any) -> dict[str, Any]:
     raw = _object(raw, "project")
     if raw.get("format") != PROJECT_FORMAT:
         raise ProjectError("This JSON file is not a Geometrize project")
-    version = _integer(raw.get("version"), 1, PROJECT_VERSION, "version")
-    if version == 1 and raw.get("history") is not None:
-        raise ProjectError("Version 1 projects cannot contain experiments")
+    if isinstance(raw.get("version"), bool) or raw.get("version") != PROJECT_VERSION:
+        raise ProjectError(
+            f"Project version is not supported; only version {PROJECT_VERSION} can be opened",
+            code="unsupported_version",
+        )
     _object(raw.get("options"), "options")
     _object(raw.get("telemetry"), "telemetry")
     _object(raw.get("result"), "result")
@@ -471,7 +472,7 @@ def project_scene(project: dict[str, Any], branch_id: str | None = None, shape_c
     result = branch["result"]
     width, height = _grid(result)
     if not width or not height or result["background"] is None:
-        raise ProjectError("This experiment has no reconstruction geometry; only its saved preview can be inspected",
+        raise ProjectError("This experiment has not been fitted; Run it before exporting or restoring geometry",
                            code="missing_geometry")
     count = (len(result["shapes"]) if shape_count is None
              else _integer(shape_count, 0, len(result["shapes"]), "shape count"))
@@ -499,7 +500,10 @@ def create_project(source: dict[str, Any], options: RunOptions | dict[str, Any],
         options = options.to_dict()
     result, telemetry = _snapshot(snapshot, telemetry)
     return validate_project({"format": PROJECT_FORMAT, "version": PROJECT_VERSION, "source": source,
-                             "options": options, "result": result, "telemetry": telemetry})
+                             "options": options, "result": result, "telemetry": telemetry,
+                             "history": {"active_branch": "experiment-1", "view_shape_count": len(result["shapes"]),
+                                         "branches": [{"id": "experiment-1", "name": "Original", "parent_id": None,
+                                                       "fork_shape_count": 0, "options": options}]}})
 
 
 def fork_project(project: dict[str, Any], *, name: str, branch_id: str | None = None, shape_count: int | None = None,
@@ -587,21 +591,9 @@ def replace_branch_snapshot(project: dict[str, Any], branch_id: str, snapshot: d
 
 
 def dumps_project(project: dict[str, Any]) -> str:
-    """Serialize canonical v3 JSON, pruning only regenerable previews if needed."""
+    """Serialize a bounded current project using geometry and original source."""
     project = validate_project(project)
-
-    def encode() -> str:
-        return json.dumps(project, ensure_ascii=True, sort_keys=True, indent=2, allow_nan=False) + "\n"
-
-    content = encode()
-    if len(content) <= PROJECT_MAX_BYTES:
-        return content
-    for branch in project["history"]["branches"]:
-        result = project["result"] if branch["id"] == project["history"]["active_branch"] else branch["result"]
-        width, height = _grid(result)
-        if width and height and result["background"] is not None:
-            result["preview_data_url"] = None
-    content = encode()
+    content = json.dumps(project, ensure_ascii=True, sort_keys=True, indent=2, allow_nan=False) + "\n"
     if len(content) > PROJECT_MAX_BYTES:
-        raise ProjectError("Project exceeds 64 MiB after omitting generated previews")
+        raise ProjectError("Project exceeds 64 MiB; use a smaller source or remove an inactive experiment")
     return content

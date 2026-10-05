@@ -849,8 +849,7 @@ figcaption span {
 }
 
 .preview-media[hidden],
-#source-preview:not([src]),
-#result-preview:not([src]) {
+#source-preview:not([src]) {
   display: none;
 }
 

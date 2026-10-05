@@ -140,7 +140,11 @@ def test_timeline_prefix_export_fork_and_full_project_round_trip(server_url: str
         page.on("pageerror", lambda error: errors.append(str(error)))
         _prepare(page, server_url)
         head = _pixels(page)
+        page.locator("#result-canvas").evaluate("""canvas => {
+          canvas.toDataURL=() => {throw new Error('Save must use geometry without PNG encoding');};
+        }""")
         original = _save(page, tmp_path / "original.json")
+        page.locator("#result-canvas").evaluate("canvas => {delete canvas.toDataURL;}")
         _inspect(page, 1)
         assert _pixels(page) != head
         expect(page.locator("#run-button")).to_be_disabled()
@@ -175,7 +179,9 @@ def test_timeline_prefix_export_fork_and_full_project_round_trip(server_url: str
         assert page.evaluate("restoreRequests[0].shape_count") == 1
         assert page.evaluate("restoreRequests[0].result.shapes.length") == 3
         expect(page.locator("#telemetry-acceptance")).to_have_text("1 retained · 0 new accepted / 0 attempts")
-        expect(page.locator("#max-size-number")).to_have_value("80")
+        expect(page.locator("#max-size-number")).to_have_value(str(original["options"]["max_size"]))
+        assert page.evaluate("restoreRequests[0].options.max_size") == original["options"]["max_size"]
+        assert page.evaluate("restoreRequests[0].result.width") == original["result"]["render_width"]
         page.locator("#steps-number").fill("1")
         page.locator("#run-button").click()
         page.evaluate("finishRun()")
@@ -206,7 +212,39 @@ def test_timeline_prefix_export_fork_and_full_project_round_trip(server_url: str
         browser.close()
 
 
-def test_switching_blank_and_preview_only_experiments_redraws_the_head(server_url: str, tmp_path: Path) -> None:
+def test_project_commit_failure_reports_error_and_allows_reopening(server_url: str, tmp_path: Path) -> None:
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = browser.new_page()
+        errors: list[str] = []
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        _prepare(page, server_url)
+        head = _pixels(page)
+        path = tmp_path / "confirmed.json"
+        _save(page, path)
+        page.evaluate("""() => {
+          window.failResultDraw=true;
+          const original=CanvasRenderingContext2D.prototype.fillRect;
+          CanvasRenderingContext2D.prototype.fillRect=function(...args) {
+            if (failResultDraw && this.canvas.id==='result-canvas') {
+              failResultDraw=false;throw new Error('Injected result redraw failure');
+            }
+            return original.apply(this,args);
+          };
+        }""")
+        page.locator("#project-input").set_input_files(path)
+        expect(page.locator("#status")).to_have_text("Could not open project: Injected result redraw failure")
+        expect(page.locator("#load-project-button")).to_be_enabled()
+        expect(page.locator("#save-project-button")).to_be_enabled()
+        expect(page.locator("#pause-button")).to_be_disabled()
+        page.locator("#project-input").set_input_files(path)
+        expect(page.locator("#status")).to_have_text("Project loaded — Restore or fork to continue")
+        assert _pixels(page) == head
+        assert errors == []
+        browser.close()
+
+
+def test_switching_blank_and_fitted_experiments_redraws_the_head(server_url: str, tmp_path: Path) -> None:
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
         page = browser.new_page()
@@ -226,20 +264,16 @@ def test_switching_blank_and_preview_only_experiments_redraws_the_head(server_ur
         assert _pixels(page) == head
         _inspect(page, 1)
         assert _pixels(page) == prefix
-        saved = _save(page, tmp_path / "switches.json")
-        saved["history"]["branches"][1]["result"] = {
-            "width":80,"height":40,"background":None,"shapes":[],"preview_data_url":head,
-        }
-        path = tmp_path / "preview-branch.json"
-        path.write_text(json.dumps(saved), encoding="utf-8")
+        path = tmp_path / "switches.json"
+        saved = _save(page, path)
+        assert saved["history"]["branches"][1]["result"]["background"] is None
         page.locator("#project-input").set_input_files(path)
         expect(page.locator("#status")).to_have_text("Project loaded — Restore or fork to continue")
         expect(page.locator("#history-count")).to_have_value("1")
         assert _pixels(page) == prefix
         page.locator("#experiment-select").select_option("experiment-2")
-        expect(page.locator("#result-preview")).to_be_visible()
+        expect(page.locator("#result-canvas")).to_be_hidden()
         page.locator("#experiment-select").select_option("experiment-1")
-        expect(page.locator("#result-preview")).to_be_hidden()
         assert _pixels(page) == head
         _inspect(page, 1)
         assert _pixels(page) == prefix

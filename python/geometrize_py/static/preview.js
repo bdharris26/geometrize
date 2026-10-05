@@ -63,13 +63,12 @@ function drawShape(context, shape) {
 }
 
 export class Preview {
-  constructor({ sourceStage, resultStage, sourceImage, resultImage, resultCanvas, zoomOutput,
+  constructor({ sourceStage, resultStage, sourceImage, resultCanvas, zoomOutput,
     focusOverlay = null, onFocusMove = () => {}, onFocusDisable = () => {}, onPaint = () => {},
     onPaintHoldStart = () => {}, onPaintHoldMove = () => {}, onPaintHoldStop = () => {} }) {
     this.sourceStage = sourceStage;
     this.resultStage = resultStage;
     this.sourceImage = sourceImage;
-    this.resultImage = resultImage;
     this.resultCanvas = resultCanvas;
     this.zoomOutput = zoomOutput;
     this.focusOverlay = focusOverlay;
@@ -241,7 +240,7 @@ export class Preview {
 
   resultPoint(clientX, clientY) {
     if (!this.resultSize) return null;
-    const media = this.resultCanvas.hidden ? this.resultImage : this.resultCanvas;
+    const media = this.resultCanvas;
     if (media.hidden) return null;
     const box = media.getBoundingClientRect();
     const stage = this.resultStage.getBoundingClientRect();
@@ -274,15 +273,14 @@ export class Preview {
   layout() {
     this.zoomOutput.textContent = `${Math.round(this.zoom * 100)}%`;
     this.place(this.sourceStage, this.sourceImage, this.sourceSize);
-    const visible = this.resultCanvas.hidden ? this.resultImage : this.resultCanvas;
-    this.place(this.resultStage, visible, this.resultSize);
-    this.layoutFocus(visible);
+    this.place(this.resultStage, this.resultCanvas, this.resultSize);
+    this.layoutFocus();
     this.updateHoldPoint();
   }
 
-  layoutFocus(visible) {
+  layoutFocus() {
     if (!this.focusOverlay) return;
-    const shown = this.interactionEnabled && this.focus && this.resultSize && !visible.hidden;
+    const shown = this.interactionEnabled && this.focus && this.resultSize && !this.resultCanvas.hidden;
     this.focusOverlay.toggleAttribute("hidden", !shown);
     if (!shown) return;
     const { width, height } = this.resultSize;
@@ -296,7 +294,7 @@ export class Preview {
       ring.setAttribute("cy", cy);
       ring.setAttribute("r", radius);
     }
-    const pixelScale = visible.getBoundingClientRect().width / width || 1;
+    const pixelScale = this.resultCanvas.getBoundingClientRect().width / width || 1;
     const center = this.focusOverlay.querySelector(".focus-center");
     center.setAttribute("cx", cx);
     center.setAttribute("cy", cy);
@@ -317,8 +315,6 @@ export class Preview {
     this.prefixCount = 0;
     this.blankResult = false;
     this.resultSize = null;
-    this.resultImage.removeAttribute("src");
-    this.resultImage.hidden = true;
     this.resultCanvas.hidden = true;
     this.resultCanvas.width = 1;
     this.resultCanvas.height = 1;
@@ -335,7 +331,6 @@ export class Preview {
     this.resultCanvas.width = Math.max(1, Math.round(width * this.canvasScale));
     this.resultCanvas.height = Math.max(1, Math.round(height * this.canvasScale));
     this.resultCanvas.hidden = false;
-    this.resultImage.hidden = true;
     const context = this.context();
     context.fillStyle = rgba(background);
     context.fillRect(0, 0, width, height);
@@ -358,24 +353,6 @@ export class Preview {
     }
     for (let index = this.prefixCount; index < count; index += 1) this.draw(scene.shapes[index]);
     this.prefixCount = count;
-  }
-
-  showImage(dataUrl, width, height) {
-    this.prefixScene = null;
-    this.prefixCount = 0;
-    this.blankResult = false;
-    this.resultSize = { width, height };
-    this.resultImage.src = dataUrl;
-    this.resultImage.hidden = false;
-    this.resultCanvas.hidden = true;
-    this.layout();
-  }
-
-  currentPreview() {
-    if (this.blankResult) return "";
-    if (!this.resultCanvas.hidden) return this.resultCanvas.toDataURL("image/png");
-    const image = this.resultImage.getAttribute("src") || "";
-    return image.startsWith("data:image/") ? image : "";
   }
 
   context() {

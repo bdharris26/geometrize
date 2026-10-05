@@ -170,9 +170,8 @@ export class HistoryControls {
     el.help.textContent = busy ? "Timeline is locked until the batch is confirmed." : restoring ?
       "Creating a fresh experiment; the parent is retained." : history.inspecting ?
         "Inspecting a prefix. Restore it to a new experiment, or return to Head to continue." : hasScene && !active.sessionId ?
-          "Saved head. Restore or fork to continue this experiment." : active?.result.preview_data_url ?
-            "Preview-only experiment. New render starts a fresh fit and keeps this preview." :
-              "Scrub to inspect; Restore and Fork keep the original experiment.";
+          "Saved head. Restore or fork to continue this experiment." :
+          "Scrub to inspect; Restore and Fork keep the original experiment.";
     const settings = active?.options;
     el.settings.textContent = settings ?
       `${settings.shape_types.join(", ")} · alpha ${settings.alpha} · seed ${settings.seed} · ${settings.max_size}px working · ${paletteLabel(settings.palette)} · ${sourceLabel(settings.source)}` : "";

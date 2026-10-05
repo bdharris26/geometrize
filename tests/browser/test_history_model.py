@@ -70,7 +70,7 @@ def test_history_model_preserves_heads_snapshots_and_point_capacity(server_url: 
         browser.close()
 
 
-def test_project_history_strict_validation_and_legacy_loading(server_url: str) -> None:
+def test_project_history_strict_validation_and_unsupported_versions(server_url: str) -> None:
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
         page = browser.new_page()
@@ -81,11 +81,18 @@ def test_project_history_strict_validation_and_legacy_loading(server_url: str) -
           const color = {r:10,g:20,b:30,a:255}, shape = {type:'circle',color,data:{x:2,y:2,r:1}};
           const scene = {width:8,height:8,background:color,shapes:[shape],preview_data_url:null};
           const telemetry = {attempts:1,duration_ms:0,initial_score:0.9,batches:[]};
-          const project = {format:'geometrize-project',version:2,source:{name:'Source',data_url:dataUrl},
+          const project = {format:'geometrize-project',version:3,source:{name:'Source',data_url:dataUrl},
             options,result:scene,telemetry,history:{active_branch:'child',view_shape_count:0,branches:[
               {id:'parent',name:'Parent',parent_id:null,fork_shape_count:0,options,result:structuredClone(scene),telemetry},
               {id:'child',name:' Child ',parent_id:'parent',fork_shape_count:1,options}]}};
           const cases = [
+            ['version 1', p => p.version=1, 'only version 3'],
+            ['version 2', p => p.version=2, 'only version 3'],
+            ['missing graph', p => delete p.history, 'history must be an object'],
+            ['unknown option', p => p.options.typo=1, 'unknown field'],
+            ['extra background channel', p => p.result.background=[10,20,30,255,0], 'four RGBA channels'],
+            ['extra shape channel', p => p.result.shapes[0].color=[10,20,30,255,0], 'four RGBA channels'],
+            ['bitmap-only', p => p.result.background=null, 'fitting grid and background'],
             ['duplicate IDs', p => p.history.branches.push(structuredClone(p.history.branches[0])), 'IDs'],
             ['bad ID', p => p.history.branches[0].id='../bad', 'IDs'],
             ['duplicate names', p => p.history.branches[0].name='child', 'names must be unique'],
@@ -123,15 +130,24 @@ def test_project_history_strict_validation_and_legacy_loading(server_url: str) -
           try {await openProjectFile(new File([JSON.stringify(points)],'large.json'),narrow);}
           catch(error) {errors.push({name:'before decode',want:'total polyline points',error:error.message});}
           finally {window.Image=RealImage;}
-          const accepted = validateProject(project,contract), legacy = structuredClone(project);
-          legacy.version=1; delete legacy.history; delete legacy.result.restored_shape_count;
-          const old = validateProject(legacy,contract);
+          const accepted = validateProject(project,contract);
+          const defaults=structuredClone(project);defaults.options={shape_types:['circle'],max_size:256};
+          const exportDefault=validateProject(defaults,contract).options.export_size;
+          let nullOption;try {defaults.options.export_size=null;validateProject(defaults,contract);}
+          catch(error) {nullOption=error.message;}
+          project.result.preview_data_url='data:image/png;base64,YWJj';
+          project.history.branches[0].result.preview_data_url='data:image/png;base64,YWJj';
+          const cached=await openProjectFile(new File([JSON.stringify(project)],'cached.json'),
+            contract,{decodeSource:false});
+          const cachedPreviews=cached.history.branches.map(branch=>branch.result.preview_data_url);
           return {errors,decoded,name:accepted.history.branches[1].name,rawName:project.history.branches[1].name,
-            legacy:{name:old.history.branches[0].name,cursor:old.history.view_shape_count,retained:old.result.restored_shape_count}};
+            exportDefault,expectedDefault:contract.defaults.export_size,nullOption,cachedPreviews};
         }""", "data:image/png;base64," + base64.b64encode(_source()).decode())
         for result in results["errors"]:
             assert result["error"] and result["want"] in result["error"], result
         assert results["decoded"] == 0
         assert results["name"] == "Child" and results["rawName"] == " Child "
-        assert results["legacy"] == {"name":"Original", "cursor":1, "retained":0}
+        assert results["exportDefault"] == results["expectedDefault"]
+        assert results["nullOption"]
+        assert results["cachedPreviews"] == [None, None]
         browser.close()

@@ -69,7 +69,7 @@ def test_focus_mapping_gestures_and_overlay_keep_preview_pixels(size: tuple[int,
           .media {position:absolute;left:50%;top:50%;transform-origin:center;pointer-events:none}
           [hidden] {display:none}
         </style><div id="source" class="stage"><img id="source-img" class="media"></div>
-        <div id="result" class="stage" tabindex="0"><img id="result-img" class="media" hidden>
+        <div id="result" class="stage" tabindex="0">
         <canvas id="canvas" class="media"></canvas><svg id="overlay" class="media" hidden>
         <circle class="focus-ring"></circle><circle class="focus-center"></circle>
         </svg></div><output id="zoom"></output>""")
@@ -78,12 +78,12 @@ def test_focus_mapping_gestures_and_overlay_keep_preview_pixels(size: tuple[int,
           window.moves = [];
           window.preview = new Preview({sourceStage: document.querySelector('#source'),
             resultStage: document.querySelector('#result'), sourceImage: document.querySelector('#source-img'),
-            resultImage: document.querySelector('#result-img'), resultCanvas: document.querySelector('#canvas'),
+            resultCanvas: document.querySelector('#canvas'),
             zoomOutput: document.querySelector('#zoom'), focusOverlay: document.querySelector('#overlay'),
             onFocusMove: point => { moves.push(point); preview.setFocus({...preview.focus, ...point}); }});
           preview.sourceSize = {width,height};
           preview.beginResult(width, height, [70, 120, 170, 255]);
-          window.originalPixels = preview.currentPreview();
+          window.originalPixels = preview.resultCanvas.toDataURL();
           preview.setFocus({x:0.5, y:0.5, radius:0.2, strength:0.75});
         }""", list(size))
 
@@ -100,7 +100,7 @@ def test_focus_mapping_gestures_and_overlay_keep_preview_pixels(size: tuple[int,
             move = page.evaluate("moves.at(-1)")
             assert move["x"] == pytest.approx(0.8)
             assert move["y"] == pytest.approx(0.25)
-            assert page.evaluate("preview.currentPreview() === originalPixels")
+            assert page.evaluate("preview.resultCanvas.toDataURL() === originalPixels")
             assert page.locator("#overlay").bounding_box() == pytest.approx(box)
             assert float(page.locator(".focus-ring").get_attribute("r") or "0") == 24
 
@@ -328,10 +328,9 @@ def test_paint_clicks_send_one_step_each_and_focus_edits_do_not_retarget_strokes
         expect(page.locator("#telemetry-acceptance")).to_have_text("2 accepted / 2 attempts")
         expect(page.locator("#run-button")).to_have_text("Continue")
         assert page.evaluate("focusRequests.length") == 0
-        pixels = page.locator("#result-canvas").evaluate("canvas => canvas.toDataURL()")
         saved = _save_project(page, tmp_path / "painted.json")
         assert saved["options"]["focus"]["strength"] == 0.9
-        assert saved["result"]["preview_data_url"] == pixels
+        assert saved["result"]["preview_data_url"] is None
         assert len(saved["result"]["shapes"]) == 2
         assert saved["telemetry"]["batches"][0]["focus"]["x"] == pytest.approx(0.2)
 
@@ -420,7 +419,7 @@ def test_live_focus_requests_and_late_errors_leave_new_source_untouched(server_u
         browser.close()
 
 
-def test_project_focus_legacy_validation_and_overlay_free_exports(server_url: str, tmp_path: Path) -> None:
+def test_project_focus_validation_and_overlay_free_exports(server_url: str, tmp_path: Path) -> None:
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
         page = browser.new_page(viewport={"width": 390, "height": 1000})
@@ -428,21 +427,24 @@ def test_project_focus_legacy_validation_and_overlay_free_exports(server_url: st
         contract = page.request.get(f"{server_url}/api/config").json()
         options = {key:value for key,value in contract["defaults"].items() if key != "focus"}
         project = {
-            "format":contract["project"]["format"],"version":1,
+            "format":contract["project"]["format"],"version":3,
             "source":{"name":"wide.png","data_url":"data:image/png;base64," + base64.b64encode(_image()).decode()},
             "options":options,
             "result":{"width":320,"height":100,"render_width":320,"render_height":100,
                 "background":[80,130,170,255],"shapes":[],"preview_data_url":None},
             "telemetry":{"attempts":0,"duration_ms":0,"initial_score":0.9,"batches":[]},
+            "history":{"active_branch":"original","view_shape_count":0,"branches":[
+                {"id":"original","name":"Original","parent_id":None,"fork_shape_count":0,"options":options},
+            ]},
         }
-        path = tmp_path / "legacy.json"
+        path = tmp_path / "current.json"
         path.write_text(json.dumps(project), encoding="utf-8")
         page.locator("#project-input").set_input_files(path)
         expect(page.locator("#status")).to_have_text("Project loaded — Restore or fork to continue")
         page.get_by_role("button", name="Restore head", exact=True).click()
         expect(page.locator("#run-button")).to_have_text("Continue")
         expect(page.locator("#focus-toggle")).to_have_attribute("aria-pressed", "false")
-        assert _save_project(page, tmp_path / "legacy-resaved.json")["options"]["focus"] is None
+        assert _save_project(page, tmp_path / "current-resaved.json")["options"]["focus"] is None
         baseline = page.locator("#result-canvas").evaluate("canvas => canvas.toDataURL()")
         page.get_by_role("button", name="Focus area", exact=True).click()
         _click_fraction(page, 0.75, 0.5)
@@ -450,7 +452,7 @@ def test_project_focus_legacy_validation_and_overlay_free_exports(server_url: st
         page.locator("#focus-radius-number").dispatch_event("change")
         assert page.locator("#result-canvas").evaluate("canvas => canvas.toDataURL()") == baseline
         saved = _save_project(page, tmp_path / "focused.json")
-        assert saved["result"]["preview_data_url"] == baseline
+        assert saved["result"]["preview_data_url"] is None
         assert saved["options"]["focus"]["radius"] == 0.35
         page.locator("#project-input").set_input_files(tmp_path / "focused.json")
         expect(page.locator("#focus-radius-number")).to_have_value("35")

@@ -320,9 +320,9 @@ def test_prepare_failure_capacity_and_cancel_keep_original_experiment_usable(ser
         browser.close()
 
 
-@pytest.mark.parametrize("legacy_version", [1, 2])
-def test_legacy_source_defaults_are_kept_and_inactive_invalid_frames_rejected(
-    server_url: str, tmp_path: Path, legacy_version: int
+@pytest.mark.parametrize("unsupported_version", [1, 2])
+def test_unsupported_versions_preserve_scene_and_inactive_invalid_frames_reject(
+    server_url: str, tmp_path: Path, unsupported_version: int
 ) -> None:
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
@@ -330,21 +330,20 @@ def test_legacy_source_defaults_are_kept_and_inactive_invalid_frames_rejected(
         _prepare(page, server_url)
         _run(page)
         project = _save(page, tmp_path / "modern.json")
-        project["version"] = legacy_version
-        project.pop("history")
-        project["options"].pop("source")
-        project["options"].pop("background")
-        project["result"].pop("target_digest")
-        legacy_path = tmp_path / "legacy.json"
-        legacy_path.write_text(json.dumps(project), encoding="utf-8")
-        page.locator("#project-input").set_input_files(legacy_path)
-        expect(page.locator("#status")).to_contain_text("Restore or fork to continue")
-        expect(page.locator("#source-matte")).to_have_value("none")
+        project["version"] = unsupported_version
+        unsupported_path = tmp_path / "unsupported.json"
+        unsupported_path.write_text(json.dumps(project), encoding="utf-8")
+        before = page.locator("#result-canvas").evaluate("canvas => canvas.toDataURL()")
+        page.locator("#project-input").set_input_files(unsupported_path)
+        expect(page.locator("#status")).to_contain_text("only version 3")
+        assert page.locator("#result-canvas").evaluate("canvas => canvas.toDataURL()") == before
+        expect(page.locator("#run-button")).to_have_text("Continue")
+        expect(page.locator("#source-matte")).to_have_value("white")
         page.locator("#experiment-fork").click()
         expect(page.locator("#status")).to_contain_text("ready to Continue")
-        assert page.evaluate("restoreRequests.at(-1).options.source") == {"frame": 0, "matte": None}
-        roundtrip = _save(page, tmp_path / "legacy-roundtrip.json")
-        assert roundtrip["options"]["source"] == {"frame": 0, "matte": None}
+        assert page.evaluate("restoreRequests.at(-1).options.source") == {"frame": 0, "matte": [255, 255, 255]}
+        roundtrip = _save(page, tmp_path / "current-roundtrip.json")
+        assert roundtrip["options"]["source"] == {"frame": 0, "matte": [255, 255, 255]}
         bad = json.loads(json.dumps(roundtrip))
         bad["history"]["branches"][0]["parent_id"] = None
         bad["history"]["branches"][1]["parent_id"] = None
@@ -355,7 +354,7 @@ def test_legacy_source_defaults_are_kept_and_inactive_invalid_frames_rejected(
         page.locator("#project-input").set_input_files(bad_path)
         expect(page.locator("#status")).to_contain_text("frame outside the available source prefix")
         expect(page.locator("#run-button")).to_have_text("Continue")
-        expect(page.locator("#source-matte")).to_have_value("none")
+        expect(page.locator("#source-matte")).to_have_value("white")
         browser.close()
 
 

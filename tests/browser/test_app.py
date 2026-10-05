@@ -459,7 +459,7 @@ def test_failed_recovery_saves_only_the_last_confirmed_scene(server_url: str, tm
         browser.close()
 
 
-def test_preview_only_project_survives_save_reopen_and_new_render(server_url: str, tmp_path: Path) -> None:
+def test_incomplete_project_rejection_preserves_confirmed_scene_and_new_render(server_url: str, tmp_path: Path) -> None:
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
         page = browser.new_page()
@@ -469,46 +469,35 @@ def test_preview_only_project_survives_save_reopen_and_new_render(server_url: st
         with page.expect_download() as download_info:
             page.get_by_role("button", name="Save project", exact=True).click()
         download_info.value.save_as(source_path)
-        preview_only = json.loads(source_path.read_text(encoding="utf-8"))
-        preview_only["result"]["background"] = None
-        preview_only_path = tmp_path / "preview-only.geometrize-project.json"
-        preview_only_path.write_text(json.dumps(preview_only), encoding="utf-8")
+        confirmed = json.loads(source_path.read_text(encoding="utf-8"))
+        malformed = json.loads(json.dumps(confirmed))
+        malformed["result"]["background"] = None
+        malformed_path = tmp_path / "incomplete.geometrize-project.json"
+        malformed_path.write_text(json.dumps(malformed), encoding="utf-8")
+        pixels = page.locator("#result-canvas").evaluate("canvas => canvas.toDataURL()")
 
-        page.reload(wait_until="networkidle")
-        page.locator("#project-input").set_input_files(preview_only_path)
-        expect(page.locator("#status")).to_have_text("Project loaded — New render starts a fresh experiment")
-        expect(page.locator("#run-button")).to_be_disabled()
-        expect(page.locator("#result-preview")).to_be_visible()
-        expect(page.locator("#download-png")).to_have_attribute("aria-disabled", "true")
-        assert page.locator("#result-preview").get_attribute("src") == preview_only["result"]["preview_data_url"]
+        page.locator("#project-input").set_input_files(malformed_path)
+        expect(page.locator("#status")).to_contain_text("fitting grid and background")
+        expect(page.locator("#run-button")).to_have_text("Continue")
+        expect(page.locator("#result-canvas")).to_be_visible()
+        expect(page.locator("#download-png")).to_have_attribute("aria-disabled", "false")
+        assert page.locator("#result-canvas").evaluate("canvas => canvas.toDataURL()") == pixels
 
-        saved_path = tmp_path / "preview-only-resaved.geometrize-project.json"
+        saved_path = tmp_path / "retained.geometrize-project.json"
         with page.expect_download() as download_info:
             page.get_by_role("button", name="Save project", exact=True).click()
         download_info.value.save_as(saved_path)
         saved = json.loads(saved_path.read_text(encoding="utf-8"))
-        for key in ("preview_data_url", "width", "height", "render_width", "render_height"):
-            assert saved["result"][key] == preview_only["result"][key]
-        assert [shape["data"] for shape in saved["result"]["shapes"]] == [
-            shape["data"] for shape in preview_only["result"]["shapes"]
-        ]
-        assert saved["result"]["background"] is None
-        assert saved["telemetry"] == preview_only["telemetry"]
-
-        page.reload(wait_until="networkidle")
-        page.locator("#project-input").set_input_files(saved_path)
-        expect(page.locator("#status")).to_have_text("Project loaded — New render starts a fresh experiment")
-        expect(page.locator("#result-preview")).to_be_visible()
-        assert page.locator("#result-preview").get_attribute("src") == preview_only["result"]["preview_data_url"]
+        assert saved["result"] == confirmed["result"]
+        assert saved["telemetry"] == confirmed["telemetry"]
 
         page.locator("#restart-button").click()
         page.locator("#steps-number").fill("1")
         page.get_by_role("button", name="Run", exact=True).click()
         page.get_by_role("button", name="Continue", exact=True).wait_for(timeout=120_000)
-        expect(page.locator("#result-preview")).to_be_hidden()
         expect(page.locator("#result-canvas")).to_be_visible()
         rendered_preview = page.locator("#result-canvas").evaluate("canvas => canvas.toDataURL()")
-        assert rendered_preview != preview_only["result"]["preview_data_url"]
+        assert rendered_preview != pixels
 
         rendered_path = tmp_path / "new-render.geometrize-project.json"
         with page.expect_download() as download_info:
@@ -516,10 +505,11 @@ def test_preview_only_project_survives_save_reopen_and_new_render(server_url: st
         download_info.value.save_as(rendered_path)
         rendered = json.loads(rendered_path.read_text(encoding="utf-8"))
         assert len(rendered["result"]["shapes"]) == 1
-        assert rendered["result"]["preview_data_url"] == rendered_preview
+        assert rendered["result"]["preview_data_url"] is None
         assert len(rendered["history"]["branches"]) == 2
         retained = rendered["history"]["branches"][0]["result"]
-        assert retained["preview_data_url"] == preview_only["result"]["preview_data_url"]
+        assert retained["shapes"] == confirmed["result"]["shapes"]
+        assert retained["background"] == confirmed["result"]["background"]
         browser.close()
 
 
@@ -546,6 +536,10 @@ def test_project_geometry_uses_shared_scene_limits(server_url: str) -> None:
             "options": contract["defaults"],
             "result": {**scene, "render_width": 8, "render_height": 8, "preview_data_url": None},
             "telemetry": {"attempts": 1, "duration_ms": 0, "initial_score": 0.9, "batches": []},
+            "history": {"active_branch": "original", "view_shape_count": 1, "branches": [
+                {"id": "original", "name": "Original", "parent_id": None, "fork_shape_count": 0,
+                 "options": contract["defaults"]},
+            ]},
         }
 
         def client_error() -> str | None:
@@ -575,6 +569,44 @@ def test_project_geometry_uses_shared_scene_limits(server_url: str) -> None:
           try { validateProject(project, contract); return null; }
           catch (error) { return error.message; }
         }""", {"project": project, "contract": narrow_contract}) or "")
+        browser.close()
+
+
+def test_empty_current_draft_saves_without_png_encoding_and_reopens(server_url: str, tmp_path: Path) -> None:
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = browser.new_page()
+        page.goto(server_url, wait_until="networkidle")
+        page.get_by_role("button", name="Sample", exact=True).click()
+        expect(page.locator("#status")).to_have_text("Ready")
+        for primitive in page.locator('input[name="shape"]').all():
+            primitive.uncheck()
+        page.locator("#max-size-number").fill("8192")
+        page.evaluate("""() => {
+          window.pngEncodes=0;
+          const original=HTMLCanvasElement.prototype.toDataURL;
+          HTMLCanvasElement.prototype.toDataURL=function(...args) {
+            pngEncodes++;return original.apply(this,args);
+          };
+        }""")
+        path = tmp_path / "blank-draft.geometrize-project.json"
+        with page.expect_download() as download:
+            page.get_by_role("button", name="Save project", exact=True).click()
+        download.value.save_as(path)
+        saved = json.loads(path.read_text(encoding="utf-8"))
+        assert page.evaluate("pngEncodes") == 0
+        assert saved["version"] == 3
+        assert saved["options"]["shape_types"] == []
+        assert saved["options"]["max_size"] == 8192
+        assert saved["result"]["shapes"] == []
+        assert saved["result"]["background"] is None
+        assert saved["result"]["preview_data_url"] is None
+        assert len(saved["history"]["branches"]) == 1
+        page.locator("#project-input").set_input_files(path)
+        expect(page.locator("#status")).to_have_text("Project loaded — Run starts a new render")
+        expect(page.locator("#max-size-number")).to_have_value("8192")
+        assert page.locator('input[name="shape"]:checked').count() == 0
+        expect(page.locator("#result-canvas")).to_be_hidden()
         browser.close()
 
 

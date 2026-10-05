@@ -149,7 +149,7 @@ def validate_scene(raw: Any) -> RenderScene:
 
 
 def validate_shapes(shapes: Any, width: int = 0, height: int = 0) -> list[dict[str, Any]]:
-    """Canonicalize bounded geometry, including legacy heads without a canvas."""
+    """Canonicalize bounded geometry before complete canvas validation."""
     width = _integer(width, 0, MAX_SOURCE_DIMENSION, "result width")
     height = _integer(height, 0, MAX_SOURCE_DIMENSION, "result height")
     inspect_scene({"shapes": shapes})

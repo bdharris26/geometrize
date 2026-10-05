@@ -32,15 +32,20 @@ def _shape(**data):
 
 
 def _raw(version=3, *, complete=True):
-    return {
+    raw = {
         "format": "geometrize-project", "version": version, "saved_at": "ignored",
         "source": {"name": "Source", "data_url": _SOURCE, "width": 640, "height": 480},
         "options": {**copy.deepcopy(OPTION_DEFAULTS), "shape_types": ["rectangle"], "max_size": 64, "export_size": 64},
         "result": {"width": 64 if complete else None, "height": 48 if complete else None,
                    "background": [10, 20, 30, 255] if complete else None,
-                   "shapes": [_shape(), _shape(x1=20, x2=30)], "preview_data_url": None},
+                   "shapes": [_shape(), _shape(x1=20, x2=30)] if complete else [], "preview_data_url": None},
         "telemetry": {"attempts": 9, "duration_ms": 100, "initial_score": 0.9, "batches": []},
     }
+    raw["history"] = {"active_branch": "experiment-1", "view_shape_count": len(raw["result"]["shapes"]), "branches": [
+        {"id": "experiment-1", "name": "Original", "parent_id": None, "fork_shape_count": 0,
+         "options": copy.deepcopy(raw["options"])},
+    ]}
+    return raw
 
 
 def _graph():
@@ -55,10 +60,9 @@ def _graph():
     return raw
 
 
-@pytest.mark.parametrize("version", [1, 2, 3])
 @pytest.mark.parametrize("complete", [True, False])
-def test_legacy_and_current_projects_migrate_idempotently_without_reencoding_source(version, complete) -> None:
-    raw = _raw(version, complete=complete)
+def test_current_projects_validate_idempotently_without_reencoding_source(complete) -> None:
+    raw = _raw(complete=complete)
     original = copy.deepcopy(raw)
     normalized = validate_project(raw)
     assert normalized["version"] == PROJECT_VERSION
@@ -69,6 +73,23 @@ def test_legacy_and_current_projects_migrate_idempotently_without_reencoding_sou
     assert "saved_at" not in normalized
     assert loads_project(dumps_project(normalized)) == normalized
     assert raw == original
+
+
+@pytest.mark.parametrize("version", [None, True, 0, 1, 2, 4, "3"])
+def test_unsupported_project_versions_reject_before_geometry_validation(version, monkeypatch) -> None:
+    raw = _raw(version)
+    monkeypatch.setattr(project, "validate_shapes", lambda *_args: pytest.fail("Unsupported project copied geometry"))
+    with pytest.raises(ProjectError, match="only version 3") as error:
+        validate_project(raw)
+    assert error.value.code == "unsupported_version"
+
+
+@pytest.mark.parametrize("history", [None, {}, []])
+def test_current_projects_require_an_explicit_experiment_graph(history) -> None:
+    raw = _raw()
+    raw["history"] = history
+    with pytest.raises(ProjectError, match="history"):
+        validate_project(raw)
 
 
 def test_active_top_level_options_are_authoritative_before_source_graph_comparison() -> None:
@@ -88,18 +109,18 @@ def test_active_top_level_options_are_authoritative_before_source_graph_comparis
         validate_project(raw)
 
 
-def test_project_options_match_nullish_legacy_defaults_without_clamping() -> None:
-    raw = _raw(1)
-    raw["options"] = {"shape_types": ["circle", "circle", "ellipse"], "max_size": 256, "steps": None,
-                      "seed": None, "export_size": None}
+def test_omitted_project_options_use_independent_defaults_without_clamping() -> None:
+    raw = _raw()
+    raw["options"] = {"shape_types": ["circle", "circle", "ellipse"], "max_size": 256}
     normalized = validate_project(raw)
     assert normalized["options"]["steps"] == OPTION_DEFAULTS["steps"]
     assert normalized["options"]["seed"] == OPTION_DEFAULTS["seed"]
-    assert normalized["options"]["export_size"] == 256
+    assert normalized["options"]["export_size"] == OPTION_DEFAULTS["export_size"]
     assert normalized["options"]["shape_types"] == ["circle", "ellipse"]
-    raw["options"]["steps"] = 5000
-    with pytest.raises(ProjectError, match="steps"):
-        validate_project(raw)
+    for value in (None, False, 5000):
+        raw["options"]["steps"] = value
+        with pytest.raises(ProjectError, match="steps"):
+            validate_project(raw)
 
 
 def test_integral_json_decimals_match_browser_numbers_without_weakening_native_options() -> None:
@@ -136,6 +157,7 @@ def test_integral_json_decimals_match_browser_numbers_without_weakening_native_o
 @pytest.mark.parametrize("changes", [
     {"shape_types": "circle"}, {"shape_types": [{}]}, {"alpha": True}, {"seed": 10**10000},
     {"max_size": None, "export_size": None}, {"focus": {"x": False, "y": 0}},
+    {"unsupported_option": True},
     {"source": {"frame": None}}, {"palette": {"colors": [[0, 0, 0]], "strength": None}},
 ])
 def test_project_options_reject_invalid_values(changes) -> None:
@@ -145,8 +167,8 @@ def test_project_options_reject_invalid_values(changes) -> None:
         validate_project(raw)
 
 
-def test_empty_legacy_options_and_empty_heads_remain_inspectable_without_invented_geometry() -> None:
-    raw = _raw(1, complete=False)
+def test_empty_ui_drafts_remain_inspectable_without_invented_geometry() -> None:
+    raw = _raw(complete=False)
     raw["options"]["shape_types"] = []
     raw["result"]["shapes"] = []
     normalized = validate_project(raw)
@@ -161,8 +183,8 @@ def test_empty_legacy_options_and_empty_heads_remain_inspectable_without_invente
 
 
 @pytest.mark.parametrize("axis", ["width", "height"])
-def test_legacy_geometry_grid_uses_each_render_dimension_independently(axis) -> None:
-    raw = _raw(1)
+def test_fitting_grid_uses_each_render_dimension_independently(axis) -> None:
+    raw = _raw()
     raw["result"].update(width=400, height=200, **{f"render_{axis}": 100})
     normalized = validate_project(raw)
     scene = project_scene(normalized)
@@ -187,14 +209,10 @@ def test_native_free_scene_export_selects_head_by_default_and_explicit_prefix(mo
     assert error.value.code == "unknown_branch"
 
 
-@pytest.mark.parametrize("complete", [True, False])
 @pytest.mark.parametrize("broken", ["coordinate", "color", "score", "type-id", "radius", "points"])
-def test_every_inactive_and_preview_only_shape_is_validated_on_load(complete, broken) -> None:
+def test_every_inactive_shape_is_validated_on_load(broken) -> None:
     raw = _graph()
     result = raw["history"]["branches"][0]["result"]
-    if not complete:
-        for head in (raw["result"], result):
-            head.update(width=None, height=None, background=None)
     shape = result["shapes"][0]
     if broken == "coordinate":
         shape["data"]["x1"] = 10**20
@@ -249,7 +267,7 @@ def test_invalid_graph_metadata_rejects_before_geometry_copy(monkeypatch, broken
         validate_project(raw)
 
 
-def test_digest_case_normalization_and_legacy_missing_digest_do_not_change_graph_identity() -> None:
+def test_optional_digest_and_case_normalization_do_not_change_graph_identity() -> None:
     raw = _graph()
     raw["result"]["target_digest"] = "a" * 64
     raw["history"]["branches"][0]["result"]["target_digest"] = "A" * 64
@@ -296,7 +314,7 @@ def test_retained_shape_count_remains_strict(retained) -> None:
 
 def test_json_reads_reject_oversize_invalid_and_nonfinite_content_before_validation(tmp_path, monkeypatch) -> None:
     path = tmp_path / "project.json"
-    path.write_text(dumps_project(validate_project(_raw(1))), encoding="utf-8")
+    path.write_text(dumps_project(validate_project(_raw())), encoding="utf-8")
     assert load_project(path) == loads_project(path.read_bytes())
     for content in (b"{}", b"[{}]", b'{"value":NaN}', b"\xff"):
         with pytest.raises(ProjectError):
@@ -462,7 +480,7 @@ def test_snapshot_replacement_preserves_digest_and_updates_only_its_detached_bra
     assert error.value.code == "frozen_target" and original == before
 
 
-def test_serialization_prunes_generated_previews_but_preserves_essential_legacy_images(monkeypatch) -> None:
+def test_cached_previews_are_validated_and_discarded_without_changing_source_or_geometry(monkeypatch) -> None:
     raw = _graph()
     preview = "data:image/png;base64," + "a" * 2000
     raw["result"]["preview_data_url"] = preview
@@ -472,10 +490,42 @@ def test_serialization_prunes_generated_previews_but_preserves_essential_legacy_
     serialized = loads_project(dumps_project(normalized))
     assert serialized["result"]["preview_data_url"] is None
     assert project_branch(serialized, "parent")["result"]["preview_data_url"] is None
-    assert normalized["result"]["preview_data_url"] == preview
-    legacy = _raw(1, complete=False)
-    legacy["result"]["shapes"] = []
-    legacy["result"]["preview_data_url"] = preview
-    monkeypatch.setattr(project, "PROJECT_MAX_BYTES", 3000)
-    with pytest.raises(ProjectError, match="after omitting"):
-        dumps_project(validate_project(legacy))
+    assert normalized["result"]["preview_data_url"] is None
+    assert raw["result"]["preview_data_url"] == preview
+    assert serialized["source"] == normalized["source"]
+    assert serialized["result"]["shapes"] == normalized["result"]["shapes"]
+    monkeypatch.setattr(project, "PROJECT_MAX_BYTES", 128)
+    with pytest.raises(ProjectError, match="exceeds 64 MiB"):
+        dumps_project(serialized)
+
+
+@pytest.mark.parametrize("preview", ["", "http://example.com/preview.png", "data:image/svg+xml;base64,YWJj", True])
+def test_unsupported_cached_previews_are_not_silently_accepted(preview) -> None:
+    raw = _raw()
+    raw["result"]["preview_data_url"] = preview
+    with pytest.raises(ProjectError, match="result preview"):
+        validate_project(raw)
+
+
+@pytest.mark.parametrize("location", ["background", "color"])
+def test_rgba_arrays_require_exactly_four_channels(location) -> None:
+    raw = _raw()
+    if location == "background":
+        raw["result"]["background"] = [10, 20, 30, 255, 0]
+    else:
+        raw["result"]["shapes"][0]["color"] = [10, 20, 30, 255, 0]
+    with pytest.raises(ProjectError, match="four RGBA"):
+        validate_project(raw)
+
+
+@pytest.mark.parametrize("change", [
+    {"background": None}, {"width": None}, {"height": None},
+    {"width": None, "height": None, "background": None, "shapes": [], "preview_data_url": _SOURCE},
+])
+@pytest.mark.parametrize("inactive", [False, True])
+def test_incomplete_and_bitmap_only_heads_reject_in_every_experiment(change, inactive) -> None:
+    raw = _graph()
+    result = raw["history"]["branches"][0]["result"] if inactive else raw["result"]
+    result.update(change)
+    with pytest.raises(ProjectError, match="fitting grid and background"):
+        validate_project(raw)
